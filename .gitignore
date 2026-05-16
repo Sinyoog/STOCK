@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+stock_data.db
+save_game.json
+fix.py
+*.zip
