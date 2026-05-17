@@ -49,23 +49,50 @@ class MacroEngine:
                 elif cy >= 2050 and self.s.gri >= 150000 and not is_depression:
                     evolution_chance = 0.05 / 252
 
-        # 예약
+        # ── 테크 도약 예약 ────────────────────────────────────────
         if evolution_chance > 0 and random.random() < evolution_chance:
-            jump_date = self.s.current_date + timedelta(days=30)
+            jump_date    = self.s.current_date + timedelta(days=30)
+            target_lv    = current_lv + 1
+            lv_name      = {2: "2단계 (모바일·클라우드 혁명)",
+                            3: "3단계 (AI·양자 혁명)",
+                            4: "4단계 (기술 특이점)"}.get(target_lv, f"{target_lv}단계")
+
             self.s.pending_events["tech_jump"] = {
-                "target_lv": current_lv + 1,
+                "target_lv": target_lv,
                 "date":      jump_date,
+                "lv_name":   lv_name,
+                "notified":  False,   # 프리미엄 뉴스 발송 여부
             }
 
-        # D-Day 실행
+        # ── D-30 프리미엄 예고 뉴스 (예약 직후 1회만) ─────────────
         if self.s.pending_events.get("tech_jump"):
             jump_info = self.s.pending_events["tech_jump"]
-            if self.s.current_date.date() >= jump_info["date"].date():
-                self.s.max_tech_reached = jump_info["target_lv"]
-                if not self.s.silent_mode:
+
+            if not jump_info.get("notified"):
+                jump_info["notified"] = True
+                lv_name  = jump_info.get("lv_name", "")
+                d_date   = jump_info["date"]
+                date_str = d_date.strftime('%Y년 %m월 %d일')
+
+                # 프리미엄 전용 예고 (항상 뉴스 발송 — 주말 포함)
+                if self.s.has_paid_news_access:
                     self.s.daily_news.append(
-                        f"🚀 [시대 진화] {cy}년, 문명이 {self.s.max_tech_reached}단계로 도약했습니다!"
+                        f"💎 [테크 도약 D-30 예고] {cy}년, {date_str}에 문명이 {lv_name}로 도약합니다! "
+                        f"(프리미엄 전용 정보)"
                     )
+
+            # ── D-Day 실행 ────────────────────────────────────────
+            jump_info = self.s.pending_events["tech_jump"]
+            if self.s.current_date.date() >= jump_info["date"].date():
+                new_lv   = jump_info["target_lv"]
+                lv_name  = jump_info.get("lv_name", f"{new_lv}단계")
+                self.s.max_tech_reached = new_lv
+
+                # 무료 뉴스 — 주말 포함 무조건 발송
+                self.s.daily_news.append(
+                    f"🚀 [시대 진화] {cy}년, 문명이 {lv_name}로 도약했습니다! "
+                    f"산업 전반에 대규모 기술 혁신이 시작됩니다."
+                )
                 self.s.pending_events["tech_jump"] = None
 
         return self.s.max_tech_reached

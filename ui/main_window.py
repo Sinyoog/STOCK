@@ -75,6 +75,11 @@ class StockHTS(QMainWindow):
         self.news_window = NewsWindow(self, game_service, news_service, self)
         self.news_window.hide()
 
+        # 필터 다이얼로그 (싱글턴 — 닫혀도 조건 유지)
+        self.filter_dialog = StockFilterDialog(self)
+        self.active_dialogs.append(self.filter_dialog)
+        self.filter_dialog.hide()
+
         self._init_ui()
         self.sync_ui_with_engine()
 
@@ -153,6 +158,7 @@ class StockHTS(QMainWindow):
         self.stock_table = QTableWidget(0, 3)
         self.stock_table.setHorizontalHeaderLabels(["종목명", "현재가", "등락율"])
         self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.stock_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.stock_table.cellClicked.connect(self.on_stock_clicked)
         left_panel.addWidget(self.stock_table)
         content_lay.addLayout(left_panel, 2)
@@ -440,13 +446,9 @@ class StockHTS(QMainWindow):
             self.news_window.show()
 
     def open_stock_filter_window(self):
-        existing = next((d for d in self.active_dialogs if isinstance(d, StockFilterDialog)), None)
-        if existing:
-            existing.raise_(); existing.activateWindow()
-        else:
-            d = StockFilterDialog(self)
-            self.active_dialogs.append(d)
-            d.show()
+        self.filter_dialog.show()
+        self.filter_dialog.raise_()
+        self.filter_dialog.activateWindow()
 
     def open_system_menu(self):
         SystemMenuDialog(self).exec()
@@ -581,7 +583,7 @@ class StockHTS(QMainWindow):
         f_dialog = next((d for d in self.active_dialogs if isinstance(d, StockFilterDialog)), None)
 
         for snap in snaps:
-            if f_dialog and f_dialog.isVisible():
+            if f_dialog:  # 닫혀있어도 필터 조건 유지
                 m   = snap['meta']
                 tier = m.get('tier', '소형주')
 
@@ -719,12 +721,16 @@ class StockHTS(QMainWindow):
         self.baseline.setPos(base_p)
         self.curve.setData(smoothed)
 
-        if smoothed:
-            y_min, y_max = min(smoothed), max(smoothed)
-            y_range = max(1.0, y_min * 0.01) if y_min == y_max else 0
-            self.chart_widget.setYRange(y_min - y_range, y_max + y_range)
+        # Y축 범위는 raw prices 전체 기준 (압축된 disp가 아닌 실제 데이터)
+        raw_for_range = prices if self.current_tf != "1일" else smoothed
+        if raw_for_range:
+            y_min = min(raw_for_range)
+            y_max = max(raw_for_range)
+            y_pad = max(1.0, (y_max - y_min) * 0.05) if y_min != y_max else y_min * 0.01
+            self.chart_widget.setYRange(y_min - y_pad, y_max + y_pad)
 
-        self._update_chart_markers(smoothed)
+        # 마커에 raw prices 전달 → 실제 최고/최저 표시
+        self._update_chart_markers(smoothed, prices if self.current_tf != "1일" else None)
         self.change_summary_label.setText(
             f"<span style='color:#ffffff;'>{self.current_tf} 기준: </span>"
             f"<span style='color:#aaaaaa;'>{int(base_p):,}원</span>"
@@ -733,7 +739,7 @@ class StockHTS(QMainWindow):
             f"<span style='color:{c_hex};'>({sign}{int(abs(diff)):,}원, {period_r:+.2f}%)</span>"
         )
 
-    def _update_chart_markers(self, smoothed: list):
+    def _update_chart_markers(self, smoothed: list, raw_prices: list = None):
         for attr in ['max_scatter', 'min_scatter', 'max_text', 'min_text']:
             if hasattr(self, attr):
                 try: self.chart_widget.removeItem(getattr(self, attr))
@@ -741,8 +747,18 @@ class StockHTS(QMainWindow):
 
         if self.current_tf == "1일" or not smoothed or len(smoothed) < 2: return
 
-        max_val = max(smoothed); min_val = min(smoothed)
-        max_idx = smoothed.index(max_val); min_idx = smoothed.index(min_val)
+        # raw_prices가 있으면 실제 최고/최저 사용, 없으면 smoothed 기준
+        if raw_prices and len(raw_prices) > 0:
+            real_max = max(raw_prices)
+            real_min = min(raw_prices)
+            # smoothed에서 가장 가까운 인덱스 위치 찾기 (마커 x 좌표)
+            max_idx = min(range(len(smoothed)), key=lambda i: abs(smoothed[i] - real_max))
+            min_idx = min(range(len(smoothed)), key=lambda i: abs(smoothed[i] - real_min))
+            max_val = real_max
+            min_val = real_min
+        else:
+            max_val = max(smoothed); min_val = min(smoothed)
+            max_idx = smoothed.index(max_val); min_idx = smoothed.index(min_val)
         n = len(smoothed)
 
         self.max_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#FF4444'), symbol='o')
@@ -781,17 +797,72 @@ class StockHTS(QMainWindow):
         all_snaps = sorted(self.game_service.s.stocks, key=lambda x: x.get('market_cap', 0), reverse=True)
         rank  = next((i + 1 for i, s in enumerate(all_snaps) if s['meta'].get('c_name') == m.get('c_name')), 0)
 
+        # ── HP / Shield 수치 ─────────────────────────────────────
+        hp       = m.get('hp', 0.0)
+        soft_cap = m.get('hp_soft_cap', 60.0)
+        shield   = m.get('shield', 0.0)
+        hp_ratio = hp / max(1.0, soft_cap)
+
+        # HP 게이지 바 (10칸)
+        filled = round(hp_ratio * 10)
+        hp_bar = '■' * filled + '□' * (10 - filled)
+
+        # HP 비율별 색상
+        if hp_ratio >= 0.60:
+            hp_color = '#00FF00'
+        elif hp_ratio >= 0.30:
+            hp_color = '#FFA500'
+        else:
+            hp_color = '#FF4444'
+
+        # 쉴드 단위 변환
+        if shield >= 1_000_000_000_000:
+            shield_str = f"{shield / 1_000_000_000_000:.2f}조"
+        elif shield >= 100_000_000:
+            shield_str = f"{shield / 100_000_000:.1f}억"
+        else:
+            shield_str = f"{shield:,.0f}원"
+
+        shield_active = hp_ratio < 0.30 and shield > 0
+        shield_label  = "🛡️ 발동중" if shield_active else "대기중"
+        shield_color  = '#00FFFF' if shield_active else '#888888'
+
+        # ── 경고 뱃지 ────────────────────────────────────────────
+        warning_info  = self.game_service.s.pending_events.get("warning", {}).get(m['c_name'])
         warning_badge = ""
-        if "WARNING" in str(m.get('char', '')):
-            if m.get('risk_score', 0) >= 100:
-                warning_badge = "<span style='background-color:#FF0000;color:white;padding:2px 6px;border-radius:3px;font-size:13px;margin-left:5px;'>🚨 상장폐지위험</span>"
-            else:
-                warning_badge = "<span style='background-color:#FFA500;color:black;padding:2px 6px;border-radius:3px;font-size:13px;font-weight:bold;margin-left:5px;'>⚠️ 투자경고</span>"
+        char          = str(m.get('char', ''))
+
+        if hp <= 0:
+            warning_badge = "<span style='background-color:#FF0000;color:white;padding:2px 6px;border-radius:3px;font-size:13px;margin-left:5px;'>☠️ 상장폐지확정</span>"
+        elif warning_info and warning_info.get('type') == 'IN':
+            days_left = (warning_info['date'] - self.game_service.s.current_date).days
+            warning_badge = f"<span style='background-color:#FF6600;color:white;padding:2px 6px;border-radius:3px;font-size:13px;margin-left:5px;'>⚠️ 투자경고 지정 예정 (D-{days_left})</span>"
+        elif "WARNING" in char:
+            warning_badge = "<span style='background-color:#FFA500;color:black;padding:2px 6px;border-radius:3px;font-size:13px;font-weight:bold;margin-left:5px;'>⚠️ 투자경고</span>"
+        elif warning_info and warning_info.get('type') == 'OUT':
+            days_left = (warning_info['date'] - self.game_service.s.current_date).days
+            warning_badge = f"<span style='background-color:#007700;color:white;padding:2px 6px;border-radius:3px;font-size:13px;margin-left:5px;'>🍀 경고해제 예정 (D-{days_left})</span>"
 
         vals  = [m.get(k, 0) * 100 for k in ['treasury_share','owner_share','foreign_share','inst_share','retail_share']]
         total = sum(vals)
         ts, os, fs, ins, rs = [(v / total * 100 if total > 0 else v) for v in vals]
         size  = {"대형주": "[대기업]", "중형주": "[중견기업]", "소형주": "[중소기업]"}.get(m.get('tier','소형주'), "[중소기업]")
+
+        # 시총 단위 변환 (경/조/억/원)
+        def fmt_cap(v):
+            if v >= 1_000_000_000_000_000_0:
+                return f"{v/1_000_000_000_000_000_0:.2f}경"
+            elif v >= 1_000_000_000_000_000:
+                return f"{v/1_000_000_000_000_000:.1f}천조"
+            elif v >= 1_000_000_000_000:
+                return f"{v/1_000_000_000_000:.2f}조"
+            elif v >= 100_000_000:
+                return f"{v/100_000_000:.0f}억"
+            else:
+                return f"{v:,.0f}원"
+
+        mc      = stock['market_cap']
+        mc_str  = fmt_cap(mc)
 
         self.report_panel.setHtml(f"""
         <div style='font-family: Malgun Gothic;'>
@@ -804,15 +875,26 @@ class StockHTS(QMainWindow):
             그룹: {m.get('group','단독기업')}<br/>
             규모: <b style='color:#FFD700;'>{size}</b><br/>
             산업: {m['ind']} ({m['sub']})<br/>
-            상태: <b style='color:#00FF00;'>{m['char']}</b></p>
+            상태: <b style='color:#00FF00;'>{char}</b></p>
             <p style='font-size:13px;'><b>[발행 정보]</b><br/>
-            주식수: {stock['shares']:,} 주<br/>시총: {stock['market_cap']:,} 원</p>
+            주식수: {stock['shares']:,} 주<br/>
+            시총: {mc:,} 원
+            <span style='color:#FFD700;font-weight:bold;'> ({mc_str})</span></p>
             <hr style='border: 0.5px solid #333;'/>
             <p style='font-size:13px;'><b>[지배구조]</b><br/>
             자사주: {ts:.1f}% | 대주주: {os:.1f}%<br/>
             외국인: {fs:.1f}% | 기관 : {ins:.1f}%<br/>
             개인 : {rs:.1f}%</p>
-            <p style='color:#FF4444;font-size:14px;'><b>리스크: {m['risk_score']:.2f} / 150</b></p>
+            <hr style='border: 0.5px solid #333;'/>
+            <p style='font-size:14px;'><b>[재무 체력]</b></p>
+            <p style='font-size:20px;font-family:monospace;letter-spacing:2px;margin:4px 0;'>
+            <span style='color:{hp_color};'>{hp_bar}</span></p>
+            <p style='font-size:15px;font-weight:bold;margin:4px 0;'>
+            <span style='color:{hp_color};'>HP {hp:.2f} / {soft_cap:.0f}</span>
+            <span style='color:#888;font-size:13px;'> ({hp_ratio*100:.1f}%)</span></p>
+            <p style='font-size:14px;margin:4px 0;'>
+            <span style='color:{shield_color};'>방어막 {shield_str}</span>
+            <span style='color:{shield_color};font-size:12px;'> [{shield_label}]</span></p>
         </div>""")
 
     # ─────────────────────────────────────────────

@@ -35,24 +35,33 @@ class GameService:
         import random
         print("🚀 [시스템] v19.0 가치 본위 엔진 가동 중...")
 
-        # 그룹사 생성
+        # ── 그룹사 생성 (5그룹 × 2종목 = 10개, 모두 대기업) ──────
         for gn in ["제니스", "서한", "가온", "범양", "버거"]:
             gid = f"GROUP_{gn}"
             self.s.groups[gid] = {"name": gn, "active": True}
-            for i, ind in enumerate(random.sample(MAIN_INDUSTRIES, 2)):
-                tier = "대" if i == 0 else "중"
-                self.s.stocks.append(self.cm.create_stock_data(None, ind, tier, gid))
+            for ind in random.sample(MAIN_INDUSTRIES, 2):
+                self.s.stocks.append(self.cm.create_stock_data(None, ind, "대", gid))
 
-        for _ in range(random.randint(25, 30)):
+        # ── 독립 대기업 5개 ───────────────────────────────────────
+        for _ in range(5):
             self.s.stocks.append(
-                self.cm.create_stock_data(
-                    random.choice(NAME_DB),
-                    random.choice(MAIN_INDUSTRIES),
-                    "소"
-                )
+                self.cm.create_stock_data(random.choice(NAME_DB), random.choice(MAIN_INDUSTRIES), "대")
             )
 
-        self.cm.reassign_tiers_by_cap(self.s.stocks, self.s.daily_news)
+        # ── 독립 중견 25개 ───────────────────────────────────────
+        for _ in range(25):
+            self.s.stocks.append(
+                self.cm.create_stock_data(random.choice(NAME_DB), random.choice(MAIN_INDUSTRIES), "중")
+            )
+
+        # ── 독립 중소 10개 ───────────────────────────────────────
+        for _ in range(10):
+            self.s.stocks.append(
+                self.cm.create_stock_data(random.choice(NAME_DB), random.choice(MAIN_INDUSTRIES), "소")
+            )
+
+        # reassign_tiers_by_cap은 초기화 시 호출하지 않음
+        # (tier를 직접 지정해서 생성하므로 재배정 불필요)
 
         date_str   = self.s.current_date.strftime('%Y-%m-%d')
         db_records = []
@@ -190,11 +199,23 @@ class GameService:
         if self.s.current_date.year < 2045:
             self.s.world_line          = "Normal"
             self.s.reserved_scenario   = target
+            self.s._branch_news_sent   = False  # 분기점 뉴스 재발송 허용
             return f"🔮 [미래 예약] 2050~2060년 분기점 운명이 '{target}'로 고정되었습니다."
         else:
-            self.s.world_line          = "Decided"
-            self.s.current_scenario    = target
-            return f"✅ 시나리오를 '{target}'로 변경했습니다."
+            # 대공황 극복 시나리오: 30일 후 전환 예약
+            if "극복" in target or "대공황V" in target:
+                from datetime import timedelta
+                recovery_date = self.s.current_date + timedelta(days=30)
+                self.s.pending_events["recovery"] = {
+                    "date":     recovery_date,
+                    "scenario": target,
+                    "notified": False,
+                }
+                return f"🔮 [극복 예약] 30일 후({recovery_date.strftime('%Y-%m-%d')}) '{target}' 시나리오가 발동됩니다."
+            else:
+                self.s.world_line          = "Decided"
+                self.s.current_scenario    = target
+                return f"✅ 시나리오를 '{target}'로 변경했습니다."
 
     # ─────────────────────────────────────────────
     # 게임 저장 / 불러오기

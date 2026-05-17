@@ -117,6 +117,21 @@ class CompanyManager:
 
         ind_levels = INDUSTRY_LEVELS.get(ind, {}).get(actual_lv, ["기본 산업"])
 
+        # 6. HP / Shield 초기값 계산
+        # ┌ 체급별 스펙 ──────────────────────────────────────────────
+        # │ 대형주: soft_cap=100, 시작 hp=100, shield=시총×1.5%
+        # │ 중형주: soft_cap=80,  시작 hp=80,  shield=시총×0.3%
+        # │ 소형주: soft_cap=60,  시작 hp=50,  shield=0  (성장 여력)
+        # └──────────────────────────────────────────────────────────
+        initial_market_cap = float(p * s_count)
+        hp_spec = {
+            "대": {"soft_cap": 100.0, "hp": 75.0, "shield_ratio": 0.015},
+            "중": {"soft_cap": 80.0,  "hp": 55.0, "shield_ratio": 0.003},
+            "소": {"soft_cap": 60.0,  "hp": 35.0, "shield_ratio": 0.0},
+        }.get(tier, {"soft_cap": 60.0, "hp": 35.0, "shield_ratio": 0.0})
+
+        init_shield = initial_market_cap * hp_spec["shield_ratio"]
+
         return {
             "meta": {
                 "c_name":               full_name,
@@ -129,7 +144,16 @@ class CompanyManager:
                 "ind":                  ind,
                 "sub":                  random.choice(ind_levels),
                 "char":                 "Normal",
+                # ── 구형 호환용 (market.py 교체 전까지 유지) ──────
                 "risk_score":           0.0,
+                # ── HP / Shield 시스템 ────────────────────────────
+                "hp":                   hp_spec["hp"],
+                "hp_soft_cap":          hp_spec["soft_cap"],
+                "shield":               init_shield,
+                # ── 티어 심사용 카운터 ────────────────────────────
+                "cap_exceed_days":      0,   # 시총 기준 초과 유지일수 (승급용)
+                "cap_below_days":       0,   # 시총 기준 미달 유지일수 (강등용)
+                # ──────────────────────────────────────────────────
                 "delist_timer":         0,
                 "split_count":          0,
                 "merge_count":          0,
@@ -159,17 +183,57 @@ class CompanyManager:
         b_lim = max(1, int(total * 0.11))
         m_lim = max(1, int(total * 0.33))
 
-        for i, s in enumerate(stocks):
-            old_tier = s['meta']['tier']
-            if i < b_lim:
-                s['meta']['tier'] = "대형주"
-            elif i < m_lim:
-                s['meta']['tier'] = "중형주"
-            else:
-                s['meta']['tier'] = "소형주"
+        # 체급별 HP 스펙 테이블
+        _HP_SPEC = {
+            "대형주": {"soft_cap": 100.0, "sensitivity": 0.1, "shield_ratio": 0.015},
+            "중형주": {"soft_cap": 80.0,  "sensitivity": 0.5, "shield_ratio": 0.003},
+            "소형주": {"soft_cap": 60.0,  "sensitivity": 1.2, "shield_ratio": 0.0},
+        }
 
-            if not silent and old_tier == "대형주" and s['meta']['tier'] == "중형주":
-                daily_news.append(f"📉 [체급강등] {s['meta']['c_name']}이 시가총액 밀려나며 중견기업으로 강등되었습니다.")
+        for i, s in enumerate(stocks):
+            meta     = s['meta']
+            old_tier = meta['tier']
+
+            if i < b_lim:
+                meta['tier'] = "대형주"
+            elif i < m_lim:
+                meta['tier'] = "중형주"
+            else:
+                meta['tier'] = "소형주"
+
+            # 티어가 바뀐 경우 HP 스펙 재조정
+            if old_tier != meta['tier']:
+                spec     = _HP_SPEC[meta['tier']]
+                new_cap  = spec["soft_cap"]
+                old_cap  = meta.get('hp_soft_cap', new_cap)
+
+                # hp_soft_cap 갱신 + hp는 비율 보존 (갑자기 죽거나 풀피 되는 것 방지)
+                old_hp   = meta.get('hp', old_cap)
+                hp_ratio = old_hp / max(1.0, old_cap)
+                meta['hp_soft_cap']   = new_cap
+                meta['hp']            = round(min(new_cap, hp_ratio * new_cap), 2)
+                meta['risk_sensitivity'] = spec["sensitivity"]
+
+                # 쉴드: 승격 시 시총 기준으로 신규 부여, 강등 시 비율 축소
+                cur_shield    = meta.get('shield', 0.0)
+                new_shield_max = s['market_cap'] * spec["shield_ratio"]
+                if meta['tier'] == "소형주":
+                    meta['shield'] = 0.0          # 소형주는 쉴드 없음
+                elif old_tier == "소형주":
+                    meta['shield'] = new_shield_max  # 소형→중/대 승격: 쉴드 신규 부여
+                else:
+                    meta['shield'] = min(cur_shield, new_shield_max)  # 강등: 상한만 조정
+
+                # 뉴스 출력
+                if not silent:
+                    if old_tier == "대형주" and meta['tier'] == "중형주":
+                        daily_news.append(
+                            f"📉 [체급강등] {meta['c_name']}이 시가총액 밀려나며 중견기업으로 강등되었습니다."
+                        )
+                    elif old_tier in ("소형주", "중형주") and meta['tier'] == "대형주":
+                        daily_news.append(
+                            f"📈 [체급승격] {meta['c_name']}이 대기업 반열에 올랐습니다!"
+                        )
 
     # ─────────────────────────────────────────────
     # 유틸

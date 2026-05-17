@@ -28,6 +28,7 @@ class GroupInfoDialog(QDialog):
 
         self.upper_table = QTableWidget(0, 4)
         self.upper_table.setFixedHeight(280)
+        self.upper_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.upper_table.setStyleSheet(
             "QTableWidget { background-color: #000; color: #e0e0e0; gridline-color: #222; } "
             "QHeaderView::section { background-color: #222; color: #00FF00; }"
@@ -43,6 +44,7 @@ class GroupInfoDialog(QDialog):
             "No", "규모", "상태", "그룹사", "산업", "회사명", "산업 상세",
             "주가", "주식수", "시가총액", "자사주", "대주주", "외국인", "기관", "개인"
         ])
+        self.lower_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.lower_table.setStyleSheet(
             "QTableWidget { background-color: #000; color: #e0e0e0; gridline-color: #222; } "
             "QHeaderView::section { background-color: #222; color: #00FF00; }"

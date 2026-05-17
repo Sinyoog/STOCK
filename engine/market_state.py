@@ -43,6 +43,7 @@ class MarketState:
         # ── 지수 ──────────────────────────────────
         self.wsi: float = 1500.0
         self.gri: float = 1000.0
+        self.peak_gri: float = 1000.0   # gri 역대 최고점 (panic_factor 기준)
         self.initial_market_total_cap: float = 0.0
 
         # ── 기술 레벨 ─────────────────────────────
@@ -54,9 +55,13 @@ class MarketState:
             "macro":     {},
             "delist":    {},
             "splits":    {},
+            "warning":   {},   # HP 경고 예약 장부
+            "tier_exam": {},   # 티어 심사 예약 장부
             "tech_jump": None,
             "v_rebound": None,
+            "recovery":  None, # 대공황 극복 예약
         }
+        self._branch_news_sent: bool = False  # 분기점 뉴스 발송 여부
         self.pre_reflection_events: list = []
 
         # ── 실적 히스토리 ─────────────────────────

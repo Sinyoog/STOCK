@@ -187,26 +187,52 @@ class NewsService:
         size    = {"대형주": "[대기업]", "중형주": "[중견기업]", "소형주": "[중소기업]"}.get(tier, "[중소기업]")
 
         shares_txt = f"{shares:,} 주" if shares > 0 else "산정 중"
-        mcap_txt   = f"{m_cap:,} 원"  if m_cap  > 0 else "산정 중"
-        price_txt  = f"{price:,} 원"  if price  > 0 else "산정 중"
+
+        # 시총 단위 변환
+        def fmt_cap(v):
+            if v >= 10_000_000_000_000_000: return f"{v/10_000_000_000_000_000:.2f}경"
+            elif v >= 1_000_000_000_000:    return f"{v/1_000_000_000_000:.2f}조"
+            elif v >= 100_000_000:          return f"{v/100_000_000:.0f}억"
+            else:                           return f"{v:,.0f}원"
+
+        mcap_txt = f"{m_cap:,} 원 ({fmt_cap(m_cap)})" if m_cap > 0 else "산정 중"
 
         ts  = meta.get('treasury_share', 0) * 100
         os_ = meta.get('owner_share',    0) * 100
         fs  = meta.get('foreign_share',  0) * 100
         ins = meta.get('inst_share',     0) * 100
         rs  = meta.get('retail_share',   0) * 100
-        risk = meta.get('risk_score', 0)
+
+        # HP / Shield
+        hp       = meta.get('hp', 0.0)
+        soft_cap = meta.get('hp_soft_cap', 60.0)
+        shield   = meta.get('shield', 0.0)
+        hp_ratio = hp / max(1.0, soft_cap)
+        filled   = round(hp_ratio * 10)
+        hp_bar   = '■' * filled + '□' * (10 - filled)
+
+        if shield >= 1_000_000_000_000:   shield_str = f"{shield/1_000_000_000_000:.2f}조"
+        elif shield >= 100_000_000:        shield_str = f"{shield/100_000_000:.1f}억"
+        else:                              shield_str = f"{shield:,.0f}원"
+
+        # 뉴스 상 rank 계산 (간이)
+        all_stocks = self.s.stocks
+        sorted_stocks = sorted(all_stocks, key=lambda x: x.get('market_cap', 0), reverse=True)
+        rank = next((i+1 for i, s in enumerate(sorted_stocks) if s['meta'].get('c_name') == name), 0)
+        rank_str = f"[{rank}위] " if rank > 0 else ""
 
         return (
-            f"< {name} >\n"
+            f"{rank_str}< {name} >\n"
             f"상장일: {meta.get('listed_date', '-')} | 섹터: {sector}\n"
-            f"------------------------------------------\n"
             f"[기업 정보] 그룹: {meta.get('group', '독립')} 규모: {size} "
             f"산업: {meta.get('ind', '-')} ({meta.get('sub', '-')}) 상태: {meta.get('char', 'Normal')}\n"
             f"[발행 정보] 주식수: {shares_txt} 시총: {mcap_txt}\n"
             f"[지배구조] 자사주: {ts:.1f}% | 대주주: {os_:.1f}% "
             f"외국인: {fs:.1f}% | 기관 : {ins:.1f}% 개인 : {rs:.1f}%\n"
-            f"리스크: {risk:.2f} / 150 예상주가: {price_txt}"
+            f"[재무 체력]\n"
+            f"{hp_bar}\n"
+            f"HP {hp:.2f} / {soft_cap:.0f} ({hp_ratio*100:.1f}%)\n"
+            f"방어막 {shield_str} [{'발동중' if hp_ratio < 0.30 and shield > 0 else '대기중'}]"
         )
 
     def _make_earn_content(self, meta: dict, y: int, q_name: str,

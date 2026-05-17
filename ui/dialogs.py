@@ -494,6 +494,8 @@ class StockFilterDialog(QDialog):
         p_lay = QHBoxLayout()
         p_lay.addWidget(QLabel("<b>가격대:</b>"))
         self.price_min = self._input("최소(원)"); self.price_max = self._input("최대(원)")
+        self.price_min.textChanged.connect(self._on_filter)
+        self.price_max.textChanged.connect(self._on_filter)
         p_lay.addWidget(self.price_min); p_lay.addWidget(QLabel("~")); p_lay.addWidget(self.price_max)
         layout.addLayout(p_lay)
 
@@ -501,6 +503,8 @@ class StockFilterDialog(QDialog):
         s_lay = QHBoxLayout()
         s_lay.addWidget(QLabel("<b>발행주식수:</b>"))
         self.shares_min = self._input("최소(주)"); self.shares_max = self._input("최대(주)")
+        self.shares_min.textChanged.connect(self._on_filter)
+        self.shares_max.textChanged.connect(self._on_filter)
         s_lay.addWidget(self.shares_min); s_lay.addWidget(QLabel("~")); s_lay.addWidget(self.shares_max)
         layout.addLayout(s_lay)
 
@@ -593,9 +597,16 @@ class StockFilterDialog(QDialog):
         for b in [self.sec_grow, self.sec_val, self.sec_defensive, self.sec_theme]: b.setChecked(False)
         self.hts.filter_stocks()
 
+    def keyPressEvent(self, event):
+        # 엔터/리턴 키가 QDialog 기본 동작(accept)을 트리거하지 않도록 차단
+        from PyQt6.QtCore import Qt
+        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            return  # 아무것도 안 함 — 텍스트 입력 중 엔터로 창 닫히거나 초기화 방지
+        super().keyPressEvent(event)
+
     def closeEvent(self, event):
-        if self.hts and hasattr(self.hts, 'active_dialogs') and self in self.hts.active_dialogs:
-            self.hts.active_dialogs.remove(self)
+        # active_dialogs에서 제거하지 않음 → 필터 조건 유지
+        # 창만 숨기고 조건은 살아있게
         event.accept()
 
 
@@ -722,18 +733,23 @@ class DelistedDetailDialog(QDialog):
                 if (count - 1) % step != 0: disp.append(float(raw[-1]))
 
             smoothed = disp[:]
-            if smoothed and self.current_tf != "1일":
-                smoothed[-1] = cur_p
 
             if smoothed:
-                y_min, y_max = min(smoothed), max(smoothed)
-                y_range = max(1.0, y_min * 0.01) if y_min == y_max else 0
-                self.chart_widget.setYRange(y_min - y_range, y_max + y_range)
+                # raw 전체 기준 실제 최고/최저
+                raw_floats = [float(x) for x in raw]
+                real_max   = max(raw_floats)
+                real_min   = min(raw_floats)
 
-                # 최고/최저 마커
-                max_val = max(smoothed); min_val = min(smoothed)
-                max_idx = smoothed.index(max_val); min_idx = smoothed.index(min_val)
-                n = len(smoothed)
+                # Y축 범위는 raw 전체 기준
+                y_pad = max(1.0, (real_max - real_min) * 0.05) if real_max != real_min else real_min * 0.01
+                self.chart_widget.setYRange(real_min - y_pad, real_max + y_pad)
+
+                # 마커 x좌표는 smoothed에서 가장 가까운 위치로 근사
+                n       = len(smoothed)
+                max_idx = min(range(n), key=lambda i: abs(smoothed[i] - real_max))
+                min_idx = min(range(n), key=lambda i: abs(smoothed[i] - real_min))
+                max_val = real_max
+                min_val = real_min
 
                 for attr in ['max_scatter','min_scatter','max_text','min_text']:
                     if hasattr(self, attr):

@@ -88,16 +88,81 @@ class EarningsManager:
         op_income  = earning_data['op_income']
         net_income = earning_data['net_income']
 
-        # 리스크 반영
+        # ── HP / Shield 반영 ──────────────────────────────────────
+        assets      = max(1, meta['assets'])
+        sensitivity = meta.get('risk_sensitivity', 1.0)
+        hp          = meta.get('hp', 50.0)
+        soft_cap    = meta.get('hp_soft_cap', 60.0)
+        shield      = meta.get('shield', 0.0)   # 단위: 원(₩)
+        tier        = meta.get('tier', '소형주')
+        market_cap  = max(1, stock.get('market_cap', assets))
+
+        # 체급별 쉴드 적립률 및 상한 비율
+        _SHIELD_SPEC = {
+            '대형주': {'accum': 0.00005, 'cap_ratio': 0.05},
+            '중형주': {'accum': 0.00003, 'cap_ratio': 0.03},
+            '소형주': {'accum': 0.00001, 'cap_ratio': 0.01},
+        }
+        spec       = _SHIELD_SPEC.get(tier, _SHIELD_SPEC['소형주'])
+        shield_cap = market_cap * spec['cap_ratio']
+
         if net_income < 0:
+            # 연속 적자 카운트
             meta['continuous_loss_count'] = meta.get('continuous_loss_count', 0) + 1
-            sensitivity = meta.get('risk_sensitivity', 1.0)
-            risk_up = (abs(net_income) / max(1, meta['assets'])) * 10 * sensitivity
-            meta['risk_score'] += risk_up
+
+            # 시나리오 가중치: 대공황 시 성장주 1.6, 방어주 0.5 / 평시 1.0
+            from engine.constants import SECTOR_MAP
+            scenario = self.s.current_scenario
+            sector   = SECTOR_MAP.get(meta.get('ind', ''), 'Value')
+            if '대공황' in scenario and '극복' not in scenario:
+                sw = 1.6 if sector == 'Growth' else 0.5 if sector == 'Defensive' else 1.0
+            else:
+                sw = 1.0
+
+            # ① 원화 기준 총 대미지
+            cash_dmg = abs(net_income) * sensitivity * sw
+
+            # ② HP가 soft_cap의 30% 미만일 때만 쉴드 발동
+            hp_ratio    = hp / max(1.0, soft_cap)
+            shield_mode = hp_ratio < 0.30
+
+            if shield_mode and shield > 0:
+                # 쉴드 방어 모드
+                if shield >= cash_dmg:
+                    meta['shield'] = round(shield - cash_dmg, 2)
+                    # 쉴드 완전 방어 → HP 피해 없음
+                else:
+                    # 쉴드 전소 후 남은 대미지 HP 차감
+                    remaining_cash = cash_dmg - shield
+                    meta['shield'] = 0.0
+                    hp_dmg = remaining_cash / assets * 100
+                    meta['hp'] = round(max(0.0, hp - hp_dmg), 2)
+            else:
+                # 쉴드 미발동 → HP 직접 차감
+                hp_dmg     = cash_dmg / assets * 100
+                meta['hp'] = round(max(0.0, hp - hp_dmg), 2)
+
         else:
+            # ── 흑자: 연속 적자 초기화 + HP 회복 + 오버플로우 쉴드 적립 ──
             meta['continuous_loss_count'] = 0
-            recovery = (net_income / max(1, meta['assets'])) * 10
-            meta['risk_score'] = max(0, meta['risk_score'] - recovery - 0.5)
+
+            heal   = (net_income / assets * 100) * 0.5
+            new_hp = hp + heal
+
+            if new_hp <= soft_cap:
+                meta['hp'] = round(new_hp, 2)
+            else:
+                # soft_cap 초과분 → 전 체급 쉴드 적립 (상한선 적용)
+                overflow      = new_hp - soft_cap
+                meta['hp']    = soft_cap
+                shield_gain   = overflow * (assets * spec['accum'])
+                meta['shield'] = round(min(shield_cap, shield + shield_gain), 2)
+
+                # 소형주는 추가로 주가 펌핑 (최대 +30%)
+                if '소형' in tier:
+                    pump = min(0.30, overflow * 0.02)
+                    meta['_hp_overflow_pump'] = pump   # market.py에서 price에 반영
+        # ────────────────────────────────────────────────────────
 
         # 히스토리 기록
         self.s.earnings_history.setdefault(name, {}).setdefault(year_str, {})[quarter] = {

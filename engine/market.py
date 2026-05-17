@@ -47,8 +47,16 @@ class StockMarket:
             daily_target = -0.015 - cpi_impact * 0.2
 
         panic_factor = 1.0
-        if   self.s.gri < 7000:  panic_factor = 0.93
-        elif self.s.gri < 12000: panic_factor = 0.97
+        # panic_factor: gri가 최고점 대비 크게 하락했을 때만 적용
+        # 절대값(7000) 기준 → 시작 gri=1000이라 항상 걸리는 버그
+        # 해결: gri가 역대 최고점의 50% 미만으로 떨어진 경우에만 적용
+        peak_gri = getattr(self.s, 'peak_gri', self.s.gri)
+        if self.s.gri > peak_gri:
+            self.s.peak_gri = self.s.gri
+            peak_gri = self.s.gri
+        gri_ratio = self.s.gri / max(1.0, peak_gri)
+        if   gri_ratio < 0.50: panic_factor = 0.93
+        elif gri_ratio < 0.75: panic_factor = 0.97
 
         fear_index      = self.s.macro.get("fear_index", 10.0)
         fear_multiplier = 1.0
@@ -102,11 +110,21 @@ class StockMarket:
             safe_assets    = max(10000.0, meta['assets'])
             target_price   = int(safe_assets / max(100, stock['shares']))
 
-            risk_panic = max(0.5, 1.0 - risk / 200)
+            # HP 기반 패닉 계수
+            # HP 30% 미만일 때만 패널티 작동 (평상시엔 1.0 유지)
+            hp_ratio = meta.get('hp', 50.0) / max(1.0, meta.get('hp_soft_cap', 60.0))
+            if hp_ratio < 0.30:
+                # WARNING 구간: HP 비율에 비례해서 0.7~1.0 사이로 패널티
+                hp_panic = 0.7 + (hp_ratio / 0.30) * 0.3
+            elif hp_ratio <= 0.0:
+                hp_panic = 0.5   # HP 완전 소진: 최대 패널티
+            else:
+                hp_panic = 1.0   # 정상 구간: 패널티 없음
+
             raw_price  = max(10, int(target_price
                                      * random.uniform(0.98, 1.02)
                                      * panic_factor
-                                     * risk_panic
+                                     * hp_panic
                                      * fear_multiplier))
 
             max_up   = int(old_price * 1.3)
@@ -229,6 +247,94 @@ class StockMarket:
                         self.s.daily_news.append(f"🏚️ [산업도태] {meta['c_name']}이(가) 시대에 뒤처져 시장 점유율을 잃고 있습니다.")
 
     # ─────────────────────────────────────────────
+    # 경고(WARNING) 진입/해제 7일 선반영 시스템
+    # ─────────────────────────────────────────────
+    def check_warning_system(self):
+        """
+        매일 HP 비율을 감지하여 투자경고 진입/해제를 7일 전에 예약.
+        예약 시 선반영 주가 변동 + 프리미엄 예고 뉴스 발송.
+        D-Day에 char 라벨 조용히 변경.
+        """
+        warning_book = self.s.pending_events.setdefault("warning", {})
+
+        for stock in self.s.stocks:
+            meta     = stock['meta']
+            name     = meta['c_name']
+            hp       = meta.get('hp', 50.0)
+            soft_cap = meta.get('hp_soft_cap', 60.0)
+            hp_ratio = hp / max(1.0, soft_cap)
+            char     = meta.get('char', 'Normal')
+
+            # ── D-Day 처리: 예약 날짜 도달 시 라벨 변경 ─────────
+            if name in warning_book:
+                info        = warning_book[name]
+                target_date = info.get('date')
+                if isinstance(target_date, str):
+                    from datetime import datetime as dt2
+                    target_date = dt2.strptime(target_date, "%Y-%m-%d")
+
+                if self.s.current_date.date() >= target_date.date():
+                    w_type = info.get('type')
+                    if w_type == 'IN':
+                        meta['char'] = 'WARNING'
+                        if not self.s.silent_mode:
+                            # 무료: D-Day 당일 뉴스
+                            self.s.daily_news.append(
+                                f"⚠️ [투자경고 지정] {name} 재무 체력 위험 수준 — 투자 유의"
+                            )
+                    elif w_type == 'OUT':
+                        meta['char'] = 'Normal'
+                        if not self.s.silent_mode:
+                            self.s.daily_news.append(
+                                f"✅ [투자경고 해제] {name} 재무 정상화 확인"
+                            )
+                    del warning_book[name]
+                continue
+
+            # ── 경고 진입 감지 (Normal → WARNING 예약) ───────────
+            if char == 'Normal' and hp_ratio < 0.30:
+                from datetime import timedelta
+                warn_date = self.s.current_date + timedelta(days=7)
+                warning_book[name] = {'date': warn_date, 'type': 'IN'}
+
+                if not self.s.silent_mode:
+                    # 프리미엄: D-7 예고 뉴스
+                    if self.s.has_paid_news_access:
+                        self.s.daily_news.append(
+                            f"💎 [경고 D-7 예보] {name} 재무 체력 {hp_ratio*100:.1f}% 위험선 돌파 "
+                            f"— 7일 후 투자경고 지정 예정 (프리미엄 전용)"
+                        )
+                    # 선반영: 주가 즉시 -8%, 기관/외인 15% 개인에게 강제 이탈
+                    stock['price'] = int(stock['price'] * 0.92)
+                    meta['momentum'] -= 0.15
+                    total_inst = meta.get('foreign_share', 0.0) + meta.get('inst_share', 0.0)
+                    escape     = total_inst * 0.15
+                    meta['foreign_share'] = max(0.001, meta.get('foreign_share', 0.0) - escape * 0.6)
+                    meta['inst_share']    = max(0.001, meta.get('inst_share', 0.0)    - escape * 0.4)
+                    meta['retail_share']  = min(0.99,  meta.get('retail_share', 0.0)  + escape)
+
+            # ── 경고 해제 감지 (WARNING → Normal 예약) ───────────
+            elif char == 'WARNING' and hp_ratio >= 0.30:
+                from datetime import timedelta
+                warn_date = self.s.current_date + timedelta(days=7)
+                warning_book[name] = {'date': warn_date, 'type': 'OUT'}
+
+                if not self.s.silent_mode:
+                    # 프리미엄: D-7 예고 뉴스
+                    if self.s.has_paid_news_access:
+                        self.s.daily_news.append(
+                            f"💎 [경고해제 D-7 예보] {name} 재무 정상화 "
+                            f"— 7일 후 투자경고 해제 예정 (프리미엄 전용)"
+                        )
+                    # 선반영: 주가 즉시 +8%, 기관/외인 선취매
+                    stock['price'] = int(stock['price'] * 1.08)
+                    meta['momentum'] += 0.10
+                    recover  = meta.get('retail_share', 0.0) * 0.10
+                    meta['inst_share']    = min(0.99, meta.get('inst_share', 0.0)    + recover * 0.5)
+                    meta['foreign_share'] = min(0.99, meta.get('foreign_share', 0.0) + recover * 0.5)
+                    meta['retail_share']  = max(0.001, meta.get('retail_share', 0.0) - recover)
+
+    # ─────────────────────────────────────────────
     # 상장폐지
     # ─────────────────────────────────────────────
     def check_delisting(self):
@@ -244,14 +350,20 @@ class StockMarket:
         max_delist = 30 if is_depression else 1
         new_reserved = 0
 
-        candidates = sorted(self.s.stocks, key=lambda x: x['meta'].get('risk_score', 0), reverse=True)
+        # HP 낮은 순으로 정렬 (위험 종목 우선 처리)
+        candidates = sorted(self.s.stocks, key=lambda x: x['meta'].get('hp', 99.0))
+
+        # 체급별 연속 적자 상폐 기준
+        _LOSS_LIMIT = {"대형주": 6, "중형주": 5, "소형주": 4}
+        MIN_AGE_DAYS = 504  # 2년 (504거래일)
 
         for stock in candidates:
             meta = stock['meta']
             name = meta['c_name']
 
+            # ── 예약 상폐 D-Day 처리 ────────────────────────────
             if name in self.s.pending_events["delist"]:
-                info = self.s.pending_events["delist"][name]
+                info        = self.s.pending_events["delist"][name]
                 target_date = info.get('date') if isinstance(info, dict) else info
                 if isinstance(target_date, str):
                     target_date = datetime.strptime(target_date, "%Y-%m-%d")
@@ -259,38 +371,77 @@ class StockMarket:
                 if self.s.current_date < target_date:
                     continue
 
-                threshold = 70 if is_depression else 100
-                is_risk_out = meta.get('risk_score', 0) >= threshold
-                reason = info.get('reason') if isinstance(info, dict) else ("자본 잠식" if is_risk_out else "연속 적자")
-
+                reason = info.get('reason', '재무 파탄') if isinstance(info, dict) else '재무 파탄'
                 if not self.s.silent_mode:
-                    self.s.daily_news.append(f"💀 [상장폐지] {name} ({reason})")
+                    # 무료: 당일 상폐 확정 뉴스
+                    self.s.daily_news.append(f"💀 [상장폐지 확정] {name} ({reason})")
 
                 meta['delisted_date'] = self.s.current_date.strftime('%Y-%m-%d')
                 delisted_this_turn.append(stock)
                 del self.s.pending_events["delist"][name]
+                # 예약 장부 경고/경보 데이터도 정리
+                self.s.pending_events.get("warning", {}).pop(name, None)
                 continue
 
+            # ── 상폐 조건 판정 ───────────────────────────────────
             ld = meta.get('listed_date_dt')
             if not ld or isinstance(ld, str):
                 try:    ld = datetime.strptime(meta['listed_date'], '%Y-%m-%d')
                 except: ld = self.s.current_date
                 meta['listed_date_dt'] = ld
 
-            age_days = (self.s.current_date - ld).days
-            threshold = 70 if is_depression else 100
-            is_risk_out   = meta.get('risk_score', 0) >= threshold
-            is_zombie_out = meta.get('continuous_loss_count', 0) >= 6 and age_days >= 730
+            age_days   = (self.s.current_date - ld).days
+            hp_now     = meta.get('hp', 50.0)
+            loss_count = meta.get('continuous_loss_count', 0)
+            tier       = meta.get('tier', '소형주')
+            loss_limit = _LOSS_LIMIT.get(tier, 4)
 
-            if (is_risk_out or is_zombie_out) and not meta.get('is_doomed'):
+            # 즉시 상폐: HP = 0
+            is_bankrupt = hp_now <= 0.0
+
+            # 유예 상폐: 연속 적자 N회 + 상장 2년 이상
+            is_zombie = (loss_count >= loss_limit and age_days >= MIN_AGE_DAYS)
+
+            # 대공황 시 조건 완화
+            if is_depression:
+                is_zombie = loss_count >= max(2, loss_limit - 2) and age_days >= MIN_AGE_DAYS
+
+            if (is_bankrupt or is_zombie) and not meta.get('is_doomed'):
                 if new_reserved < max_delist:
                     remaining = len(self.s.stocks) - len(delisted_this_turn) - new_reserved
                     if remaining > MIN_STOCKS_LIMIT:
-                        delist_date = self.s.current_date + timedelta(days=7)
-                        reason = "🔥 경제 대공황 파산" if is_depression else ("자본 잠식" if is_risk_out else "연속 적자")
+                        if is_bankrupt:
+                            # HP=0: 당일 장 마감 후 즉시 상폐
+                            delist_date = self.s.current_date
+                            reason      = "재무 완전 파탄 (HP 소진)"
+                        else:
+                            # 연속 적자: 7일 유예
+                            delist_date = self.s.current_date + timedelta(days=7)
+                            reason      = f"연속 적자 {loss_count}분기" + (" (대공황 가속)" if is_depression else "")
+
                         self.s.pending_events["delist"][name] = {"date": delist_date, "reason": reason}
                         meta['is_doomed'] = True
                         new_reserved += 1
+
+                        if not self.s.silent_mode:
+                            if is_bankrupt:
+                                # HP=0: 즉시상폐는 무료/프리미엄 동일
+                                self.s.daily_news.append(f"☠️ [즉시상폐] {name} 재무 체력 완전 소진 — 오늘 상장폐지")
+                            else:
+                                # 7일 유예: 프리미엄만 예고 뉴스
+                                if self.s.has_paid_news_access:
+                                    self.s.daily_news.append(
+                                        f"💎 [상폐예고] {name} 연속 적자 {loss_count}분기 "
+                                        f"— 7일 후 상장폐지 예정 (프리미엄 전용)"
+                                    )
+                                # 선반영: 주가 즉시 -12%, 기관/외인 이탈
+                                stock['price'] = int(stock['price'] * 0.88)
+                                meta['momentum'] -= 0.30
+                                total_inst = meta.get('foreign_share', 0.0) + meta.get('inst_share', 0.0)
+                                escape = total_inst * 0.15
+                                meta['foreign_share'] = max(0.001, meta.get('foreign_share', 0.0) - escape * 0.5)
+                                meta['inst_share']    = max(0.001, meta.get('inst_share', 0.0)    - escape * 0.5)
+                                meta['retail_share']  = min(0.99,  meta.get('retail_share', 0.0)  + escape)
                         continue
 
         for ds in delisted_this_turn:
@@ -462,28 +613,58 @@ class StockMarket:
 
         self._handle_stock_split(stock, silent)
 
-        # 리스크 관리
+        # ── 일일 HP 미세 차감 (연속 적자 중인 종목 압박) ─────────
         is_resistant = "대형주" in meta['tier'] or meta['group_id'] is not None
-        sensitivity  = 1.0
-        if "대공황" in self.s.current_scenario:
-            sensitivity = 1.6 if sector == "Growth" else 0.5
-        if is_resistant: sensitivity *= 0.3
+        loss_count   = meta.get('continuous_loss_count', 0)
 
-        loss_count = meta.get('continuous_loss_count', 0)
-        risk_inc   = -0.01
         if loss_count > 0:
-            risk_inc = 0.02 * loss_count * sensitivity
+            # 연속 적자 중: 매일 소량 HP 차감 (분기 실적과 별개)
+            sens     = meta.get('risk_sensitivity', 1.0)
+            if is_resistant: sens *= 0.3
+            daily_hp_dmg = 0.05 * loss_count * sens
 
-        if self.s.macro["interest_rate"] > 15.0: risk_inc += 0.05
-        if price < 1000:                         risk_inc += 0.05
-        if len(self.s.stocks) < 60:              risk_inc  = min(risk_inc, -0.05)
+            # 고금리 추가 압박
+            if self.s.macro["interest_rate"] > 15.0:
+                daily_hp_dmg += 0.03
 
-        meta['risk_score'] = max(0, meta['risk_score'] + risk_inc)
+            # 주가 1000원 미만 압박
+            if price < 1000:
+                daily_hp_dmg += 0.05
 
-        # 상태 텍스트
-        if meta.get('delist_timer', 0) > 0: meta['char'] = f"EXIT-{meta['delist_timer']}"
-        elif meta['risk_score'] >= 1.2:     meta['char'] = "WARNING"
-        else:                                meta['char'] = "Normal"
+            hp       = meta.get('hp', 50.0)
+            soft_cap = meta.get('hp_soft_cap', 60.0)
+            hp_ratio = hp / max(1.0, soft_cap)
+            shield   = meta.get('shield', 0.0)
+
+            # HP 30% 미만이면 쉴드 발동
+            if hp_ratio < 0.30 and shield > 0:
+                shield_dmg = daily_hp_dmg * meta.get('assets', 1.0) * 0.001
+                if shield >= shield_dmg:
+                    meta['shield'] = round(shield - shield_dmg, 2)
+                else:
+                    meta['shield'] = 0.0
+                    meta['hp']     = round(max(0.0, hp - daily_hp_dmg), 2)
+            else:
+                meta['hp'] = round(max(0.0, hp - daily_hp_dmg), 2)
+        else:
+            # 흑자/정상: HP 미세 회복 (하루 +0.01)
+            hp       = meta.get('hp', 50.0)
+            soft_cap = meta.get('hp_soft_cap', 60.0)
+            meta['hp'] = round(min(soft_cap, hp + 0.01), 2)
+
+        # ── char 상태 판정 (HP 기준) ───────────────────────────
+        hp_now   = meta.get('hp', 50.0)
+        soft_cap = meta.get('hp_soft_cap', 60.0)
+        hp_ratio_now = hp_now / max(1.0, soft_cap)
+
+        if meta.get('delist_timer', 0) > 0:
+            meta['char'] = f"EXIT-{meta['delist_timer']}"
+        elif hp_now <= 0:
+            meta['char'] = "BANKRUPT"
+        elif hp_ratio_now < 0.30:
+            meta['char'] = "WARNING"
+        else:
+            meta['char'] = "Normal" 
 
     def _handle_stock_split(self, stock: dict, silent: bool = False):
         meta    = stock['meta']
@@ -535,27 +716,39 @@ class StockMarket:
                 except Exception:
                     pass
 
-            if merge_count < 3 and days_since_merge >= 30 and random.random() < 0.3:
-                ratio = 10
+            if merge_count < 2 and days_since_merge >= 30 and random.random() < 0.3:
+                ratio    = 10
                 old_name = meta['c_name']
                 stock['price']  *= ratio
                 stock['shares'] //= ratio
                 meta['merge_count']     = merge_count + 1
                 meta['last_merge_date'] = today_str
-                meta['risk_score']      = max(0, meta['risk_score'] - 0.5)
                 self.s.daily_splits[old_name] = 1 / ratio
+
+                # 병합 시 HP 소량 회복 (최대 soft_cap까지)
+                hp_gain  = 5.0
+                soft_cap = meta.get('hp_soft_cap', 60.0)
+                meta['hp'] = round(min(soft_cap, meta.get('hp', 0.0) + hp_gain), 2)
+
                 if not silent:
-                    self.s.daily_news.append(f"🧩 [AI병합] {meta['c_name']}이 상장 유지를 위해 1:{ratio} 병합을 단행했습니다. (병합 {meta['merge_count']}회차)")
+                    self.s.daily_news.append(
+                        f"🧩 [AI병합] {meta['c_name']}이 상장 유지를 위해 1:{ratio} 병합을 단행했습니다. "
+                        f"(병합 {meta['merge_count']}회차 / HP +{hp_gain})"
+                    )
 
     def _handle_survival_strategy(self, stock: dict):
-        meta   = stock['meta']
-        risk   = meta.get('risk_score', 0)
-        sector = SECTOR_MAP.get(meta['ind'], "Value")
+        meta     = stock['meta']
+        hp       = meta.get('hp', 50.0)
+        soft_cap = meta.get('hp_soft_cap', 60.0)
+        hp_ratio = hp / max(1.0, soft_cap)
+        sector   = SECTOR_MAP.get(meta['ind'], "Value")
 
-        if risk < 80: return
+        # HP 40% 이상이면 생존 전략 불필요
+        if hp_ratio >= 0.40: return
 
         if meta.get('group_id'):
-            meta['risk_score'] -= 5.0
+            # 그룹사 지원 → HP 회복
+            meta['hp'] = round(min(soft_cap, hp + 5.0), 2)
             if not self.s.silent_mode:
                 self.s.daily_news.append(f"🛡️ [그룹지원] {meta['c_name']}가 그룹사의 자금 지원으로 위기를 넘깁니다.")
         else:
@@ -563,7 +756,7 @@ class StockMarket:
                 sell_shares_count  = int(stock['shares'] * 0.02)
                 meta['treasury_share'] -= 0.02
                 meta['assets']         += stock['price'] * sell_shares_count
-                meta['risk_score']     -= 10.0
+                meta['hp'] = round(min(soft_cap, hp + 3.0), 2)
                 stock['price']          = int(stock['price'] * 0.97)
                 if not self.s.silent_mode:
                     self.s.daily_news.append(f"💸 [위기처분] {meta['c_name']}가 자사주를 매각하여 운영 자금을 확보했습니다.")
@@ -572,7 +765,7 @@ class StockMarket:
                 capital_raised = new_shares * (stock['price'] * 0.8)
                 stock['shares']   += new_shares
                 meta['assets']    += capital_raised
-                meta['risk_score'] -= 10.0
+                meta['hp'] = round(min(soft_cap, hp + 2.0), 2)
                 stock['price']     = int(stock['price'] * 0.85)
                 if not self.s.silent_mode:
                     self.s.daily_news.append(f"💉 [유상증자] {meta['c_name']}가 생존을 위해 증자를 단행했습니다. (가치 희석)")
