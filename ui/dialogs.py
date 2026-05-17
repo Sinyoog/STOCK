@@ -556,32 +556,6 @@ class StockFilterDialog(QDialog):
             self.tier_all.setChecked(False)
         elif sender == self.tier_all and self.tier_all.isChecked():
             self.tier_large.setChecked(False); self.tier_mid.setChecked(False); self.tier_small.setChecked(False)
-        if not any([self.tier_large.isChecked(), self.tier_mid.isChecked(), self.tier_small.isChecked()]):
-            self.tier_all.setChecked(True)
-        if not any([self.tier_large.isChecked(), self.tier_mid.isChecked(), self.tier_small.isChecked()]):
-            self.tier_all.setChecked(True)
-        if not any([self.tier_large.isChecked(), self.tier_mid.isChecked(), self.tier_small.isChecked()]):
-            self.tier_all.setChecked(True)
-        if not any([self.tier_large.isChecked(), self.tier_mid.isChecked(), self.tier_small.isChecked()]):
-            self.tier_all.setChecked(True)
-        if not any([self.tier_large.isChecked(), self.tier_mid.isChecked(), self.tier_small.isChecked()]):
-            self.tier_all.setChecked(True)
-        if not any([self.tier_large.isChecked(), self.tier_mid.isChecked(), self.tier_small.isChecked()]):
-            self.tier_all.setChecked(True)
-        if not any([self.tier_large.isChecked(), self.tier_mid.isChecked(), self.tier_small.isChecked()]):
-            self.tier_all.setChecked(True)
-        # 개별 버튼 모두 꺼지면 자동으로 전체 활성화
-        if not any([self.tier_large.isChecked(), self.tier_mid.isChecked(), self.tier_small.isChecked()]):
-            self.tier_all.setChecked(True)
-        # 개별 버튼 모두 꺼지면 자동으로 전체 활성화
-        if not any([self.tier_large.isChecked(), self.tier_mid.isChecked(), self.tier_small.isChecked()]):
-            self.tier_all.setChecked(True)
-        # 개별 버튼 모두 꺼지면 자동으로 전체 활성화
-        if not any([self.tier_large.isChecked(), self.tier_mid.isChecked(), self.tier_small.isChecked()]):
-            self.tier_all.setChecked(True)
-        # 개별 버튼 모두 꺼지면 자동으로 전체 활성화
-        if not any([self.tier_large.isChecked(), self.tier_mid.isChecked(), self.tier_small.isChecked()]):
-            self.tier_all.setChecked(True)
 
         if sender == self.group_all and self.group_all.isChecked():
             self.group_yes.setChecked(False); self.group_no.setChecked(False)
@@ -594,32 +568,6 @@ class StockFilterDialog(QDialog):
         elif sender == self.sec_all and self.sec_all.isChecked():
             for b in [self.sec_grow, self.sec_val, self.sec_defensive, self.sec_theme]:
                 b.setChecked(False)
-        if not any([self.sec_grow.isChecked(), self.sec_val.isChecked(), self.sec_defensive.isChecked(), self.sec_theme.isChecked()]):
-            self.sec_all.setChecked(True)
-        if not any([self.sec_grow.isChecked(), self.sec_val.isChecked(), self.sec_defensive.isChecked(), self.sec_theme.isChecked()]):
-            self.sec_all.setChecked(True)
-        if not any([self.sec_grow.isChecked(), self.sec_val.isChecked(), self.sec_defensive.isChecked(), self.sec_theme.isChecked()]):
-            self.sec_all.setChecked(True)
-        if not any([self.sec_grow.isChecked(), self.sec_val.isChecked(), self.sec_defensive.isChecked(), self.sec_theme.isChecked()]):
-            self.sec_all.setChecked(True)
-        if not any([self.sec_grow.isChecked(), self.sec_val.isChecked(), self.sec_defensive.isChecked(), self.sec_theme.isChecked()]):
-            self.sec_all.setChecked(True)
-        if not any([self.sec_grow.isChecked(), self.sec_val.isChecked(), self.sec_defensive.isChecked(), self.sec_theme.isChecked()]):
-            self.sec_all.setChecked(True)
-        if not any([self.sec_grow.isChecked(), self.sec_val.isChecked(), self.sec_defensive.isChecked(), self.sec_theme.isChecked()]):
-            self.sec_all.setChecked(True)
-        # 개별 버튼 모두 꺼지면 자동으로 전체 활성화
-        if not any([self.sec_grow.isChecked(), self.sec_val.isChecked(), self.sec_defensive.isChecked(), self.sec_theme.isChecked()]):
-            self.sec_all.setChecked(True)
-        # 개별 버튼 모두 꺼지면 자동으로 전체 활성화
-        if not any([self.sec_grow.isChecked(), self.sec_val.isChecked(), self.sec_defensive.isChecked(), self.sec_theme.isChecked()]):
-            self.sec_all.setChecked(True)
-        # 개별 버튼 모두 꺼지면 자동으로 전체 활성화
-        if not any([self.sec_grow.isChecked(), self.sec_val.isChecked(), self.sec_defensive.isChecked(), self.sec_theme.isChecked()]):
-            self.sec_all.setChecked(True)
-        # 개별 버튼 모두 꺼지면 자동으로 전체 활성화
-        if not any([self.sec_grow.isChecked(), self.sec_val.isChecked(), self.sec_defensive.isChecked(), self.sec_theme.isChecked()]):
-            self.sec_all.setChecked(True)
 
         self.hts.filter_stocks()
 
@@ -680,6 +628,7 @@ class DelistedDetailDialog(QDialog):
         self.title_label.setStyleSheet("font-size: 28px; font-weight: bold; color: #00FF00;")
         self.price_summary_label = QLabel("")
         self.price_summary_label.setStyleSheet("font-size: 18px; font-weight: bold; margin-left: 20px; margin-top: 5px;")
+        self.price_summary_label.setTextFormat(Qt.TextFormat.RichText)
         title_sub.addWidget(self.title_label); title_sub.addWidget(self.price_summary_label); title_sub.addStretch()
 
         sector_name = SECTOR_MAP.get(self.meta['ind'], 'Value')
@@ -772,12 +721,61 @@ class DelistedDetailDialog(QDialog):
                 disp = [float(raw[i]) for i in range(0, count, step)]
                 if (count - 1) % step != 0: disp.append(float(raw[-1]))
 
-            smoothed = self._moving_avg(disp)
-            self.curve.setData(smoothed)
+            smoothed = disp[:]
+            if smoothed and self.current_tf != "1일":
+                smoothed[-1] = cur_p
+
             if smoothed:
                 y_min, y_max = min(smoothed), max(smoothed)
-                self.chart_widget.setYRange(y_min if y_min != y_max else y_min * 0.95,
-                                             y_max if y_min != y_max else y_max * 1.05)
+                y_range = max(1.0, y_min * 0.01) if y_min == y_max else 0
+                self.chart_widget.setYRange(y_min - y_range, y_max + y_range)
+
+                # 최고/최저 마커
+                max_val = max(smoothed); min_val = min(smoothed)
+                max_idx = smoothed.index(max_val); min_idx = smoothed.index(min_val)
+                n = len(smoothed)
+
+                for attr in ['max_scatter','min_scatter','max_text','min_text']:
+                    if hasattr(self, attr):
+                        try: self.chart_widget.removeItem(getattr(self, attr))
+                        except: pass
+
+                import pyqtgraph as pg
+                self.max_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#FF4444'), symbol='o')
+                self.max_scatter.addPoints([{'pos': (max_idx, max_val)}])
+                self.chart_widget.addItem(self.max_scatter)
+
+                self.min_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#4444FF'), symbol='o')
+                self.min_scatter.addPoints([{'pos': (min_idx, min_val)}])
+                self.chart_widget.addItem(self.min_scatter)
+
+                max_anchor = (1.1, 1.1) if max_idx > n * 0.75 else (0, 1)
+                self.max_text = pg.TextItem(
+                    html=f"<span style='color:#FF4444;font-weight:bold;background-color:#000;'>최고: {int(max_val):,}</span>",
+                    anchor=max_anchor)
+                self.max_text.setPos(max_idx, max_val)
+                self.chart_widget.addItem(self.max_text)
+
+                min_anchor = (1.1, -0.1) if min_idx > n * 0.75 else ((-0.1,-0.1) if min_idx < n * 0.25 else (0,0))
+                self.min_text = pg.TextItem(
+                    html=f"<span style='color:#4444FF;font-weight:bold;background-color:#000;'>최저: {int(min_val):,}</span>",
+                    anchor=min_anchor)
+                self.min_text.setPos(min_idx, min_val)
+                self.chart_widget.addItem(self.min_text)
+
+                # 전체 기준 수익률 표시
+                start_p = float(raw[0]); end_p = float(raw[-1])
+                diff    = end_p - start_p
+                rate    = (diff / start_p * 100) if start_p != 0 else 0
+                c_hex   = "#FF4444" if diff > 0 else ("#4444FF" if diff < 0 else "#e0e0e0")
+                sign    = "▲" if diff > 0 else ("▼" if diff < 0 else "─")
+                self.price_summary_label.setText(
+                    f"<span style='color:#aaa;'>전체 기준: </span>"
+                    f"<span style='color:#fff;'>{int(start_p):,}원</span>"
+                    f"<span style='color:#fff;'> → </span>"
+                    f"<span style='color:{c_hex};font-weight:bold;'>{int(end_p):,}원 "
+                    f"({sign}{int(abs(diff)):,}원, {rate:+.2f}%)</span>"
+                )
         except Exception as e:
             print(f"❌ 상장폐지 차트 로드 실패: {e}")
 

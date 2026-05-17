@@ -197,9 +197,13 @@ class StockHTS(QMainWindow):
         rep_lay.addWidget(self.report_panel, 1)
 
         self.holding_table = QTableWidget(1, 4)
-        self.holding_table.setFixedHeight(50)
+        self.holding_table.setFixedHeight(75)
         self.holding_table.setHorizontalHeaderLabels(["평균단가", "보유수량", "수익률", "총 금액"])
-        self.holding_table.setStyleSheet("QTableWidget { background-color: #111; border: 1px solid #333; gridline-color: #222; } QHeaderView::section { background-color: #222; color: #aaa; font-size: 11px; }")
+        self.holding_table.setStyleSheet("""
+            QTableWidget { background-color: #111; border: 1px solid #333; gridline-color: #222; }
+            QHeaderView::section { background-color: #222; color: #aaa; font-size: 11px; padding: 3px; }
+            QTableWidget::item { padding: 4px; font-size: 13px; font-weight: bold; }
+        """)
         self.holding_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.holding_table.verticalHeader().setVisible(False)
         for j in range(4):
@@ -348,20 +352,43 @@ class StockHTS(QMainWindow):
         dialog.show()
         self.active_dialogs.append(dialog)
 
+    @staticmethod
+    def _qty(data: dict) -> int:
+        """구 키(quantity) / 신 키(shares) 모두 대응"""
+        return data.get('shares', data.get('quantity', 0))
+
     def handle_sell(self):
         s = self._get_selected_stock()
         if not s: return
         name = s['meta']['c_name']
         if name not in self.my_portfolio:
             QMessageBox.warning(self, "보유량 부족", "팔 주식이 없습니다."); return
-        dialog = TradeDialog("매도", name, s['price'], self.my_portfolio[name].get('shares', self.my_portfolio[name].get('quantity', 0)), self)
+        dialog = TradeDialog("매도", name, s['price'], self._qty(self.my_portfolio[name]), self)
         dialog.show()
         self.active_dialogs.append(dialog)
+
+    def show_toast(self, message: str, color: str = "#FF4444"):
+        """메인 창 중앙에 1.5초 토스트 메시지 표시"""
+        from PyQt6.QtCore import QTimer
+        toast = QLabel(message, self)
+        toast.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        toast.setStyleSheet(f"""
+            background-color: rgba(20,0,0,230);
+            color: {color};
+            border: 2px solid {color};
+            font-size: 18px; font-weight: bold;
+            padding: 18px 36px; border-radius: 5px;
+        """)
+        toast.adjustSize()
+        toast.move((self.width() - toast.width()) // 2,
+                   (self.height() - toast.height()) // 2)
+        toast.show(); toast.raise_()
+        QTimer.singleShot(1500, toast.deleteLater)
 
     def process_buy(self, name: str, price: int, num: int):
         ok, new_cash, new_port, msg = self.game_service.buy_stock(name, price, num, self.my_cash, self.my_portfolio)
         if not ok:
-            QMessageBox.warning(self, "매수 실패", msg); return
+            self.show_toast(msg); return
         self.my_cash      = new_cash
         self.my_portfolio = new_port
         self.sync_ui_with_engine()
@@ -370,7 +397,7 @@ class StockHTS(QMainWindow):
     def process_sell(self, name: str, price: int, num: int):
         ok, new_cash, new_port, msg = self.game_service.sell_stock(name, price, num, self.my_cash, self.my_portfolio)
         if not ok:
-            QMessageBox.warning(self, "매도 실패", msg); return
+            self.show_toast(msg); return
         self.my_cash      = new_cash
         self.my_portfolio = new_port
         self.sync_ui_with_engine()
@@ -389,7 +416,8 @@ class StockHTS(QMainWindow):
             existing.raise_(); existing.activateWindow(); return
         headers = ["No", "생애 주기", "등급", "상태", "그룹", "섹터", "회사명", "산업분류", "마지막 주가", "발행주수", "자사주 %"]
         d = InfoTableDialog("💀 상장폐지 역사관", headers, self.game_service, self)
-        d.setModal(False); d.setWindowFlags(Qt.WindowType.Window); d.show()
+        d.setModal(False)
+        d.show()
         self.active_dialogs.append(d)
 
     def open_earnings_window(self):
@@ -472,7 +500,7 @@ class StockHTS(QMainWindow):
         for name, data in self.my_portfolio.items():
             stock = self.game_service.get_stock_by_name(name)
             cur_p = stock['price'] if stock else 0
-            qty = data.get('shares', data.get('quantity', 0))
+            qty = self._qty(data)
             total_buy  += qty * data['avg_price']
             total_eval += qty * cur_p
 
@@ -511,7 +539,7 @@ class StockHTS(QMainWindow):
 
         port_info = self.my_portfolio.get(self.selected_stock_name)
         if port_info and selected:
-            shares    = port_info.get('shares', port_info.get('quantity', 0))
+            shares    = self._qty(port_info)
             avg_p     = port_info['avg_price']
             cur_p     = selected['price']
             eval_p    = shares * cur_p
@@ -546,7 +574,8 @@ class StockHTS(QMainWindow):
             {"name": s['meta']['c_name'], "price": int(s['price']),
              "rate": s.get('rate', 0.0), "meta": s['meta'],
              "shares": s['shares']}
-            for s in self.game_service.s.stocks
+            for s in sorted(self.game_service.s.stocks,
+                            key=lambda x: x.get('market_cap', 0), reverse=True)
         ]
         filtered = []
         f_dialog = next((d for d in self.active_dialogs if isinstance(d, StockFilterDialog)), None)
@@ -651,23 +680,36 @@ class StockHTS(QMainWindow):
 
         dates  = [datetime.strptime(r[0], '%Y-%m-%d') for r in rows]
         prices = [float(r[1]) for r in rows]
+        cur_p  = float(s['price'])
 
-        self.chart_widget.setAxisItems({'bottom': DateAxisItem(dates=dates, orientation='bottom')})
-
-        cur_p = float(s['price'])
         if self.current_tf == "1일":
-            rat = float(s.get('rate', 0))
+            rat    = float(s.get('rate', 0))
             base_p = cur_p / (1 + rat / 100) if rat != -100 and (1 + rat / 100) != 0 else cur_p
-            disp   = [base_p, cur_p]
+            disp       = [base_p, cur_p]
+            disp_dates = dates[-1:] + dates[-1:] if len(dates) >= 1 else [datetime.now(), datetime.now()]
         else:
             base_p = prices[0]
             count  = len(prices)
-            step   = 1 if count < 180 else (7 if count < 1095 else (30 if count < 3650 else (180 if count < 14600 else 365)))
-            disp   = [prices[i] for i in range(0, count, step)]
-            if (count - 1) % step != 0: disp.append(prices[-1])
+            if self.current_tf in ("1주", "1달", "3달"):
+                step = 1
+            elif self.current_tf == "1년":
+                step = 7
+            elif self.current_tf == "5년":
+                step = 30
+            else:
+                step = 1 if count < 180 else (7 if count < 1095 else (30 if count < 3650 else (180 if count < 14600 else 365)))
+            indices    = list(range(0, count, step))
+            if indices[-1] != count - 1:
+                indices.append(count - 1)
+            disp       = [prices[i] for i in indices]
+            disp_dates = [dates[i]  for i in indices]
+            # 마지막 값은 현재가로 고정
+            disp[-1]   = cur_p
 
-        smoothed = self._moving_avg(disp)
-        diff     = (smoothed[-1] if smoothed else cur_p) - (smoothed[0] if smoothed else base_p)
+        self.chart_widget.setAxisItems({'bottom': DateAxisItem(dates=disp_dates, orientation='bottom')})
+
+        smoothed = disp[:]
+        diff     = smoothed[-1] - smoothed[0]
         period_r = (diff / base_p * 100) if base_p != 0 else 0
 
         c_hex = "#FF4444" if diff > 0 else ("#4444FF" if diff < 0 else "#e0e0e0")
@@ -687,7 +729,7 @@ class StockHTS(QMainWindow):
             f"<span style='color:#ffffff;'>{self.current_tf} 기준: </span>"
             f"<span style='color:#aaaaaa;'>{int(base_p):,}원</span>"
             f"<span style='color:#ffffff;'> → </span>"
-            f"<span style='color:{c_hex}; font-weight:bold;'>{int(smoothed[-1] if smoothed else cur_p):,}원 </span>"
+            f"<span style='color:{c_hex}; font-weight:bold;'>{int(smoothed[-1]):,}원 </span>"
             f"<span style='color:{c_hex};'>({sign}{int(abs(diff)):,}원, {period_r:+.2f}%)</span>"
         )
 
@@ -697,7 +739,7 @@ class StockHTS(QMainWindow):
                 try: self.chart_widget.removeItem(getattr(self, attr))
                 except Exception: pass
 
-        if self.current_tf == "1일" or not smoothed: return
+        if self.current_tf == "1일" or not smoothed or len(smoothed) < 2: return
 
         max_val = max(smoothed); min_val = min(smoothed)
         max_idx = smoothed.index(max_val); min_idx = smoothed.index(min_val)
@@ -711,17 +753,29 @@ class StockHTS(QMainWindow):
         self.min_scatter.addPoints([{'pos': (min_idx, min_val)}])
         self.chart_widget.addItem(self.min_scatter)
 
-        max_anchor = (1.1, 1.1) if max_idx > n * 0.75 else (0, 1)
-        self.max_text = pg.TextItem(html=f"<span style='color: #FF4444; font-weight: bold; background-color: #000;'>최고: {int(max_val):,}</span>", anchor=max_anchor)
-        self.max_text.setPos(max_idx, max_val); self.chart_widget.addItem(self.max_text)
+        def get_pos_and_anchor(idx, is_max):
+            y_anchor = 1.0 if is_max else 0.0
+            # 우측 절반이면 텍스트를 왼쪽에, 좌측 절반이면 오른쪽에
+            if idx >= n // 2:
+                return idx, (1.0, y_anchor)
+            else:
+                return idx, (0.0, y_anchor)
 
-        min_anchor = (1.1, -0.1) if min_idx > n * 0.75 else ((-0.1, -0.1) if min_idx < n * 0.25 else (0, 0))
-        self.min_text = pg.TextItem(html=f"<span style='color: #4444FF; font-weight: bold; background-color: #000;'>최저: {int(min_val):,}</span>", anchor=min_anchor)
-        self.min_text.setPos(min_idx, min_val); self.chart_widget.addItem(self.min_text)
+        max_x, max_anchor = get_pos_and_anchor(max_idx, True)
+        min_x, min_anchor = get_pos_and_anchor(min_idx, False)
 
-    # ─────────────────────────────────────────────
-    # 리포트
-    # ─────────────────────────────────────────────
+        self.max_text = pg.TextItem(
+            html=f"<span style='color:#FF4444;font-weight:bold;background-color:#000;'>최고: {int(max_val):,}</span>",
+            anchor=max_anchor)
+        self.max_text.setPos(max_x, max_val)
+        self.chart_widget.addItem(self.max_text)
+
+        self.min_text = pg.TextItem(
+            html=f"<span style='color:#4444FF;font-weight:bold;background-color:#000;'>최저: {int(min_val):,}</span>",
+            anchor=min_anchor)
+        self.min_text.setPos(min_x, min_val)
+        self.chart_widget.addItem(self.min_text)
+        
     def _update_report(self, stock: dict):
         m     = stock['meta']
         all_snaps = sorted(self.game_service.s.stocks, key=lambda x: x.get('market_cap', 0), reverse=True)

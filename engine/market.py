@@ -259,7 +259,7 @@ class StockMarket:
                 if self.s.current_date < target_date:
                     continue
 
-                threshold = 100 if is_depression else 150
+                threshold = 70 if is_depression else 100
                 is_risk_out = meta.get('risk_score', 0) >= threshold
                 reason = info.get('reason') if isinstance(info, dict) else ("자본 잠식" if is_risk_out else "연속 적자")
 
@@ -278,9 +278,9 @@ class StockMarket:
                 meta['listed_date_dt'] = ld
 
             age_days = (self.s.current_date - ld).days
-            threshold = 100 if is_depression else 150
+            threshold = 70 if is_depression else 100
             is_risk_out   = meta.get('risk_score', 0) >= threshold
-            is_zombie_out = meta.get('continuous_loss_count', 0) >= 12 and age_days >= 1825
+            is_zombie_out = meta.get('continuous_loss_count', 0) >= 6 and age_days >= 730
 
             if (is_risk_out or is_zombie_out) and not meta.get('is_doomed'):
                 if new_reserved < max_delist:
@@ -523,16 +523,29 @@ class StockMarket:
                 self.s.daily_news.append(f"  └ 현재가: {stock['price']:,}원 | 발행주식수: {stock['shares'] / 1e8:.1f}억 주")
 
         elif price < 1000:
-            if random.random() < 0.8:
+            # 병합 횟수 제한 (최대 3회) + 쿨다운 (30일)
+            merge_count = meta.get('merge_count', 0)
+            last_merge  = meta.get('last_merge_date', '')
+            today_str   = self.s.current_date.strftime('%Y-%m-%d')
+            days_since_merge = 999
+            if last_merge:
+                from datetime import datetime
+                try:
+                    days_since_merge = (self.s.current_date - datetime.strptime(last_merge, '%Y-%m-%d')).days
+                except Exception:
+                    pass
+
+            if merge_count < 3 and days_since_merge >= 30 and random.random() < 0.3:
                 ratio = 10
                 old_name = meta['c_name']
                 stock['price']  *= ratio
                 stock['shares'] //= ratio
-                meta['merge_count'] = meta.get('merge_count', 0) + 1
-                meta['risk_score']  = max(0, meta['risk_score'] - 0.5)
+                meta['merge_count']     = merge_count + 1
+                meta['last_merge_date'] = today_str
+                meta['risk_score']      = max(0, meta['risk_score'] - 0.5)
                 self.s.daily_splits[old_name] = 1 / ratio
                 if not silent:
-                    self.s.daily_news.append(f"🧩 [AI병합] {meta['c_name']}이 상장 유지를 위해 1:{ratio} 병합을 단행했습니다.")
+                    self.s.daily_news.append(f"🧩 [AI병합] {meta['c_name']}이 상장 유지를 위해 1:{ratio} 병합을 단행했습니다. (병합 {meta['merge_count']}회차)")
 
     def _handle_survival_strategy(self, stock: dict):
         meta   = stock['meta']
