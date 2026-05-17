@@ -620,7 +620,7 @@ class DelistedDetailDialog(QDialog):
         self.s          = stock_obj
         self.meta       = stock_obj['meta']
         self.stock_name = self.meta['c_name']
-        self.current_tf = getattr(parent, 'current_tf', "전체") if parent else "전체"
+        self.current_tf = "전체"  # 상폐 역사관은 항상 전체 기준
 
         self.setWindowTitle(f"💀 [상장폐지 상세 기록] {self.stock_name}")
         self.resize(1400, 800)
@@ -689,17 +689,53 @@ class DelistedDetailDialog(QDialog):
         ts, os, fs, ins, rs = [(v / total * 100 if total > 0 else v) for v in vals]
         size  = {"대형주": "[대기업]", "중형주": "[중견기업]", "소형주": "[중소기업]"}.get(m.get('tier','소형주'), "[중소기업]")
 
+        # 시총 단위 변환
+        mc = self.s['market_cap']
+        if mc >= 10_000_000_000_000_000: mc_str = f"{mc/10_000_000_000_000_000:.2f}경"
+        elif mc >= 1_000_000_000_000:    mc_str = f"{mc/1_000_000_000_000:.2f}조"
+        elif mc >= 100_000_000:          mc_str = f"{mc/100_000_000:.0f}억"
+        else:                            mc_str = f"{mc:,.0f}원"
+
+        # HP / Shield
+        hp       = m.get('hp', 0.0)
+        soft_cap = m.get('hp_soft_cap', 60.0)
+        shield   = m.get('shield', 0.0)
+        hp_ratio = hp / max(1.0, soft_cap)
+        filled   = round(hp_ratio * 10)
+        hp_bar   = '■' * filled + '□' * (10 - filled)
+        if hp_ratio >= 0.60:   hp_color = '#00FF00'
+        elif hp_ratio >= 0.30: hp_color = '#FFA500'
+        else:                  hp_color = '#FF4444'
+
+        if shield >= 1_000_000_000_000:  shield_str = f"{shield/1_000_000_000_000:.2f}조"
+        elif shield >= 100_000_000:       shield_str = f"{shield/100_000_000:.1f}억"
+        else:                             shield_str = f"{shield:,.0f}원"
+
+        shield_active = hp_ratio < 0.30 and shield > 0
+        shield_label  = "발동중" if shield_active else "대기중"
+        shield_color  = '#00FFFF' if shield_active else '#888888'
+
         self.report_panel.setHtml(f"""
         <div style='font-family: Malgun Gothic;'>
             <p><b style='color:#FFD700;font-size:14px;'>[기업 정보]</b><br/>
             그룹: {m.get('group','단독기업')}<br/>규모: <b style='color:#FFD700;'>{size}</b><br/>
             산업: {m['ind']} ({m['sub']})<br/>상태: <b style='color:#FF4444;'>{m['char']}</b></p>
             <p><b style='color:#FFD700;font-size:14px;'>[발행 정보]</b><br/>
-            주식수: {self.s['shares']:,} 주<br/>시총: {self.s['market_cap']:,} 원</p>
+            주식수: {self.s['shares']:,} 주<br/>
+            시총: {mc:,} 원
+            <span style='color:#FFD700;font-weight:bold;'> ({mc_str})</span></p>
             <p><b style='color:#FFD700;font-size:14px;'>[지배구조]</b><br/>
             자사주: {ts:.1f}% | 대주주: {os:.1f}%<br/>
             외국인: {fs:.1f}% | 기관 : {ins:.1f}%<br/>개인 : {rs:.1f}%</p>
-            <p style='color: #FF4444; font-size: 14px;'><b>리스크: {m['risk_score']:.2f} / 150</b></p>
+            <hr style='border: 0.5px solid #333;'/>
+            <p style='font-size:14px;'><b>[재무 체력]</b></p>
+            <p style='font-size:20px;font-family:monospace;letter-spacing:2px;margin:4px 0;'>
+            <span style='color:{hp_color};'>{hp_bar}</span></p>
+            <p style='font-size:15px;font-weight:bold;margin:4px 0;'>
+            <span style='color:{hp_color};'>HP {hp:.2f} / {soft_cap:.0f}</span>
+            <span style='color:#888;font-size:13px;'> ({hp_ratio*100:.1f}%)</span></p>
+            <p style='font-size:14px;margin:4px 0;'>
+            <span style='color:{shield_color};'>방어막 {shield_str} [{shield_label}]</span></p>
             <hr style='border: 0.5px solid #333;'/>
             <p style='color: #888; font-size: 11px;'>* 위 수치는 상장폐지 확정 시점의 데이터입니다.</p>
         </div>""")

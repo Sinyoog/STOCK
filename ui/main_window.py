@@ -59,6 +59,7 @@ class StockHTS(QMainWindow):
         self.auto_speed_days     = 1
         self.current_loop        = 0
         self.is_auto_running     = False
+        self.recent_stocks       = []
 
         # 저장 데이터 불러오기
         saved = game_service.load_game()
@@ -81,6 +82,7 @@ class StockHTS(QMainWindow):
         self.filter_dialog.hide()
 
         self._init_ui()
+        self.showMaximized()
         self.sync_ui_with_engine()
 
     # ─────────────────────────────────────────────
@@ -134,6 +136,23 @@ class StockHTS(QMainWindow):
         self.inflation_label.setStyleSheet("font-size: 14px; color: #FFA500; font-weight: bold;")
         dash_lay.addWidget(self.macro_label)
         dash_lay.addWidget(self.inflation_label)
+
+        # 최근 검색 종목 (최대 5개)
+        recent_lay = QHBoxLayout()
+        recent_lbl = QLabel("최근:")
+        recent_lbl.setStyleSheet("color: #555; font-size: 12px; min-width: 35px;")
+        recent_lay.addWidget(recent_lbl)
+        self.recent_btns = []
+        recent_btn_style = "QPushButton { background: #1a1a1a; color: #00BFFF; border: 1px solid #333; padding: 2px 8px; border-radius: 3px; font-size: 12px; } QPushButton:hover { border: 1px solid #00BFFF; }"
+        for i in range(5):
+            btn = QPushButton("")
+            btn.setVisible(False)
+            btn.setStyleSheet(recent_btn_style)
+            btn.clicked.connect(lambda _, idx=i: self._on_recent_clicked(idx))
+            recent_lay.addWidget(btn)
+            self.recent_btns.append(btn)
+        recent_lay.addStretch()
+        dash_lay.addLayout(recent_lay)
         main_layout.addWidget(self.dashboard)
 
         # ── 중앙 콘텐츠 ──────────────────────────
@@ -417,9 +436,6 @@ class StockHTS(QMainWindow):
         d.show(); self.active_dialogs.append(d)
 
     def open_delisted_window(self):
-        existing = next((d for d in self.active_dialogs if isinstance(d, InfoTableDialog)), None)
-        if existing:
-            existing.raise_(); existing.activateWindow(); return
         headers = ["No", "생애 주기", "등급", "상태", "그룹", "섹터", "회사명", "산업분류", "마지막 주가", "발행주수", "자사주 %"]
         d = InfoTableDialog("💀 상장폐지 역사관", headers, self.game_service, self)
         d.setModal(False)
@@ -474,9 +490,11 @@ class StockHTS(QMainWindow):
         self.news_window = None
 
         self.game_service.reset_game(self.my_cash, self.my_portfolio)
-        self.my_cash      = 1_000_000
-        self.my_portfolio = {}
+        self.my_cash         = 1_000_000
+        self.my_portfolio    = {}
         self.selected_stock_name = ""
+        self.recent_stocks   = []
+        self._refresh_recent_btns()
 
         self.report_panel.clear()
         self.curve.setData([])
@@ -557,6 +575,9 @@ class StockHTS(QMainWindow):
 
         for dialog in self.active_dialogs[:]:
             try:
+                # StockFilterDialog는 닫혀있어도 active_dialogs에 유지 (필터 조건 보존)
+                if isinstance(dialog, StockFilterDialog):
+                    continue
                 if dialog and dialog.isVisible():
                     if isinstance(dialog, MyInvestmentDialog):
                         dialog.update_info(total_eval, total_profit, total_rate)
@@ -571,16 +592,18 @@ class StockHTS(QMainWindow):
     # 종목 필터 / 테이블
     # ─────────────────────────────────────────────
     def filter_stocks(self):
-        query  = self.search_bar.text().strip().lower()
-        snaps  = [
+        query      = self.search_bar.text().strip().lower()
+        all_sorted = sorted(self.game_service.s.stocks,
+                            key=lambda x: x.get('market_cap', 0), reverse=True)
+        rank_map   = {s['meta']['c_name']: i+1 for i, s in enumerate(all_sorted)}
+        snaps = [
             {"name": s['meta']['c_name'], "price": int(s['price']),
              "rate": s.get('rate', 0.0), "meta": s['meta'],
-             "shares": s['shares']}
-            for s in sorted(self.game_service.s.stocks,
-                            key=lambda x: x.get('market_cap', 0), reverse=True)
+             "shares": s['shares'], "rank": rank_map.get(s['meta']['c_name'], 0)}
+            for s in all_sorted
         ]
         filtered = []
-        f_dialog = next((d for d in self.active_dialogs if isinstance(d, StockFilterDialog)), None)
+        f_dialog = getattr(self, 'filter_dialog', None)
 
         for snap in snaps:
             if f_dialog:  # 닫혀있어도 필터 조건 유지
@@ -625,6 +648,8 @@ class StockHTS(QMainWindow):
             if query not in snap['name'].lower(): continue
             filtered.append(snap)
 
+        # rank 순으로 정렬 (필터 후에도 시총 순위 유지)
+        filtered.sort(key=lambda x: x.get('rank', 9999))
         self._update_table(filtered)
         if len(filtered) == 1:
             self.selected_stock_name = filtered[0]['name']
@@ -632,14 +657,17 @@ class StockHTS(QMainWindow):
     def _update_table(self, snaps: list):
         self.stock_table.setRowCount(len(snaps))
         for i, st in enumerate(snaps):
-            col = rate_color(st['rate'])
+            col  = rate_color(st['rate'])
+            rank = st.get('rank', i+1)
             n_it = QTableWidgetItem(st['name'])
             p_it = QTableWidgetItem(f"{int(st['price']):,}원")
             r_it = QTableWidgetItem(f"{st['rate']:+.2f}%")
+            h_it = QTableWidgetItem(str(rank))
             if st['name'] == self.selected_stock_name:
                 n_it.setForeground(QColor("#00FF00"))
                 n_it.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
             p_it.setForeground(QColor(col)); r_it.setForeground(QColor(col))
+            self.stock_table.setVerticalHeaderItem(i, h_it)
             self.stock_table.setItem(i, 0, n_it)
             self.stock_table.setItem(i, 1, p_it)
             self.stock_table.setItem(i, 2, r_it)
@@ -648,6 +676,7 @@ class StockHTS(QMainWindow):
         it = self.stock_table.item(r, 0)
         if it:
             self.selected_stock_name = it.text()
+            self._add_recent_stock(it.text())
             self.sync_ui_with_engine()
 
     def scroll_to_selected(self):
@@ -900,6 +929,33 @@ class StockHTS(QMainWindow):
     # ─────────────────────────────────────────────
     # 헬퍼
     # ─────────────────────────────────────────────
+    def _add_recent_stock(self, name: str):
+        if name in self.recent_stocks:
+            self.recent_stocks.remove(name)
+        self.recent_stocks.insert(0, name)
+        self.recent_stocks = self.recent_stocks[:5]
+        self._refresh_recent_btns()
+
+    def _refresh_recent_btns(self):
+        for i, btn in enumerate(self.recent_btns):
+            if i < len(self.recent_stocks):
+                btn.setText(self.recent_stocks[i])
+                btn.setVisible(True)
+            else:
+                btn.setVisible(False)
+
+    def _on_recent_clicked(self, idx: int):
+        if idx < len(self.recent_stocks):
+            name = self.recent_stocks[idx]
+            self.selected_stock_name = name
+            self.search_bar.clear()
+            for i in range(self.stock_table.rowCount()):
+                it = self.stock_table.item(i, 0)
+                if it and it.text() == name:
+                    self.stock_table.setCurrentCell(i, 0)
+                    break
+            self.sync_ui_with_engine()
+
     def _get_selected_stock(self) -> dict | None:
         return self.game_service.get_stock_by_name(self.selected_stock_name)
 
@@ -953,6 +1009,12 @@ class InfoTableDialog(QDialog):
                 self.table.setItem(i, j, it)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.resizeColumnsToContents()
+
+    def closeEvent(self, event):
+        parent = self.parent()
+        if parent and hasattr(parent, 'active_dialogs') and self in parent.active_dialogs:
+            parent.active_dialogs.remove(self)
+        event.accept()
 
     def _on_cell_clicked(self, row, col):
         it = self.table.item(row, 6)
