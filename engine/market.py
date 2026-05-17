@@ -698,7 +698,7 @@ class StockMarket:
             stock['price']  //= split_ratio
             stock['shares']  *= split_ratio
             meta['split_count'] = meta.get('split_count', 0) + 1
-            self.s.daily_splits[old_name] = float(split_ratio)
+            self.s.daily_splits[old_name] = 1.0 / float(split_ratio)  # 과거 주가 ÷ split_ratio
             if not silent:
                 self.s.daily_news.append(f"✂️ [액면분할] {meta['c_name']}이 {split_ratio}:1 분할을 실시합니다.")
                 self.s.daily_news.append(f"  └ 현재가: {stock['price']:,}원 | 발행주식수: {stock['shares'] / 1e8:.1f}억 주")
@@ -723,7 +723,7 @@ class StockMarket:
                 stock['shares'] //= ratio
                 meta['merge_count']     = merge_count + 1
                 meta['last_merge_date'] = today_str
-                self.s.daily_splits[old_name] = 1 / ratio
+                self.s.daily_splits[old_name] = float(ratio)  # 과거 주가 × ratio
 
                 # 병합 시 HP 소량 회복 (최대 soft_cap까지)
                 hp_gain  = 5.0

@@ -660,7 +660,11 @@ class DelistedDetailDialog(QDialog):
         self.chart_widget.setBackground('#000000')
         self.chart_widget.setMouseEnabled(x=False, y=False)
         self.chart_widget.hideButtons()
-        self.curve = self.chart_widget.plot(pen=pg.mkPen(color='#5DADE2', width=2))
+        self.curve    = self.chart_widget.plot(pen=pg.mkPen(color='#5DADE2', width=2))
+        self.baseline = pg.InfiniteLine(pos=0, angle=0,
+                            pen=pg.mkPen('#555', width=1,
+                            style=__import__('PyQt6.QtCore', fromlist=['Qt']).Qt.PenStyle.DashLine))
+        self.chart_widget.addItem(self.baseline)
         content_lay.addWidget(self.chart_widget, 7)
 
         right_vbox = QVBoxLayout()
@@ -672,6 +676,7 @@ class DelistedDetailDialog(QDialog):
 
         self.earnings_table = QTableWidget(0, 4)
         self.earnings_table.setHorizontalHeaderLabels(["분기", "매출액 (원)", "영업이익 (원)", "순이익 (원)"])
+        self.earnings_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.earnings_table.setStyleSheet("QTableWidget { background-color: #000; color: #e0e0e0; gridline-color: #222; border: 1px solid #333; } QHeaderView::section { background-color: #222; color: #00FF00; }")
         self.earnings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         right_vbox.addWidget(self.earnings_table, 6)
@@ -771,6 +776,14 @@ class DelistedDetailDialog(QDialog):
             smoothed = disp[:]
 
             if smoothed:
+                # ── 라인 그래프 그리기 ────────────────────────
+                diff_color = "#FF4444" if float(raw[-1]) >= float(raw[0]) else "#4444FF"
+                self.curve.setPen(pg.mkPen(color=diff_color, width=2))
+                self.curve.setData(smoothed)
+
+                # 기준선 (상장 첫날 가격)
+                self.baseline.setPos(float(raw[0]))
+
                 # raw 전체 기준 실제 최고/최저
                 raw_floats = [float(x) for x in raw]
                 real_max   = max(raw_floats)
@@ -792,7 +805,6 @@ class DelistedDetailDialog(QDialog):
                         try: self.chart_widget.removeItem(getattr(self, attr))
                         except: pass
 
-                import pyqtgraph as pg
                 self.max_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#FF4444'), symbol='o')
                 self.max_scatter.addPoints([{'pos': (max_idx, max_val)}])
                 self.chart_widget.addItem(self.max_scatter)
