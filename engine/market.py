@@ -120,10 +120,15 @@ class StockMarket:
             tier      = meta.get('tier', '소형주')
             sector    = SECTOR_MAP.get(meta.get('ind', ''), 'Value')
 
-            # 체급별 변동성 (소형주 0.020 → 0.015로 축소)
-            if   "대형" in tier: vol = 0.008; tier_mult = 0.8
-            elif "중형" in tier: vol = 0.012; tier_mult = 1.0
-            else:                vol = 0.015; tier_mult = 1.2
+            # ★ 체급별 변동성 확대 (상승폭 현실화)
+            if   "대형" in tier: vol = 0.010; tier_mult = 0.8
+            elif "중형" in tier: vol = 0.015; tier_mult = 1.0
+            else:                vol = 0.020; tier_mult = 1.2
+
+            # ★ 섹터별 변동성 추가 조정
+            if sector == "Theme":   vol *= 1.4   # 테마주: 변동성 가장 큼
+            elif sector == "Growth": vol *= 1.2  # 성장주: 변동성 큼
+            elif sector == "Defensive": vol *= 0.8  # 방어주: 변동성 작음
 
             eff   = meta.get('efficiency', 0.05) * tier_mult
             # ★ 경기 사이클별 efficiency 변동
@@ -139,23 +144,39 @@ class StockMarket:
             # 섹터/테크 조정
             sector_adj = 0.0
             if lv >= 2 and sector == "Growth":
-                sector_adj += 0.05 / 252
+                sector_adj += 0.08 / 252   # Lv2+: 성장주 강화
+            elif lv >= 2 and sector == "Theme":
+                sector_adj += 0.05 / 252   # Lv2+: 테마주도 상승
             elif lv >= 3 and sector == "Value":
-                sector_adj -= 0.03 / 252
+                sector_adj -= 0.03 / 252   # Lv3+: 가치주 약화
 
             years_since_lv_up = cur_date.year - tech_upgrade_year
             if 0 <= years_since_lv_up <= 3:
-                if   sector == "Growth":    sector_adj += 0.05 / 252
+                if   sector == "Growth":    sector_adj += 0.08 / 252  # 기술 전환 직후 성장주 급등
+                elif sector == "Theme":     sector_adj += 0.06 / 252  # 테마주도 함께 급등
                 elif sector == "Defensive": sector_adj += 0.01 / 252
 
             cycle_sector = {
-                ("확장", "Growth"):    +0.04 / 252,   # 상향
-                ("확장", "Value"):     +0.02 / 252,   # 확장기 Value도 상승
-                ("확장", "Defensive"): -0.01 / 252,   # 완화: -0.02 → -0.01
-                ("수축", "Defensive"): +0.02 / 252,
-                ("수축", "Growth"):    -0.01 / 252,
-                ("저점", "Value"):     +0.02 / 252,
-                ("저점", "Growth"):    +0.01 / 252,   # 저점에서 성장주도 소폭 회복
+                # ★ 확장기: 성장주 1등, 테마주 2등, 가치주 3등
+                ("확장", "Growth"):    +0.20 / 252,   # 성장주 강화
+                ("확장", "Value"):     +0.08 / 252,
+                ("확장", "Defensive"): -0.04 / 252,
+                ("확장", "Theme"):     +0.10 / 252,   # 테마주 약화 (Growth < Theme 역전 방지)
+                # ★ 정점기: 방어주 선호, 성장주/테마주 피크아웃
+                ("정점", "Defensive"): +0.05 / 252,
+                ("정점", "Growth"):    -0.03 / 252,
+                ("정점", "Theme"):     -0.05 / 252,   # 테마주 정점서 먼저 빠짐
+                ("정점", "Value"):     +0.02 / 252,
+                # ★ 수축기: 방어주 강세, 성장주/테마주 급락
+                ("수축", "Defensive"): +0.10 / 252,
+                ("수축", "Growth"):    -0.08 / 252,
+                ("수축", "Value"):     -0.03 / 252,
+                ("수축", "Theme"):     -0.12 / 252,   # 테마주 수축기 가장 큰 하락
+                # ★ 저점기: 가치주 반등, 성장주 바닥 다지기
+                ("저점", "Value"):     +0.10 / 252,
+                ("저점", "Growth"):    +0.05 / 252,
+                ("저점", "Defensive"): +0.04 / 252,
+                ("저점", "Theme"):     +0.03 / 252,   # 테마주 저점서 느리게 회복
             }.get((cycle, sector), 0.0)
             sector_adj += cycle_sector
 
@@ -257,14 +278,23 @@ class StockMarket:
 
             if annual_ni > 0:
                 per = market_cap / max(1.0, annual_ni)
-                if per > per_limit * 1.5:
-                    val_penalty = -min(0.005, (per - per_limit * 1.5) / per_limit * 0.003)
+                # ★ 섹터별 PER 허용 범위 차등
+                # 성장주/테마주는 현실에서 PER 100배도 정당화됨
+                per_tolerance = {
+                    "Growth":    2.5,   # Growth: per_limit의 2.5배까지 허용
+                    "Theme":     2.0,   # Theme: 2배까지 허용
+                    "Value":     1.5,   # Value: 1.5배
+                    "Defensive": 1.3,   # Defensive: 1.3배
+                }.get(sector, 1.5)
+
+                if per > per_limit * per_tolerance * 1.5:
+                    val_penalty = -min(0.005, (per - per_limit * per_tolerance) / per_limit * 0.002)
                     daily_return += val_penalty
-                elif per > per_limit:
-                    val_penalty = -min(0.002, (per - per_limit) / per_limit * 0.001)
+                elif per > per_limit * per_tolerance:
+                    val_penalty = -min(0.002, (per - per_limit * per_tolerance) / per_limit * 0.001)
                     daily_return += val_penalty
                 elif per < per_limit * 0.5:
-                    daily_return += 0.0002
+                    daily_return += 0.0003   # 저평가 반등 강화
             elif annual_ni < 0:
                 hist_ni_count = len([x for yv in hist.values() for x in yv.values()])
                 if hist_ni_count >= 4:
@@ -633,18 +663,27 @@ class StockMarket:
         month = cur_date.month
         adj   = 0.0
 
-        # 1월 효과: 소형주 보너스
+        # 1월 효과: 소형주 + 테마주 보너스 (신년 테마 기대감)
         if month == 1 and "소형" in tier:
-            adj += 0.0003
+            adj += 0.0008
+        if month == 1 and sector == "Theme":
+            adj += 0.0010
 
-        # 4월/10월: 실적시즌 변동성 확대 (노이즈 추가는 apply_price_change에서)
-        # 여기선 Growth 섹터 소폭 보너스만
+        # 4월/10월: 실적시즌 → Growth/Theme 변동성 확대
         if month in [4, 10] and sector == "Growth":
-            adj += 0.0001
+            adj += 0.0005
+        if month in [4, 10] and sector == "Theme":
+            adj += 0.0008   # 테마주 실적시즌 더 민감
 
-        # 12월: 방어주/배당주 소폭 상승
+        # 12월: 방어주/배당주 상승 + 테마주 연말 정리
         if month == 12 and sector == "Defensive":
-            adj += 0.0002
+            adj += 0.0006
+        if month == 12 and sector == "Theme":
+            adj -= 0.0005   # 연말 테마주 차익실현
+
+        # 여름(7~8월): 거래량 감소 → 테마주 변동성 축소
+        if month in [7, 8] and sector == "Theme":
+            adj -= 0.0003
 
         return adj / 252
 

@@ -232,9 +232,17 @@ class EarningsManager:
             meta['continuous_loss_count'] = 0
 
             # ★ 흑자 시 부채 일부 상환 (현실적 구조)
+            # 단, 부채비율 최솟값 유지 (완전 무부채는 비현실적)
             debt = meta.get('debt', 0.0)
-            debt_repay = min(debt, net_income * 0.3)   # 순이익의 30%로 부채 상환
-            meta['debt'] = max(0.0, debt - debt_repay)
+            assets_now = meta.get('assets', 1.0)
+
+            # 최소 부채비율: 대형주 20%, 중형주 30%, 소형주 40%
+            _MIN_DEBT_RATIO = {'대형주': 0.20, '중형주': 0.30, '소형주': 0.40}
+            min_debt_ratio  = _MIN_DEBT_RATIO.get(tier, 0.30)
+            min_debt        = assets_now * min_debt_ratio
+
+            debt_repay = min(max(0.0, debt - min_debt), net_income * 0.3)
+            meta['debt'] = max(min_debt, debt - debt_repay)
             if meta['assets'] > 0:
                 meta['debt_ratio'] = meta['debt'] / meta['assets']
 
