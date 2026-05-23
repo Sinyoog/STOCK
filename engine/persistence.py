@@ -219,14 +219,10 @@ class SaveManager:
                     "buffett_index":         getattr(self.s, 'buffett_index', 0.0),
                     "foreign_flow_index":    getattr(self.s, 'foreign_flow_index', 0.0),
                     "used_all_time":         list(self.s.used_all_time),
-                    "pending_delist":        {
-                        k: {"date": v["date"].strftime("%Y-%m-%d") if hasattr(v.get("date"), "strftime") else str(v.get("date", "")), "reason": v.get("reason", "")}
-                        if isinstance(v, dict) else str(v)
-                        for k, v in self.s.pending_events.get("delist", {}).items()
+                    "group_industry_cooldown": {
+                        gid: {ind: dt.strftime("%Y-%m-%d") for ind, dt in inds.items()}
+                        for gid, inds in getattr(self.s, 'group_industry_cooldown', {}).items()
                     },
-                    "gdp":                   getattr(self.s, 'gdp', 600_000_000_000_000.0),
-                    "buffett_index":         getattr(self.s, 'buffett_index', 0.0),
-                    "foreign_flow_index":    getattr(self.s, 'foreign_flow_index', 0.0),
                 },
                 "player": {
                     "my_cash":       my_cash,
@@ -294,6 +290,16 @@ class SaveManager:
             self.s.gdp                = eng.get("gdp", 600_000_000_000_000.0)
             self.s.buffett_index      = eng.get("buffett_index", 0.0)
             self.s.foreign_flow_index = eng.get("foreign_flow_index", 0.0)
+
+            # ★ 그룹 산업 재진입 쿨다운 복원
+            raw_cooldown = eng.get("group_industry_cooldown", {})
+            self.s.group_industry_cooldown = {
+                gid: {
+                    ind: datetime.strptime(dt_str, "%Y-%m-%d")
+                    for ind, dt_str in inds.items()
+                }
+                for gid, inds in raw_cooldown.items()
+            }
 
             # pending_events delist 복원
             pending_delist = eng.get("pending_delist", {})

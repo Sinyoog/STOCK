@@ -1046,6 +1046,14 @@ class StockMarket:
             self.s.pending_events.get("delist", {}).pop(name, None)
             self.s.pending_events.get("warning", {}).pop(name, None)
             remaining -= 1
+            # ★ 그룹 계열사 즉시 상폐 시 5년 쿨다운 등록
+            group_id = meta.get('group_id')
+            if group_id:
+                ind = meta.get('ind')
+                if ind:
+                    from datetime import timedelta
+                    cooldown_date = self.s.current_date + timedelta(days=365 * 5)
+                    self.s.group_industry_cooldown.setdefault(group_id, {})[ind] = cooldown_date
 
         delisted_this_turn = []
         is_depression = (
@@ -1105,6 +1113,14 @@ class StockMarket:
                 ds['meta']['is_officially_delisted'] = True
                 self.s.delisted_stocks.append(ds)
                 self.s.stocks.remove(ds)
+                # ★ 그룹 계열사 상폐 시 5년 쿨다운 등록
+                group_id = ds['meta'].get('group_id')
+                if group_id:
+                    ind = ds['meta'].get('ind')
+                    if ind:
+                        from datetime import timedelta
+                        cooldown_date = self.s.current_date + timedelta(days=365 * 5)
+                        self.s.group_industry_cooldown.setdefault(group_id, {})[ind] = cooldown_date
 
     # ─────────────────────────────────────────────
     # 그룹 확장 (기존 유지)
@@ -1164,7 +1180,13 @@ class StockMarket:
             members = [s for s in self.s.stocks if s['meta']['group_id'] == gid]
             if len(members) < limit and random.random() < 0.03:
                 existing_inds = [m['meta']['ind'] for m in members]
-                avail = [i for i in MAIN_INDUSTRIES if i not in existing_inds]
+                # ★ 쿨다운 중인 산업 제외 (상폐 후 5년 이내)
+                cooldown = self.s.group_industry_cooldown.get(gid, {})
+                avail = [
+                    i for i in MAIN_INDUSTRIES
+                    if i not in existing_inds
+                    and self.s.current_date >= cooldown.get(i, self.s.current_date)
+                ]
                 if avail:
                     new_ind = random.choice(avail)
                     self.s.stocks.append(self.cm.create_stock_data(None, new_ind, "중", gid))

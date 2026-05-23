@@ -41,8 +41,9 @@ class GameService:
         for gn in top3_groups:
             gid = f"GROUP_{gn}"
             self.s.groups[gid] = {"name": gn, "active": True}
-            # 대표 계열사 1개는 최상위 티어
-            ind1, ind2 = random.sample(MAIN_INDUSTRIES, 2)
+            # 그룹 내 산업 중복 방지: 2개를 겹치지 않게 뽑음
+            ind1 = random.choice(MAIN_INDUSTRIES)
+            ind2 = random.choice([i for i in MAIN_INDUSTRIES if i != ind1])
             self.s.stocks.append(self.cm.create_stock_data(None, ind1, "대1", gid))
             self.s.stocks.append(self.cm.create_stock_data(None, ind2, "대", gid))
 
@@ -51,7 +52,9 @@ class GameService:
         for gn in normal_groups:
             gid = f"GROUP_{gn}"
             self.s.groups[gid] = {"name": gn, "active": True}
-            for ind in random.sample(MAIN_INDUSTRIES, 2):
+            # 그룹 내 산업 중복 방지
+            inds = random.sample(MAIN_INDUSTRIES, 2)
+            for ind in inds:
                 self.s.stocks.append(self.cm.create_stock_data(None, ind, "대", gid))
 
         # ── 독립 대기업 5개 (1조~20조) ───────────────────────────

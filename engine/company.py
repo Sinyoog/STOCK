@@ -32,20 +32,23 @@ class CompanyManager:
             self.used_all_time.add(final_name)
             return final_name
 
-        base_core_name = info if info else (self.name_pool.pop(0) if self.name_pool else "미명")
-        final_name = base_core_name if self.current_generation == 1 else f"{base_core_name} {self.current_generation}"
+        # ── 독립 기업 이름 생성 (루프 구조) ──────────────────────
+        # 재귀 대신 루프로 변경 — 현재 세대 풀을 진짜 다 소진해야 다음 세대로 넘어감
+        while True:
+            # 현재 풀에서 순서대로 후보 탐색
+            while self.name_pool:
+                candidate = self.name_pool.pop(0)
+                suffix = f" {self.current_generation}" if self.current_generation > 1 else ""
+                final_name = f"{candidate}{suffix}"
+                if final_name not in self.used_all_time:
+                    self.used_all_time.add(final_name)
+                    return final_name
+                # 이미 사용된 이름이면 다음 후보로 넘어감 (세대 올리지 않음)
 
-        if final_name in self.used_all_time:
-            if self.name_pool:
-                return self.get_unique_name(False, None, self.name_pool.pop(0))
-            else:
-                self.current_generation += 1
-                self.name_pool = [n for n in NAME_DB if n not in GROUP_BASE_NAMES]
-                random.shuffle(self.name_pool)
-                return self.get_unique_name(False, None, self.name_pool.pop(0))
-
-        self.used_all_time.add(final_name)
-        return final_name
+            # 현재 세대 풀을 전부 소진했을 때만 다음 세대로 넘어감
+            self.current_generation += 1
+            self.name_pool = [n for n in NAME_DB if n not in GROUP_BASE_NAMES]
+            random.shuffle(self.name_pool)
 
     # ─────────────────────────────────────────────
     # 종목 생성

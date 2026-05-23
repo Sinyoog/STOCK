@@ -118,3 +118,8 @@ class MarketState:
         # ── ★ 신규: 산업별 경쟁도 ────────────────
         # {ind: 기업 수} 형태로 매일 갱신
         self.industry_competition: dict = {}
+
+        # ── ★ 신규: 그룹별 산업 재진입 쿨다운 ───
+        # {그룹ID: {산업명: 재진입_가능_날짜(datetime)}}
+        # 계열사 상장폐지 후 5년간 같은 산업 재진입 불가
+        self.group_industry_cooldown: dict = {}
