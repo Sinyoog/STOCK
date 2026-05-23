@@ -126,6 +126,14 @@ class StockMarket:
             else:                vol = 0.015; tier_mult = 1.2
 
             eff   = meta.get('efficiency', 0.05) * tier_mult
+            # ★ 경기 사이클별 efficiency 변동
+            cycle_eff_mult = {
+                "확장": 1.10,   # 호황기: 마진 개선
+                "정점": 1.00,
+                "수축": 0.85,   # 불황기: 마진 악화
+                "저점": 0.75,
+            }.get(cycle, 1.0)
+            eff  *= cycle_eff_mult
             alpha = (eff - 0.05) * 0.05
 
             # 섹터/테크 조정
@@ -266,33 +274,27 @@ class StockMarket:
                     loss_mult    = min(2.0, 1.0 + loss_cnt * 0.1)
                     daily_return += base_penalty * loss_mult
 
-            # ★ 주가 → HP 차감 (-80~95% 설계, 방어막 미적용)
-            # initial_price 없으면 52주 신고가 또는 assets/주식수로 추정
+            # ★ 주가 기반 HP 차감
+            # 주가 -90% 이상: 흑자여도 시장 신뢰 완전 상실 → 소폭 HP 차감
+            # (efficiency 패널티와 함께 결국 적자 전환 유도)
             initial_price = meta.get('initial_price', 0)
             if initial_price <= 10:
-                # 기존 세이브 파일 대응: 52주 신고가 또는 assets 기반 추정
                 p52h = meta.get('price_52w_high', 0)
                 if p52h > 10:
                     initial_price = p52h
                 else:
-                    # assets / 주식수로 추정
-                    shares = max(1, stock.get('shares', 1))
-                    initial_price = meta.get('assets', old_price * shares) / shares
+                    shares_v = max(1, stock.get('shares', 1))
+                    initial_price = meta.get('assets', old_price * shares_v) / shares_v
                 initial_price = max(old_price, initial_price)
 
             if initial_price > 10:
-                price_drop = 1.0 - (old_price / max(1.0, initial_price))
-
-                if   price_drop > 0.95: hp_price_drain = 5.0
-                elif price_drop > 0.85: hp_price_drain = 2.0
-                elif price_drop > 0.70: hp_price_drain = 0.5
-                elif price_drop > 0.50: hp_price_drain = 0.1
-                else:                   hp_price_drain = 0.0
+                price_drop_v = 1.0 - (old_price / max(1.0, initial_price))
+                if   price_drop_v > 0.95: hp_price_drain = 0.3   # -95%: 0.3/일
+                elif price_drop_v > 0.90: hp_price_drain = 0.1   # -90%: 0.1/일
+                else:                     hp_price_drain = 0.0
 
                 if hp_price_drain > 0:
-                    cur_hp = meta.get('hp', 50.0)
-                    # 방어막 미적용: 직접 HP 차감
-                    meta['hp'] = max(0.0, cur_hp - hp_price_drain)
+                    meta['hp'] = max(0.0, meta.get('hp', 50.0) - hp_price_drain)
 
             # ★ 외국인/기관 이탈 → 주가 하락 압력
             foreign_share = meta.get('foreign_share', 0.0)
@@ -1304,9 +1306,17 @@ class StockMarket:
             if loss_count == 0:
                 hp       = meta.get('hp', 50.0)
                 soft_cap = meta.get('hp_soft_cap', 60.0)
-                # ★ HP 0이면 회복 안 됨 (좀비 방지)
-                if hp > 0.0:
+                # ★ HP 0이면 회복 안 됨 + 주가 100원 미만이면 회복 안 됨
+                if hp > 0.0 and price >= 100:
                     meta['hp'] = round(min(soft_cap, hp + 0.02), 2)
+
+        # ★ 절대 주가 기준 HP 차감 (loss_count 관계없이)
+        # 주가가 낮을수록 시장 신뢰 상실 → HP 강제 차감
+        hp_now = meta.get('hp', 50.0)
+        if hp_now > 0.0:
+            if   price <= 10:  meta['hp'] = max(0.0, hp_now - 2.0)
+            elif price < 50:   meta['hp'] = max(0.0, hp_now - 1.0)
+            elif price < 100:  meta['hp'] = max(0.0, hp_now - 0.5)
 
         # char 상태 판정
         hp_now       = meta.get('hp', 50.0)
@@ -1481,9 +1491,57 @@ class StockMarket:
         if hp_ratio >= 0.40: return
 
         if meta.get('group_id'):
-            meta['hp'] = round(min(soft_cap, hp + 5.0), 2)
-            if not self.s.silent_mode:
-                self.s.daily_news.append(f"🛡️ [그룹지원] {meta['c_name']}가 그룹사의 자금 지원으로 위기를 넘깁니다.")
+            gid        = meta['group_id']
+            loss_cnt   = meta.get('continuous_loss_count', 0)
+            hp_pct     = hp_ratio
+
+            # ★ 그룹 전체 시총 계산
+            group_cap  = sum(
+                s['market_cap'] for s in self.s.stocks
+                if s['meta'].get('group_id') == gid
+            )
+
+            # ★ 주가 하락률 계산
+            initial_price = meta.get('initial_price', 0)
+            cur_price     = stock['price']
+            if initial_price > 10:
+                price_drop = 1.0 - (cur_price / max(1.0, initial_price))
+            else:
+                price_drop = 0.0
+
+            # ★ 퇴출 조건 체크 (하나라도 해당하면 버림)
+            should_abandon = (
+                loss_cnt >= 8                          # 연속 적자 2년 이상
+                or price_drop >= 0.90                  # 주가 -90% 이상
+                or (hp_pct < 0.20 and loss_cnt >= 4)  # HP 20% 미만 + 연속 적자 4분기
+            )
+
+            # ★ 지원 가능 조건 체크
+            can_support = (
+                loss_cnt < 8
+                and price_drop < 0.90
+                and group_cap >= 50_000_000_000   # 그룹 시총 500억 이상
+            )
+
+            if should_abandon:
+                # 그룹이 계열사를 버림
+                old_group = meta.get('group', meta['c_name'])
+                meta['group_id'] = None
+                meta['group']    = None
+                if not self.s.silent_mode:
+                    self.s.daily_news.append(
+                        f"🗑️ [계열사 정리] {old_group}그룹이 {meta['c_name']}을 "
+                        f"정리했습니다. (연속적자 {loss_cnt}분기 / 주가하락 {price_drop*100:.1f}%)"
+                    )
+                # 그룹에서 제외 후 독자 생존 로직으로 넘어감
+            elif can_support:
+                # 정상 그룹지원
+                meta['hp'] = round(min(soft_cap, hp + 5.0), 2)
+                if not self.s.silent_mode:
+                    self.s.daily_news.append(
+                        f"🛡️ [그룹지원] {meta['c_name']}가 그룹사의 자금 지원으로 위기를 넘깁니다."
+                    )
+                return  # 지원 받았으면 독자 생존 로직 불필요
         else:
             if sector in ["Value", "Defensive"] and meta.get('treasury_share', 0) > 0.02:
                 sell_shares_count  = int(stock['shares'] * 0.02)

@@ -720,6 +720,69 @@ class DelistedDetailDialog(QDialog):
         shield_label  = "발동중" if shield_active else "대기중"
         shield_color  = '#00FFFF' if shield_active else '#888888'
 
+        # ── 밸류에이션 계산 ──────────────────────────────────────
+        name = m.get('c_name', '')
+        hist = self.gs.s.earnings_history.get(name, {})
+        all_ni = []; all_op = []; all_rev = []
+        for yd in hist.values():
+            for qd in yd.values():
+                all_ni.append(qd.get('net_income', 0))
+                all_op.append(qd.get('op_income', 0))
+                all_rev.append(qd.get('revenue', 0))
+
+        recent_ni  = all_ni[-4:]  if len(all_ni)  >= 4 else all_ni
+        recent_op  = all_op[-4:]  if len(all_op)  >= 4 else all_op
+        recent_rev = all_rev[-4:] if len(all_rev) >= 4 else all_rev
+        annual_ni  = sum(recent_ni);  annual_op = sum(recent_op);  annual_rev = sum(recent_rev)
+        if 0 < len(recent_ni) < 4:
+            f = 4 / len(recent_ni)
+            annual_ni *= f; annual_op *= f; annual_rev *= f
+
+        assets_v = max(1.0, m.get('assets', 1.0))
+
+        # PER
+        if annual_ni > 0:
+            per_val  = mc / annual_ni
+            if per_val > 9999: per_str, per_icon = "N/A", "⚪"
+            else: per_str = f"{per_val:.1f}배"; per_icon = "🟢" if per_val < 15 else ("🟡" if per_val < 30 else ("🟠" if per_val < 50 else "🔴"))
+        elif annual_ni < 0: per_str, per_icon = "적자", "🔴"
+        else: per_str, per_icon = "N/A", "⚪"
+
+        # PBR
+        pbr_val = mc / assets_v
+        if pbr_val > 9999: pbr_str, pbr_icon = "N/A (데이터 오류)", "⚪"
+        else:
+            pbr_str  = f"{pbr_val:.2f}배"
+            pbr_icon = "🟢" if pbr_val < 1 else ("🟡" if pbr_val < 3 else ("🟠" if pbr_val < 5 else "🔴"))
+
+        # ROE
+        roe_val  = (annual_ni / assets_v * 100) if assets_v > 0 else 0.0
+        roe_str  = f"{roe_val:.1f}%"
+        roe_icon = "🟢" if roe_val >= 15 else ("🟡" if roe_val >= 8 else ("🟠" if roe_val >= 0 else "🔴"))
+
+        # 영업이익률
+        if annual_rev > 0:
+            op_margin = annual_op / annual_rev * 100
+            op_str    = f"{op_margin:.1f}%"
+            op_icon   = "🟢" if op_margin >= 15 else ("🟡" if op_margin >= 5 else ("🟠" if op_margin >= 0 else "🔴"))
+        else: op_str, op_icon = "N/A", "⚪"
+
+        # 부채비율
+        debt_ratio = m.get('debt_ratio', None)
+        if debt_ratio is not None:
+            dr_pct  = debt_ratio * 100
+            dr_str  = f"{dr_pct:.1f}%"
+            dr_icon = "🟢" if dr_pct < 50 else ("🟡" if dr_pct < 100 else ("🟠" if dr_pct < 200 else "🔴"))
+        else: dr_str, dr_icon = "N/A", "⚪"
+
+        # 신용등급
+        credit       = m.get('credit_grade', 'N/A')
+        credit_color = {'AA': '#00FF00', 'BB': '#FFA500', 'CCC': '#FF4444'}.get(credit, '#888888')
+
+        # 52주 신고가/신저가
+        high_52w = m.get('price_52w_high', self.s['price'])
+        low_52w  = m.get('price_52w_low',  self.s['price'])
+
         self.report_panel.setHtml(f"""
         <div style='font-family: Malgun Gothic;'>
             <p><b style='color:#FFD700;font-size:14px;'>[기업 정보]</b><br/>
@@ -727,8 +790,8 @@ class DelistedDetailDialog(QDialog):
             산업: {m['ind']} ({m['sub']})<br/>상태: <b style='color:#FF4444;'>{m['char']}</b></p>
             <p><b style='color:#FFD700;font-size:14px;'>[발행 정보]</b><br/>
             주식수: {self.s['shares']:,} 주<br/>
-            시총: {mc:,} 원
-            <span style='color:#FFD700;font-weight:bold;'> ({mc_str})</span></p>
+            <span style='color:#888888;'>방어막 {shield_str} [{shield_label}]</span><br/>
+            시총: {mc:,} 원 <span style='color:#FFD700;font-weight:bold;'>({mc_str})</span></p>
             <p><b style='color:#FFD700;font-size:14px;'>[지배구조]</b><br/>
             자사주: {ts:.1f}% | 대주주: {os:.1f}%<br/>
             외국인: {fs:.1f}% | 기관 : {ins:.1f}%<br/>개인 : {rs:.1f}%</p>
@@ -739,8 +802,18 @@ class DelistedDetailDialog(QDialog):
             <p style='font-size:15px;font-weight:bold;margin:4px 0;'>
             <span style='color:{hp_color};'>HP {hp:.2f} / {soft_cap:.0f}</span>
             <span style='color:#888;font-size:13px;'> ({hp_ratio*100:.1f}%)</span></p>
-            <p style='font-size:14px;margin:4px 0;'>
-            <span style='color:{shield_color};'>방어막 {shield_str} [{shield_label}]</span></p>
+            <hr style='border: 0.5px solid #333;'/>
+            <p style='font-size:13px;'><b>[밸류에이션]</b><br/>
+            PER&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: {per_icon} {per_str}<br/>
+            PBR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: {pbr_icon} {pbr_str}<br/>
+            ROE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: {roe_icon} {roe_str}<br/>
+            영업이익률: {op_icon} {op_str}<br/>
+            부채비율&nbsp;&nbsp;: {dr_icon} {dr_str}<br/>
+            신용등급&nbsp;&nbsp;: <b style='color:{credit_color};'>{credit}</b></p>
+            <hr style='border: 0.5px solid #333;'/>
+            <p style='font-size:13px;'><b>[시장 지표]</b><br/>
+            52주 신고가: {int(high_52w):,}원<br/>
+            52주 신저가: {int(low_52w):,}원</p>
             <hr style='border: 0.5px solid #333;'/>
             <p style='color: #888; font-size: 11px;'>* 위 수치는 상장폐지 확정 시점의 데이터입니다.</p>
         </div>""")

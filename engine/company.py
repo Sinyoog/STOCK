@@ -198,11 +198,11 @@ class CompanyManager:
                 "debt_ratio":           init_debt_ratio, # ★ 신규: 부채비율
                 "credit_grade":         init_credit,     # ★ 신규: 신용등급
                 "efficiency":           {
-                    "대1": random.uniform(0.08, 0.15),
-                    "대":  random.uniform(0.06, 0.12),
-                    "중":  random.uniform(0.05, 0.10),
-                    "소":  random.uniform(0.05, 0.09),  # 최솟값 0.02 → 0.05
-                }.get(tier, random.uniform(0.05, 0.09)),
+                    "대1": random.uniform(0.08, 0.15),  # 최상위: 고효율
+                    "대":  random.uniform(0.05, 0.12),  # 대기업: 안정적
+                    "중":  random.uniform(0.03, 0.10),  # 중견: 일부 위험
+                    "소":  random.uniform(0.02, 0.09),  # 소형: 구조적 적자 가능
+                }.get(tier, random.uniform(0.02, 0.09)),
                 "momentum":             0.0,
                 "continuous_loss_count": 0,
                 "risk_sensitivity":     {"대": 0.1, "대1": 0.1, "중": 0.5, "소": 1.2}.get(tier, 1.0),

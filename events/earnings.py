@@ -33,12 +33,26 @@ class EarningsManager:
             "저점": 1.15,   # 저점기: 비용 더 증가
         }.get(cycle, 1.0)
 
+        # ★ 주가 하락률 기반 efficiency 강제 하락
+        # 주가 -80% 이상 = 시장 신뢰 상실 → 영업환경 악화 → 실질 마진 하락
+        initial_price = meta.get('initial_price', 0)
+        price_now     = stock.get('price', initial_price)
+        if initial_price > 10 and price_now > 0:
+            price_drop_now = 1.0 - (price_now / max(1.0, initial_price))
+            if   price_drop_now > 0.95: eff_penalty = 0.60   # -95%: efficiency 40%만 남음
+            elif price_drop_now > 0.90: eff_penalty = 0.70   # -90%: 30% 하락
+            elif price_drop_now > 0.80: eff_penalty = 0.85   # -80%: 15% 하락
+            else:                       eff_penalty = 1.0
+            effective_efficiency = meta.get('efficiency', 0.05) * eff_penalty
+        else:
+            effective_efficiency = meta.get('efficiency', 0.05)
+
         revenue   = meta['assets'] * random.uniform(0.04, 0.10) * cycle_revenue_mult
         base_cost = {"대형주": 0.015, "중형주": 0.020, "소형주": 0.030}.get(tier, 0.030)
         base_cost *= cycle_cost_mult   # 경기 사이클 비용 반영
         tier_bonus = {"대형주": 0.02, "중형주": 0.01, "소형주": 0.00}.get(tier, 0)
 
-        op_margin  = meta['efficiency'] - base_cost + tier_bonus
+        op_margin  = effective_efficiency - base_cost + tier_bonus
         op_income  = revenue * op_margin
         interest_rate  = self.s.macro.get('interest_rate', 4.0)
         # 피드백 루프 3: 금리↑ → 기업 이자비용↑ → 실적↓
@@ -127,7 +141,8 @@ class EarningsManager:
 
         if net_income < 0:
             # 연속 적자 카운트
-            meta['continuous_loss_count'] = meta.get('continuous_loss_count', 0) + 1
+            loss_cnt = meta.get('continuous_loss_count', 0) + 1
+            meta['continuous_loss_count'] = loss_cnt
 
             from engine.constants import SECTOR_MAP
             scenario = self.s.current_scenario
@@ -139,26 +154,41 @@ class EarningsManager:
 
             loss_ratio = abs(net_income) / max(1.0, revenue)
             hp_dmg_raw = loss_ratio * 100 * sensitivity * sw
-            _HP_DMG_CAP = {'대형주': 0.5, '중형주': 1.0, '소형주': 1.5}
-            hp_dmg = min(hp_dmg_raw, _HP_DMG_CAP.get(tier, 1.5))
 
-            # ★ 방어막 버그 수정: assets 감소해도 방어막 금액 자체가 줄어야 함
-            # shield_cap 기준으로 방어막 상한 재조정
+            # ★ 연속 적자 가속 (재무 기반 상폐 핵심)
+            # 연속 적자 횟수에 따라 HP 차감 가속
+            if   loss_cnt >= 8: hp_dmg_raw *= 4.0   # 2년 연속 → 4배
+            elif loss_cnt >= 4: hp_dmg_raw *= 2.0   # 1년 연속 → 2배
+            elif loss_cnt >= 2: hp_dmg_raw *= 1.5   # 반년 연속 → 1.5배
+
+            # ★ 부채비율 높으면 추가 차감
+            debt_ratio = meta.get('debt_ratio', 0.5)
+            if   debt_ratio >= 10.0: hp_dmg_raw += 5.0  # 1000%+: 즉각 타격
+            elif debt_ratio >= 5.0:  hp_dmg_raw += 3.0  # 500%+
+            elif debt_ratio >= 3.0:  hp_dmg_raw += 2.0
+            elif debt_ratio >= 2.0:  hp_dmg_raw += 1.0
+            elif debt_ratio >= 1.5:  hp_dmg_raw += 0.5
+
+            # ★ HP 캡 연속적자에 따라 상향 (가속 효과 실현)
+            _BASE_CAP = {'대형주': 0.5, '중형주': 1.0, '소형주': 1.5}
+            base_cap  = _BASE_CAP.get(tier, 1.5)
+            if   loss_cnt >= 8: cap_mult = 4.0   # 2년+ 연속 → 4배
+            elif loss_cnt >= 4: cap_mult = 2.5   # 1년+ 연속 → 2.5배
+            elif loss_cnt >= 2: cap_mult = 1.5   # 반년+ 연속 → 1.5배
+            else:               cap_mult = 1.0
+            hp_dmg = min(hp_dmg_raw, base_cap * cap_mult)
+
+            # 방어막 상한 재조정 + 소진 처리
             shield_cap_now = market_cap * spec['cap_ratio']
             if shield > shield_cap_now:
                 meta['shield'] = shield = round(shield_cap_now, 2)
-
-            # 방어막이 너무 작으면 소진 처리 (무한 지속 방지)
             if shield < 100:
                 meta['shield'] = shield = 0.0
 
-            # HP가 soft_cap의 30% 미만일 때만 쉴드 발동
             hp_ratio    = hp / max(1.0, soft_cap)
             shield_mode = hp_ratio < 0.30
 
             if shield_mode and shield > 0:
-                # 방어막으로 HP 차감 방어
-                # shield_hp_val: 방어막이 HP 몇 포인트 방어 가능한지
                 shield_hp_val = shield / max(1.0, assets) * 100
                 if shield_hp_val >= hp_dmg:
                     meta['shield'] = round(max(0.0, shield - hp_dmg / 100 * assets), 2)
@@ -169,12 +199,26 @@ class EarningsManager:
             else:
                 meta['hp'] = round(max(0.0, hp - hp_dmg), 2)
 
-            # ★ 적자 시 assets 감소 (하한선 보장)
+            # ★ 적자 시 assets 감소 (하한선 완화: 10% → 1%)
+            # 자본잠식 가능하도록 하한선 낮춤
             init_assets = meta.get('initial_assets', assets)
             meta['assets'] = max(
-                init_assets * 0.1,   # 하한선: 초기값의 10%
+                init_assets * 0.01,   # 하한선: 초기값의 1% (자본잠식 가능)
                 meta['assets'] + net_income
             )
+
+            # ★ 적자 시 부채 증가 (차입으로 버티는 구조)
+            debt = meta.get('debt', 0.0)
+            debt_increase = abs(net_income) * 0.5   # 손실의 50%만큼 부채 증가
+            meta['debt'] = debt + debt_increase
+            # 부채비율 갱신
+            if meta['assets'] > 0:
+                meta['debt_ratio'] = meta['debt'] / meta['assets']
+
+            # ★ 자본잠식 체크 (assets < debt)
+            if meta['assets'] < meta.get('debt', 0):
+                # 자본잠식 발생 → HP 추가 즉시 차감
+                meta['hp'] = max(0.0, meta.get('hp', 0) - 5.0)
 
             # ★ 적자 시 assets 감소 (하한선 보장)
             init_assets = meta.get('initial_assets', assets)
@@ -184,10 +228,17 @@ class EarningsManager:
             )
 
         else:
-            # ── 흑자: 연속 적자 초기화 + HP 회복 + 오버플로우 쉴드 적립 ──
+            # ── 흑자: 연속 적자 초기화 + HP 회복 + 부채 감소 ──
             meta['continuous_loss_count'] = 0
 
-            # HP 회복량 상향 (0.5 → 0.8배)
+            # ★ 흑자 시 부채 일부 상환 (현실적 구조)
+            debt = meta.get('debt', 0.0)
+            debt_repay = min(debt, net_income * 0.3)   # 순이익의 30%로 부채 상환
+            meta['debt'] = max(0.0, debt - debt_repay)
+            if meta['assets'] > 0:
+                meta['debt_ratio'] = meta['debt'] / meta['assets']
+
+            # HP 회복량 (0.8배)
             heal   = (net_income / assets * 100) * 0.8
             new_hp = hp + heal
 
@@ -224,6 +275,20 @@ class EarningsManager:
                 init_assets_v * 100,  # 상한선: 초기값의 100배
                 meta['assets'] + net_income
             )
+
+        # ★ 신용등급 복합 판정 (HP + 부채비율 + 연속적자)
+        hp_now     = meta.get('hp', 50.0)
+        sc_now     = meta.get('hp_soft_cap', 60.0)
+        hp_pct_now = hp_now / max(1.0, sc_now)
+        dr_now     = meta.get('debt_ratio', 0.5)
+        lc_now     = meta.get('continuous_loss_count', 0)
+
+        if hp_pct_now >= 0.80 and dr_now < 1.0 and lc_now == 0:
+            meta['credit_grade'] = 'AA'
+        elif hp_pct_now >= 0.50 and dr_now < 2.0 and lc_now < 4:
+            meta['credit_grade'] = 'BB'
+        else:
+            meta['credit_grade'] = 'CCC'
 
         # market.py 지배구조/momentum 반영용 플래그
         meta['_earnings_just_released'] = True
