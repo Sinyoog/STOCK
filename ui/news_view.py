@@ -90,7 +90,12 @@ class NewsWindow(QDialog):
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["[ 일자 ]", "[ 구분 ]", "[ 대상/종목 ]", "[ 공시 데이터 요약 ]"])
-        self.table.horizontalHeader().setStretchLastSection(True)
+        # 컬럼 너비: 일자/구분/종목은 고정, 공시요약은 나머지 공간
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # 일자
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # 구분
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # 종목
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)           # 공시요약 (나머지)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.itemSelectionChanged.connect(self._update_detail_view)

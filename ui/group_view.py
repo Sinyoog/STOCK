@@ -4,10 +4,31 @@ ui/group_view.py
 데이터 연산 금지 — GameService 통해 읽기만 합니다.
 """
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem, QHeaderView
+    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget,
+    QTableWidgetItem, QHeaderView, QPushButton
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QColor, QKeySequence, QShortcut
+
+
+def _fmt_cap(mc: int) -> str:
+    """시총 단위 변환 — 양/자/해/경/조/억/원 전체 지원"""
+    mc   = int(mc)
+    _양  = 10 ** 48
+    _자  = 10 ** 44
+    _해  = 10 ** 40
+    _경  = 10 ** 16
+    _조  = 10 ** 12
+    _억  = 10 ** 8
+    if   mc >= _양:         return f"{mc/_양:.2f}양"
+    elif mc >= _자:         return f"{mc/_자:.2f}자"
+    elif mc >= _해:         return f"{mc/_해:.2f}해"
+    elif mc >= _경:         return f"{mc/_경:.2f}경"
+    elif mc >= 100 * _조:   return f"{mc//_조:,}조"
+    elif mc >= 10  * _조:   return f"{mc/_조:.0f}조"
+    elif mc >= _조:         return f"{mc/_조:.1f}조"
+    elif mc >= _억:         return f"{mc/_억:.1f}억"
+    else:                   return f"{mc:,}원"
 
 from .styles import HTS_STYLE
 
@@ -16,15 +37,35 @@ class GroupInfoDialog(QDialog):
     def __init__(self, game_service, parent=None):
         super().__init__(parent)
         self.gs = game_service
+        self._is_fullscreen = False
         self.setWindowTitle("🏢 글로벌 그룹사 경영 현황 (실시간)")
         self.resize(1500, 900)
         self.setStyleSheet(HTS_STYLE)
 
         layout = QVBoxLayout()
 
+        # 상단 헤더 바
+        header_bar = QHBoxLayout()
         upper_label = QLabel("📊 [그룹사 경영 순위 요약]")
         upper_label.setStyleSheet("color: #00FF00; font-weight: bold; font-size: 15px;")
-        layout.addWidget(upper_label)
+
+        self.btn_fullscreen = QPushButton("⛶ 전체화면")
+        self.btn_fullscreen.setFixedWidth(110)
+        self.btn_fullscreen.setStyleSheet(
+            "QPushButton { background-color: #1a1a1a; color: #00FF00; border: 1px solid #00FF00;"
+            " padding: 4px 10px; font-weight: bold; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #003300; }"
+        )
+        self.btn_fullscreen.clicked.connect(self._toggle_fullscreen)
+
+        # F11 단축키
+        sc = QShortcut(QKeySequence("F11"), self)
+        sc.activated.connect(self._toggle_fullscreen)
+
+        header_bar.addWidget(upper_label)
+        header_bar.addStretch()
+        header_bar.addWidget(self.btn_fullscreen)
+        layout.addLayout(header_bar)
 
         self.upper_table = QTableWidget(0, 4)
         self.upper_table.setFixedHeight(280)
@@ -40,11 +81,11 @@ class GroupInfoDialog(QDialog):
         layout.addWidget(lower_label)
 
         self.lower_table = QTableWidget(0, 15)
+        self.lower_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.lower_table.setHorizontalHeaderLabels([
-            "No", "규모", "상태", "그룹사", "산업", "회사명", "산업 상세",
+            "전체순위", "규모", "상태", "그룹사", "산업", "회사명", "산업 상세",
             "주가", "주식수", "시가총액", "자사주", "대주주", "외국인", "기관", "개인"
         ])
-        self.lower_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.lower_table.setStyleSheet(
             "QTableWidget { background-color: #000; color: #e0e0e0; gridline-color: #222; } "
             "QHeaderView::section { background-color: #222; color: #00FF00; }"
@@ -83,7 +124,8 @@ class GroupInfoDialog(QDialog):
 
         for i, g in enumerate(group_list):
             padding = ["-"] * (max_member_count - len(g['member_names']))
-            row = [i + 1, g['name'], f"{g['count']}개", f"{g['total_cap']:,.0f}원"] + g['member_names'] + padding
+            cap_str = f"{g['total_cap']:,}원 ({_fmt_cap(int(g['total_cap']))})"
+            row = [i + 1, g['name'], f"{g['count']}개", cap_str] + g['member_names'] + padding
             for j, val in enumerate(row):
                 it = QTableWidgetItem(str(val))
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -96,16 +138,22 @@ class GroupInfoDialog(QDialog):
             [s for s in state.stocks if s['meta'].get('group')],
             key=lambda x: x['market_cap'], reverse=True
         )
+        # 전체 시총 기준 순위 계산
+        all_sorted_rank = sorted(state.stocks, key=lambda x: x['market_cap'], reverse=True)
+        rank_map = {s['meta']['c_name']: i+1 for i, s in enumerate(all_sorted_rank)}
+
         self.lower_table.setRowCount(len(gs))
         for i, st in enumerate(gs):
             m        = st['meta']
             size_tag = f"[{m.get('tier', '소형주')[0]}]"
             rate     = st.get('rate', 0.0)
+            real_rank = rank_map.get(m['c_name'], i+1)
             row = [
-                i + 1, size_tag, f"[ {m['char']} ]", m.get('group', '-'),
+                real_rank, size_tag, f"[ {m['char']} ]", m.get('group', '-'),
                 m['ind'], m['c_name'], f"{m['ind']}({m['sub']})",
                 f"{int(st['price']):,}원 ({rate:+.2f}%)",
-                f"{st['shares']:,}주", f"{st['market_cap']:,.0f}원",
+                f"{st['shares']:,}주",
+                f"{st['market_cap']:,}원 ({_fmt_cap(int(st['market_cap']))})",
                 f"{m.get('treasury_share', 0)*100:.1f}%",
                 f"{m.get('owner_share',    0)*100:.1f}%",
                 f"{m.get('foreign_share',  0)*100:.1f}%",
@@ -129,3 +177,13 @@ class GroupInfoDialog(QDialog):
 
         # 산업 상세 컬럼 최소 너비 보장 (sub가 여러 개일 때 잘리지 않게)
         self.lower_table.setColumnWidth(6, max(self.lower_table.columnWidth(6), 280))
+    def _toggle_fullscreen(self):
+        """전체화면 ↔ 일반 창 토글 (F11 또는 버튼)"""
+        if self._is_fullscreen:
+            self.showNormal()
+            self.btn_fullscreen.setText("⛶ 전체화면")
+            self._is_fullscreen = False
+        else:
+            self.showMaximized()
+            self.btn_fullscreen.setText("❐ 창 모드")
+            self._is_fullscreen = True

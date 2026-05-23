@@ -162,6 +162,188 @@ class NewsService:
             except Exception:
                 continue
 
+        # 3. 상장폐지 예고 (pending_events["delist"])
+        for name, info in self.s.pending_events.get("delist", {}).items():
+            try:
+                p_date = info.get('date') if isinstance(info, dict) else info
+                if isinstance(p_date, str):
+                    p_date = datetime.strptime(p_date, '%Y-%m-%d').date()
+                elif hasattr(p_date, 'date'):
+                    p_date = p_date.date()
+                reason = info.get('reason', '재무 파탄') if isinstance(info, dict) else '재무 파탄'
+                d7_date = p_date - timedelta(days=7)
+                stock = next((s for s in self.s.stocks if s['meta']['c_name'] == name), None)
+                if stock:
+                    meta = stock['meta']
+                    listed = meta.get('listed_date', '-')
+                    delist_str = p_date.strftime('%Y-%m-%d')
+                    # 프리미엄: D-7 예고 (폐지 예정일 포함)
+                    if is_sub and d7_date <= curr_date:
+                        cumulative.append(self._create_ev(
+                            d7_date, "💎 상폐예고(P)", meta,
+                            f"{name} | 상장일: {listed} | 상폐예정: {delist_str} | 사유: {reason} | 7일 후 상장폐지 예정", stock))
+                    # 무료: D-0 당일 확정 (상장일/폐지일 포함)
+                    if p_date <= curr_date:
+                        cumulative.append(self._create_ev(
+                            p_date, "💀 상장폐지", meta,
+                            f"{name} | 상장일: {listed} | 폐지일: {delist_str} | 사유: {reason}", stock))
+                    # 프리미엄은 D-7 예고로 이미 알림 → D-0 중복 제거
+            except Exception:
+                continue
+
+        # 4. 상장폐지된 종목 이벤트
+        for stock in self.s.delisted_stocks:
+            try:
+                meta = stock.get('meta', {})
+                name = meta.get('c_name', '')
+                listed = meta.get('listed_date', '-')
+                d_date_str = meta.get('delisted_date', '')
+                if not d_date_str: continue
+                d_date = datetime.strptime(d_date_str, '%Y-%m-%d').date()
+                d7_date = d_date - timedelta(days=7)
+
+                if d_date <= curr_date:
+                    # 프리미엄: D-7 예고 (역산)
+                    if is_sub and d7_date.year >= 2000:
+                        cumulative.append(self._create_ev(
+                            d7_date, "💎 상폐예고(P)", meta,
+                            f"{name} | 상장일: {listed} | 상폐예정: {d_date_str} | 7일 후 상장폐지 예정", stock))
+                    # 무료: 상폐 확정 당일
+                    cumulative.append(self._create_ev(
+                        d_date, "💀 상장폐지", meta,
+                        f"{name} | 상장일: {listed} | 폐지일: {d_date_str}", stock))
+            except Exception:
+                continue
+
+        # 5-0. 테크 도약 이벤트
+        tech_jump = self.s.pending_events.get("tech_jump")
+        if tech_jump:
+            try:
+                p_date = tech_jump.get('date')
+                if isinstance(p_date, str):
+                    p_date = datetime.strptime(p_date, '%Y-%m-%d').date()
+                elif hasattr(p_date, 'date'):
+                    p_date = p_date.date()
+                lv      = tech_jump.get('target_lv', '?')
+                lv_name = tech_jump.get('lv_name', f'Lv.{lv}')
+                d30_date = p_date - timedelta(days=30)
+
+                # 프리미엄: D-30 예고
+                if is_sub and d30_date <= curr_date:
+                    cumulative.append({
+                        "date":     d30_date.strftime('%Y-%m-%d'),
+                        "category": "💎 테크도약예고(P)",
+                        "title":    "테크 도약 D-30 예고",
+                        "content":  f"D-30: {curr_dt_obj.year}년 {p_date.strftime('%m월 %d일')}에 문명이 {lv_name}로 도약 예정 (프리미엄 전용)",
+                        "stock_name": "-",
+                        "is_premium": True,
+                    })
+                # 무료: D-Day
+                if p_date <= curr_date:
+                    cumulative.append({
+                        "date":     p_date.strftime('%Y-%m-%d'),
+                        "category": "🚀 시대 진화",
+                        "title":    "테크 도약",
+                        "content":  f"문명이 {lv_name}로 도약했습니다!",
+                        "stock_name": "-",
+                        "is_premium": False,
+                    })
+            except Exception:
+                pass
+
+        # 테크 레벨 이력 (이미 도약한 경우)
+        if self.s.max_tech_reached >= 2:
+            for lv in range(2, self.s.max_tech_reached + 1):
+                lv_names = {2: "2단계 (모바일·클라우드 혁명)",
+                            3: "3단계 (AI·양자 혁명)",
+                            4: "4단계 (기술 특이점)"}
+                cumulative.append({
+                    "date":     "2000-01-01",  # 정확한 날짜 모름
+                    "category": "🚀 시대 진화",
+                    "title":    f"Lv.{lv} 도약",
+                    "content":  f"문명이 {lv_names.get(lv, f'Lv.{lv}')}로 도약했습니다!",
+                    "stock_name": "-",
+                    "is_premium": False,
+                })
+
+        # 5. 투자경고 예약 중인 종목 (pending_events["warning"])
+        for name, info in self.s.pending_events.get("warning", {}).items():
+            try:
+                w_date = info.get('date')
+                if isinstance(w_date, str):
+                    w_date = datetime.strptime(w_date, '%Y-%m-%d').date()
+                elif hasattr(w_date, 'date'):
+                    w_date = w_date.date()
+                w_type = info.get('type', 'IN')
+                stock = next((s for s in self.s.stocks if s['meta']['c_name'] == name), None)
+                if not stock: continue
+                meta = stock['meta']
+                d7_date = w_date - timedelta(days=7)
+
+                if w_type == 'IN':
+                    # 프리미엄: D-7 예고
+                    if is_sub and d7_date <= curr_date:
+                        cumulative.append(self._create_ev(
+                            d7_date, "💎 경고예보(P)", meta,
+                            f"{name} | 7일 후 투자경고 지정 예정", stock))
+                    # 무료: D-0 확정
+                    if w_date <= curr_date:
+                        cumulative.append(self._create_ev(
+                            w_date, "⚠️ 투자경고", meta,
+                            f"{name} | 투자경고 지정", stock))
+                elif w_type == 'OUT':
+                    if is_sub and d7_date <= curr_date:
+                        cumulative.append(self._create_ev(
+                            d7_date, "💎 경고해제예보(P)", meta,
+                            f"{name} | 7일 후 투자경고 해제 예정", stock))
+                    if w_date <= curr_date:
+                        cumulative.append(self._create_ev(
+                            w_date, "✅ 경고해제", meta,
+                            f"{name} | 투자경고 해제", stock))
+                elif w_type == 'DANGER':
+                    if is_sub and d7_date <= curr_date:
+                        cumulative.append(self._create_ev(
+                            d7_date, "💎 상폐위험예보(P)", meta,
+                            f"{name} | 7일 후 상폐위험 지정 예정", stock))
+                    if w_date <= curr_date:
+                        cumulative.append(self._create_ev(
+                            w_date, "🚨 상폐위험", meta,
+                            f"{name} | 상폐위험 지정", stock))
+            except Exception:
+                continue
+
+        # 5-1. 이미 WARNING/DANGER 확정된 종목 (역산으로 표시)
+        for stock in self.s.stocks:
+            try:
+                meta  = stock.get('meta', {})
+                name  = meta.get('c_name', '')
+                char  = meta.get('char', 'Normal')
+                if char not in ('WARNING', 'DANGER'): continue
+                # pending에 이미 있으면 중복 방지
+                if name in self.s.pending_events.get("warning", {}): continue
+
+                # 경고 지정일 추정 (현재 날짜 기준 — 정확한 날짜 없으므로 오늘 표시)
+                if char == 'WARNING':
+                    if is_sub:
+                        d7 = curr_date - timedelta(days=7)
+                        cumulative.append(self._create_ev(
+                            d7, "💎 경고예보(P)", meta,
+                            f"{name} | 투자경고 지정 예보 (프리미엄)", stock))
+                    cumulative.append(self._create_ev(
+                        curr_date, "⚠️ 투자경고", meta,
+                        f"{name} | 투자경고 지정 중", stock))
+                elif char == 'DANGER':
+                    if is_sub:
+                        d7 = curr_date - timedelta(days=7)
+                        cumulative.append(self._create_ev(
+                            d7, "💎 상폐위험예보(P)", meta,
+                            f"{name} | 상폐위험 지정 예보 (프리미엄)", stock))
+                    cumulative.append(self._create_ev(
+                        curr_date, "🚨 상폐위험", meta,
+                        f"{name} | 상폐위험 지정 중", stock))
+            except Exception:
+                continue
+
         # 수동 등록 이벤트
         for ev in self.s.pre_reflection_events:
             cumulative.append(ev)
@@ -187,52 +369,26 @@ class NewsService:
         size    = {"대형주": "[대기업]", "중형주": "[중견기업]", "소형주": "[중소기업]"}.get(tier, "[중소기업]")
 
         shares_txt = f"{shares:,} 주" if shares > 0 else "산정 중"
-
-        # 시총 단위 변환
-        def fmt_cap(v):
-            if v >= 10_000_000_000_000_000: return f"{v/10_000_000_000_000_000:.2f}경"
-            elif v >= 1_000_000_000_000:    return f"{v/1_000_000_000_000:.2f}조"
-            elif v >= 100_000_000:          return f"{v/100_000_000:.0f}억"
-            else:                           return f"{v:,.0f}원"
-
-        mcap_txt = f"{m_cap:,} 원 ({fmt_cap(m_cap)})" if m_cap > 0 else "산정 중"
+        mcap_txt   = f"{m_cap:,} 원"  if m_cap  > 0 else "산정 중"
+        price_txt  = f"{price:,} 원"  if price  > 0 else "산정 중"
 
         ts  = meta.get('treasury_share', 0) * 100
         os_ = meta.get('owner_share',    0) * 100
         fs  = meta.get('foreign_share',  0) * 100
         ins = meta.get('inst_share',     0) * 100
         rs  = meta.get('retail_share',   0) * 100
-
-        # HP / Shield
-        hp       = meta.get('hp', 0.0)
-        soft_cap = meta.get('hp_soft_cap', 60.0)
-        shield   = meta.get('shield', 0.0)
-        hp_ratio = hp / max(1.0, soft_cap)
-        filled   = round(hp_ratio * 10)
-        hp_bar   = '■' * filled + '□' * (10 - filled)
-
-        if shield >= 1_000_000_000_000:   shield_str = f"{shield/1_000_000_000_000:.2f}조"
-        elif shield >= 100_000_000:        shield_str = f"{shield/100_000_000:.1f}억"
-        else:                              shield_str = f"{shield:,.0f}원"
-
-        # 뉴스 상 rank 계산 (간이)
-        all_stocks = self.s.stocks
-        sorted_stocks = sorted(all_stocks, key=lambda x: x.get('market_cap', 0), reverse=True)
-        rank = next((i+1 for i, s in enumerate(sorted_stocks) if s['meta'].get('c_name') == name), 0)
-        rank_str = f"[{rank}위] " if rank > 0 else ""
+        risk = meta.get('risk_score', 0)
 
         return (
-            f"{rank_str}< {name} >\n"
+            f"< {name} >\n"
             f"상장일: {meta.get('listed_date', '-')} | 섹터: {sector}\n"
+            f"------------------------------------------\n"
             f"[기업 정보] 그룹: {meta.get('group', '독립')} 규모: {size} "
             f"산업: {meta.get('ind', '-')} ({meta.get('sub', '-')}) 상태: {meta.get('char', 'Normal')}\n"
             f"[발행 정보] 주식수: {shares_txt} 시총: {mcap_txt}\n"
             f"[지배구조] 자사주: {ts:.1f}% | 대주주: {os_:.1f}% "
             f"외국인: {fs:.1f}% | 기관 : {ins:.1f}% 개인 : {rs:.1f}%\n"
-            f"[재무 체력]\n"
-            f"{hp_bar}\n"
-            f"HP {hp:.2f} / {soft_cap:.0f} ({hp_ratio*100:.1f}%)\n"
-            f"방어막 {shield_str} [{'발동중' if hp_ratio < 0.30 and shield > 0 else '대기중'}]"
+            f"리스크: {risk:.2f} / 150 예상주가: {price_txt}"
         )
 
     def _make_earn_content(self, meta: dict, y: int, q_name: str,

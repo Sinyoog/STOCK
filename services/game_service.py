@@ -35,26 +35,38 @@ class GameService:
         import random
         print("🚀 [시스템] v19.0 가치 본위 엔진 가동 중...")
 
-        # ── 그룹사 생성 (5그룹 × 2종목 = 10개, 모두 대기업) ──────
-        for gn in ["제니스", "서한", "가온", "범양", "버거"]:
+        # ── 그룹사 생성 ──────────────────────────────────────────
+        # 최상위 3개 그룹 ("대1" 티어: 시총 30~50조)
+        top3_groups = ["제니스", "서한", "가온"]
+        for gn in top3_groups:
+            gid = f"GROUP_{gn}"
+            self.s.groups[gid] = {"name": gn, "active": True}
+            # 대표 계열사 1개는 최상위 티어
+            ind1, ind2 = random.sample(MAIN_INDUSTRIES, 2)
+            self.s.stocks.append(self.cm.create_stock_data(None, ind1, "대1", gid))
+            self.s.stocks.append(self.cm.create_stock_data(None, ind2, "대", gid))
+
+        # 일반 그룹사 2개 ("대" 티어: 시총 1조~20조)
+        normal_groups = ["범양", "버거"]
+        for gn in normal_groups:
             gid = f"GROUP_{gn}"
             self.s.groups[gid] = {"name": gn, "active": True}
             for ind in random.sample(MAIN_INDUSTRIES, 2):
                 self.s.stocks.append(self.cm.create_stock_data(None, ind, "대", gid))
 
-        # ── 독립 대기업 5개 ───────────────────────────────────────
+        # ── 독립 대기업 5개 (1조~20조) ───────────────────────────
         for _ in range(5):
             self.s.stocks.append(
                 self.cm.create_stock_data(random.choice(NAME_DB), random.choice(MAIN_INDUSTRIES), "대")
             )
 
-        # ── 독립 중견 25개 ───────────────────────────────────────
+        # ── 독립 중견 25개 (1000억~2조) ──────────────────────────
         for _ in range(25):
             self.s.stocks.append(
                 self.cm.create_stock_data(random.choice(NAME_DB), random.choice(MAIN_INDUSTRIES), "중")
             )
 
-        # ── 독립 중소 10개 ───────────────────────────────────────
+        # ── 독립 중소 10개 (100억~1500억) ────────────────────────
         for _ in range(10):
             self.s.stocks.append(
                 self.cm.create_stock_data(random.choice(NAME_DB), random.choice(MAIN_INDUSTRIES), "소")

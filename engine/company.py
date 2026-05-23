@@ -11,8 +11,6 @@ from .constants import NAME_DB, GROUP_BASE_NAMES, MAIN_INDUSTRIES, SECTOR_MAP, T
 
 
 class CompanyManager:
-    """종목 생성·이름·티어 관리. MarketState를 참조하지만 직접 수정하지 않음."""
-
     def __init__(self, market_state):
         self.state = market_state
         self.used_all_time: set = set()
@@ -53,26 +51,26 @@ class CompanyManager:
     # 종목 생성
     # ─────────────────────────────────────────────
     def create_stock_data(self, base_name, ind: str, tier: str = "소", group_id=None) -> dict:
-        """지배구조 엔진 포함 종목 딕셔너리 생성"""
         current_date = self.state.current_date
-        actual_lv = self.state.max_tech_reached
-        sector = SECTOR_MAP.get(ind, "Value")
+        actual_lv    = self.state.max_tech_reached
+        sector       = SECTOR_MAP.get(ind, "Value")
 
         # 1. 황제주 성향
-        dice_split = random.random()
+        dice_split   = random.random()
         will_to_split = {
-            "대": dice_split > 0.25,
-            "중": dice_split > 0.05,
+            "대":  dice_split > 0.25,
+            "대1": dice_split > 0.25,
+            "중":  dice_split > 0.05,
         }.get(tier, True)
 
-        # 2. 자사주 결정
+        # 2. 자사주
         sector_ts_range = {
             "Growth":    (0.00, 0.05),
             "Value":     (0.08, 0.15),
             "Defensive": (0.05, 0.10),
         }
-        lo, hi = sector_ts_range.get(sector, (0.01, 0.07))
-        base_ts = random.uniform(lo, hi)
+        lo, hi   = sector_ts_range.get(sector, (0.01, 0.07))
+        base_ts  = random.uniform(lo, hi)
         if tier == "소":   base_ts -= 0.01
         elif tier == "대": base_ts += 0.02
         final_ts = max(0.0, base_ts)
@@ -91,46 +89,82 @@ class CompanyManager:
             foreign_r = random.uniform(0.01, 0.05)
             inst_r    = random.uniform(0.05, 0.10)
 
-        retail_r = max(0.0, 1.0 - (owner_r + foreign_r + inst_r))
-        rem_p = 1.0 - final_ts
+        retail_r    = max(0.0, 1.0 - (owner_r + foreign_r + inst_r))
+        rem_p       = 1.0 - final_ts
         owner_abs   = owner_r   * rem_p
         foreign_abs = foreign_r * rem_p
         inst_abs    = inst_r    * rem_p
         retail_abs  = retail_r  * rem_p
 
-        # 4. 가격 및 주식수
-        if tier == "대":
-            p       = random.randint(40000, 80000)
-            s_count = random.randint(100, 1000) * 1_000_000
+        # 4. 가격 및 주식수 — 시총 목표 역산
+        # 최상위("대1"): 30~50조  / 일반 대기업("대"): 1조~20조
+        # 중견("중"):    1000억~2조 / 중소("소"): 100억~1500억
+        if tier == "대1":
+            # 케이스 랜덤 선택 (KT형 / 삼성형 / SKT형)
+            case = random.randint(1, 3)
+            if case == 1:   # 발행주 많고 주가 낮음 (KT형)
+                p       = random.randint(50_000, 100_000)
+                s_count = random.randint(300, 600) * 1_000_000
+            elif case == 2: # 주가/주식수 균형 (삼성전자형)
+                p       = random.randint(200_000, 400_000)
+                s_count = random.randint(100, 200) * 1_000_000
+            else:           # 주가 높고 발행주 적음 (SKT형)
+                p       = random.randint(2_000_000, 5_000_000)
+                s_count = random.randint(6, 15) * 1_000_000
+        elif tier == "대":
+            # 일반 대기업: 1조~20조
+            p       = random.randint(20_000, 80_000)
+            s_count = random.randint(50, 250) * 1_000_000
         elif tier == "중":
-            p       = random.randint(15000, 35000)
-            s_count = random.randint(50, 200) * 1_000_000
+            # 중견: 1000억~2조
+            p       = random.randint(5_000, 30_000)
+            s_count = random.randint(5, 67) * 1_000_000
         else:
-            p       = random.randint(1000, 15000)
-            s_count = random.randint(1, 50) * 1_000_000
+            # 중소: 100억~1500억
+            p       = random.randint(1_000, 10_000)
+            s_count = random.randint(1, 15) * 1_000_000
 
         # 5. 이름
-        is_group = (group_id is not None)
-        gn_arg   = self.state.groups[group_id]['name'] if is_group else None
-        info_arg = ind if is_group else base_name
+        is_group  = (group_id is not None)
+        gn_arg    = self.state.groups[group_id]['name'] if is_group else None
+        info_arg  = ind if is_group else base_name
         full_name = self.get_unique_name(is_group, gn_arg, info_arg)
 
         ind_levels = INDUSTRY_LEVELS.get(ind, {}).get(actual_lv, ["기본 산업"])
 
-        # 6. HP / Shield 초기값 계산
-        # ┌ 체급별 스펙 ──────────────────────────────────────────────
-        # │ 대형주: soft_cap=100, 시작 hp=100, shield=시총×1.5%
-        # │ 중형주: soft_cap=80,  시작 hp=80,  shield=시총×0.3%
-        # │ 소형주: soft_cap=60,  시작 hp=50,  shield=0  (성장 여력)
-        # └──────────────────────────────────────────────────────────
+        # 6. HP / Shield
         initial_market_cap = float(p * s_count)
+        _tier_key = "대" if tier == "대1" else tier
         hp_spec = {
             "대": {"soft_cap": 100.0, "hp": 75.0, "shield_ratio": 0.015},
-            "중": {"soft_cap": 80.0,  "hp": 55.0, "shield_ratio": 0.003},
-            "소": {"soft_cap": 60.0,  "hp": 35.0, "shield_ratio": 0.0},
-        }.get(tier, {"soft_cap": 60.0, "hp": 35.0, "shield_ratio": 0.0})
+            "중": {"soft_cap": 80.0,  "hp": 65.0, "shield_ratio": 0.003},
+            "소": {"soft_cap": 60.0,  "hp": 50.0, "shield_ratio": 0.0},
+        }.get(_tier_key, {"soft_cap": 60.0, "hp": 50.0, "shield_ratio": 0.0})
 
         init_shield = initial_market_cap * hp_spec["shield_ratio"]
+
+        # ★ 7. 부채비율 초기화 (현실적 범위)
+        # 부채비율 = 부채 / 자산 × 100
+        # 대형주: 30~60%, 중형주: 50~120%, 소형주: 60~180%
+        debt_ratio_range = {
+            "대": (0.30, 0.60),
+            "대1": (0.30, 0.60),
+            "중": (0.50, 1.20),
+            "소": (0.60, 1.80),
+        }.get(tier, (0.50, 1.20))
+        init_debt_ratio = random.uniform(*debt_ratio_range)
+        init_assets     = float(p * s_count)
+        init_debt       = init_assets * init_debt_ratio
+
+        # ★ 8. 신용등급 초기화 (HP 기반)
+        # AA: hp >= 80%, BB: hp >= 50%, CCC: hp < 50%
+        hp_pct = hp_spec["hp"] / hp_spec["soft_cap"]
+        if hp_pct >= 0.80:
+            init_credit = "AA"
+        elif hp_pct >= 0.50:
+            init_credit = "BB"
+        else:
+            init_credit = "CCC"
 
         return {
             "meta": {
@@ -140,33 +174,47 @@ class CompanyManager:
                 "listed_date":          current_date.strftime('%Y-%m-%d'),
                 "group_id":             group_id,
                 "group":                gn_arg,
-                "tier":                 f"{tier}형주",
+                "tier":                 "대형주" if tier == "대1" else f"{tier}형주",
                 "ind":                  ind,
                 "sub":                  random.choice(ind_levels),
                 "char":                 "Normal",
-                # ── 구형 호환용 (market.py 교체 전까지 유지) ──────
                 "risk_score":           0.0,
-                # ── HP / Shield 시스템 ────────────────────────────
+                # ── HP / Shield ────────────────────
                 "hp":                   hp_spec["hp"],
                 "hp_soft_cap":          hp_spec["soft_cap"],
                 "shield":               init_shield,
-                # ── 티어 심사용 카운터 ────────────────────────────
-                "cap_exceed_days":      0,   # 시총 기준 초과 유지일수 (승급용)
-                "cap_below_days":       0,   # 시총 기준 미달 유지일수 (강등용)
-                # ──────────────────────────────────────────────────
+                # ── 티어 심사 카운터 ────────────────
+                "cap_exceed_days":      0,
+                "cap_below_days":       0,
+                # ── 기타 ────────────────────────────
                 "delist_timer":         0,
                 "split_count":          0,
+                "split_cooldown_days":  0,   # ★ 신규: 분할 쿨다운 카운터
                 "merge_count":          0,
-                "assets":               float(p * s_count),
-                "efficiency":           random.uniform(0.02, 0.08),
+                "assets":               init_assets,
+                "initial_assets":       init_assets,     # ★ 하한선 계산용 초기값
+                "initial_price":        float(p),        # ★ 주가/HP 연결용 초기 주가
+                "debt":                 init_debt,       # ★ 신규: 부채
+                "debt_ratio":           init_debt_ratio, # ★ 신규: 부채비율
+                "credit_grade":         init_credit,     # ★ 신규: 신용등급
+                "efficiency":           {
+                    "대1": random.uniform(0.08, 0.15),
+                    "대":  random.uniform(0.06, 0.12),
+                    "중":  random.uniform(0.05, 0.10),
+                    "소":  random.uniform(0.05, 0.09),  # 최솟값 0.02 → 0.05
+                }.get(tier, random.uniform(0.05, 0.09)),
                 "momentum":             0.0,
                 "continuous_loss_count": 0,
-                "risk_sensitivity":     {"대": 0.1, "중": 0.5, "소": 1.2}.get(tier, 1.0),
+                "risk_sensitivity":     {"대": 0.1, "대1": 0.1, "중": 0.5, "소": 1.2}.get(tier, 1.0),
                 "treasury_share":       final_ts,
                 "owner_share":          owner_abs,
                 "foreign_share":        foreign_abs,
                 "inst_share":           inst_abs,
                 "retail_share":         retail_abs,
+                # ── ★ 신규: 52주 신고가/신저가 ──────
+                "price_52w_high":       float(p),
+                "price_52w_low":        float(p),
+                "price_52w_days":       0,   # 갱신 주기 카운터
             },
             "price":      p,
             "rate":       0.0,
@@ -180,10 +228,9 @@ class CompanyManager:
     def reassign_tiers_by_cap(self, stocks: list, daily_news: list, silent: bool = False):
         stocks.sort(key=lambda x: x['market_cap'], reverse=True)
         total = len(stocks)
-        b_lim = max(1, int(total * 0.11))
-        m_lim = max(1, int(total * 0.33))
+        b_lim = max(1, int(total * 0.15))
+        m_lim = max(1, int(total * 0.60))
 
-        # 체급별 HP 스펙 테이블
         _HP_SPEC = {
             "대형주": {"soft_cap": 100.0, "sensitivity": 0.1, "shield_ratio": 0.015},
             "중형주": {"soft_cap": 80.0,  "sensitivity": 0.5, "shield_ratio": 0.003},
@@ -201,30 +248,34 @@ class CompanyManager:
             else:
                 meta['tier'] = "소형주"
 
-            # 티어가 바뀐 경우 HP 스펙 재조정
             if old_tier != meta['tier']:
-                spec     = _HP_SPEC[meta['tier']]
-                new_cap  = spec["soft_cap"]
-                old_cap  = meta.get('hp_soft_cap', new_cap)
-
-                # hp_soft_cap 갱신 + hp는 비율 보존 (갑자기 죽거나 풀피 되는 것 방지)
-                old_hp   = meta.get('hp', old_cap)
+                spec    = _HP_SPEC[meta['tier']]
+                new_cap = spec["soft_cap"]
+                old_cap = meta.get('hp_soft_cap', new_cap)
+                old_hp  = meta.get('hp', old_cap)
                 hp_ratio = old_hp / max(1.0, old_cap)
-                meta['hp_soft_cap']   = new_cap
-                meta['hp']            = round(min(new_cap, hp_ratio * new_cap), 2)
+                meta['hp_soft_cap']      = new_cap
+                meta['hp']               = round(min(new_cap, hp_ratio * new_cap), 2)
                 meta['risk_sensitivity'] = spec["sensitivity"]
 
-                # 쉴드: 승격 시 시총 기준으로 신규 부여, 강등 시 비율 축소
-                cur_shield    = meta.get('shield', 0.0)
+                cur_shield     = meta.get('shield', 0.0)
                 new_shield_max = s['market_cap'] * spec["shield_ratio"]
                 if meta['tier'] == "소형주":
-                    meta['shield'] = 0.0          # 소형주는 쉴드 없음
+                    meta['shield'] = 0.0
                 elif old_tier == "소형주":
-                    meta['shield'] = new_shield_max  # 소형→중/대 승격: 쉴드 신규 부여
+                    meta['shield'] = new_shield_max
                 else:
-                    meta['shield'] = min(cur_shield, new_shield_max)  # 강등: 상한만 조정
+                    meta['shield'] = min(cur_shield, new_shield_max)
 
-                # 뉴스 출력
+                # ★ 신용등급도 티어 변경 시 재산정
+                hp_pct = meta['hp'] / max(1.0, meta['hp_soft_cap'])
+                if hp_pct >= 0.80:
+                    meta['credit_grade'] = "AA"
+                elif hp_pct >= 0.50:
+                    meta['credit_grade'] = "BB"
+                else:
+                    meta['credit_grade'] = "CCC"
+
                 if not silent:
                     if old_tier == "대형주" and meta['tier'] == "중형주":
                         daily_news.append(

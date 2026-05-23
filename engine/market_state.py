@@ -2,7 +2,6 @@
 engine/market_state.py
 게임의 모든 가변 상태(State)를 한 곳에서 관리하는 데이터 클래스.
 로직은 없고 상태만 담습니다.
-다른 모듈들은 이 객체를 참조하여 읽고 씁니다.
 """
 from datetime import datetime
 
@@ -40,11 +39,20 @@ class MarketState:
         self.base_item_price: float = 1000.0
         self.cumulative_inflation: float = 1.0
 
+        # ── GDP (버핏 지수용) ─────────────────────
+        # 2000년 한국 명목 GDP ≈ 600조원 기준
+        self.gdp: float = 600_000_000_000_000.0       # 단위: 원
+        self.gdp_growth_rate: float = 0.05            # 연간 성장률
+        self.buffett_index: float = 0.0               # 시총/GDP (%)
+
         # ── 지수 ──────────────────────────────────
-        self.wsi: float = 1500.0
         self.gri: float = 1000.0
-        self.peak_gri: float = 1000.0   # gri 역대 최고점 (panic_factor 기준)
+        self.peak_gri: float = 1000.0
         self.initial_market_total_cap: float = 0.0
+        self.gri_base_at_rebase: float = 1000.0
+        self.prev_gri: float = 1000.0
+        self.bubble_index: float = 0.0
+        self.avg_earnings_growth: float = 0.05
 
         # ── 기술 레벨 ─────────────────────────────
         self.max_tech_reached: int = 1
@@ -55,13 +63,14 @@ class MarketState:
             "macro":     {},
             "delist":    {},
             "splits":    {},
-            "warning":   {},   # HP 경고 예약 장부
-            "tier_exam": {},   # 티어 심사 예약 장부
+            "warning":   {},
+            "tier_exam": {},
             "tech_jump": None,
             "v_rebound": None,
-            "recovery":  None, # 대공황 극복 예약
+            "recovery":  None,
+            "crash":     None,   # ★ 신규: 버블 붕괴 예약
         }
-        self._branch_news_sent: bool = False  # 분기점 뉴스 발송 여부
+        self._branch_news_sent: bool = False
         self.pre_reflection_events: list = []
 
         # ── 실적 히스토리 ─────────────────────────
@@ -84,3 +93,28 @@ class MarketState:
         self.silent_mode: bool = False
         self.daily_delist_count: int = 0
         self.daily_splits: dict = {}
+
+        # ── 경기 사이클 ───────────────────────────
+        self.leading_index: float = 0.0
+        self.leading_index_history: list = []
+        self.cycle_stage: str = "확장"
+        self.cycle_day: int = 0
+        self.sentiment: float = 50.0
+
+        # ── GRI 보조 ──────────────────────────────
+        self._prev_total_market_cap: float = 0.0
+        self._gri_history_20: list = []
+        self._prev_stock_caps: dict = {}
+        self._tech_upgrade_year: int = 1999
+
+        # ── 분기점 ────────────────────────────────
+        self._branch_activation_date = None
+        self._depression_warning_sent_lv: int = 0
+        self._prev_macro_snapshot: dict = {}
+
+        # ── ★ 신규: 외국인 수급 지수 ─────────────
+        self.foreign_flow_index: float = 0.0   # -100 ~ +100 (양수=순매수)
+
+        # ── ★ 신규: 산업별 경쟁도 ────────────────
+        # {ind: 기업 수} 형태로 매일 갱신
+        self.industry_competition: dict = {}

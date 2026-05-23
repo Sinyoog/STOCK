@@ -174,11 +174,21 @@ class StockHTS(QMainWindow):
         search_lay.addWidget(btn_filter)
         left_panel.addLayout(search_lay)
 
-        self.stock_table = QTableWidget(0, 3)
-        self.stock_table.setHorizontalHeaderLabels(["종목명", "현재가", "등락율"])
-        self.stock_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.stock_table = QTableWidget(0, 4)
+        self.stock_table.setHorizontalHeaderLabels(["순위", "종목명", "현재가", "등락율"])
+        hh = self.stock_table.horizontalHeader()
+        hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)      # 순위 고정
+        hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)     # 종목명
+        hh.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)     # 현재가
+        hh.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)     # 등락율
+        self.stock_table.setColumnWidth(0, 48)
+        self.stock_table.verticalHeader().setVisible(False)
         self.stock_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.stock_table.cellClicked.connect(self.on_stock_clicked)
+
+        # 총 종목 수 레이블 (헤더 순위 컬럼 위)
+        self.total_stocks_label = QLabel("0")
+        self.total_stocks_label.setVisible(False)  # 헤더에 숫자로 표시
         left_panel.addWidget(self.stock_table)
         content_lay.addLayout(left_panel, 2)
 
@@ -546,7 +556,13 @@ class StockHTS(QMainWindow):
         wdays = ['월','화','수','목','금','토','일']
         w     = wdays[s.virtual_weekday]
         self.date_label.setText(f"📅 {s.current_date.strftime('%Y-%m-%d')} ({w}){market_status}")
-        self.index_label.setText(f"📊 GRI: {s.gri:,.2f} | WSI: {s.wsi:,.2f} | LV.{s.max_tech_reached}")
+        bubble = getattr(s, 'bubble_index', 0.0)
+        if   bubble >= 300: b_str = f"🔴 버블 {bubble:.0f}"
+        elif bubble >= 200: b_str = f"🟠 버블 {bubble:.0f}"
+        elif bubble >= 150: b_str = f"🟡 버블 {bubble:.0f}"
+        elif bubble >= 50:  b_str = f"🟢 버블 {bubble:.0f}"
+        else:               b_str = f"버블 {bubble:.0f}"
+        self.index_label.setText(f"📊 GRI: {s.gri:,.0f} | {b_str} | LV.{s.max_tech_reached}")
         self.macro_label.setText(f"🌍 금리: {m['interest_rate']:.2f}% | 유가: ${m['oil_price']:.2f} | 물가: {m['cpi']:.2f}% | 환율: ₩{m['exchange_rate']:,.1f}")
         self.inflation_label.setText(f"🛍️ 물가체감: 2000년 ₩1,000 → 현재 ₩{s.base_item_price:,.0f}")
 
@@ -554,7 +570,9 @@ class StockHTS(QMainWindow):
         self.refresh_chart()
 
         selected = self._get_selected_stock()
-        if selected:
+        if self.selected_stock_name == "GRI":
+            self._update_gri_report()
+        elif selected:
             self._update_report(selected)
 
         port_info = self.my_portfolio.get(self.selected_stock_name)
@@ -593,13 +611,17 @@ class StockHTS(QMainWindow):
     # ─────────────────────────────────────────────
     def filter_stocks(self):
         query      = self.search_bar.text().strip().lower()
+        # rank_map은 항상 전체 stocks 기준 (필터/검색 무관)
         all_sorted = sorted(self.game_service.s.stocks,
                             key=lambda x: x.get('market_cap', 0), reverse=True)
         rank_map   = {s['meta']['c_name']: i+1 for i, s in enumerate(all_sorted)}
+        # snaps도 전체 기준으로 생성 (필터는 이후에 적용)
         snaps = [
             {"name": s['meta']['c_name'], "price": int(s['price']),
              "rate": s.get('rate', 0.0), "meta": s['meta'],
-             "shares": s['shares'], "rank": rank_map.get(s['meta']['c_name'], 0)}
+             "shares": s['shares'],
+             "rank": rank_map[s['meta']['c_name']],  # 전체 기준 순위 고정
+             "char": s['meta'].get('char', 'Normal')}
             for s in all_sorted
         ]
         filtered = []
@@ -651,40 +673,403 @@ class StockHTS(QMainWindow):
         # rank 순으로 정렬 (필터 후에도 시총 순위 유지)
         filtered.sort(key=lambda x: x.get('rank', 9999))
         self._update_table(filtered)
+        total    = len(self.game_service.s.stocks)
+        filtered_count = len(filtered)
+        self.total_stocks_label.setText(str(filtered_count))
+        # 헤더: 필터 적용 시 "필터수/전체수", 아닐 때 전체 수만
+        header_txt = str(filtered_count)
+        item = QTableWidgetItem(header_txt)
+        item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stock_table.setHorizontalHeaderItem(0, item)
         if len(filtered) == 1:
             self.selected_stock_name = filtered[0]['name']
 
     def _update_table(self, snaps: list):
-        self.stock_table.setRowCount(len(snaps))
+        self.stock_table.setRowCount(len(snaps) + 1)  # GRI 고정 행 +1
+
+        # ── GRI 고정 행 (0번 행) ──────────────────────────────
+        s = self.game_service.s
+        gri_now  = s.gri
+        gri_prev = getattr(s, 'prev_gri', gri_now)
+        gri_rate = ((gri_now / max(1.0, gri_prev)) - 1.0) * 100
+
+        gri_rank_it = QTableWidgetItem("GRI")
+        gri_rank_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        gri_rank_it.setForeground(QColor("#888888"))
+        gri_rank_it.setFont(QFont("Malgun Gothic", 8, QFont.Weight.Bold))
+
+        gri_name_it = QTableWidgetItem("GRI 지수")
+        gri_name_it.setForeground(QColor("#AAAAAA"))
+        gri_name_it.setFont(QFont("Malgun Gothic", 9))
+
+        gri_price_it = QTableWidgetItem(f"{gri_now:,.0f}")
+        gri_rate_it  = QTableWidgetItem(f"{gri_rate:+.2f}%")
+        gri_col = rate_color(gri_rate)
+
+        # 숫자 색상만 (배경색 없음 - 다른 종목과 동일)
+        gri_price_it.setForeground(QColor(gri_col))
+        gri_rate_it.setForeground(QColor(gri_col))
+        gri_price_it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        gri_rate_it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.stock_table.setItem(0, 0, gri_rank_it)
+        self.stock_table.setItem(0, 1, gri_name_it)
+        self.stock_table.setItem(0, 2, gri_price_it)
+        self.stock_table.setItem(0, 3, gri_rate_it)
+
         for i, st in enumerate(snaps):
-            col  = rate_color(st['rate'])
-            rank = st.get('rank', i+1)
-            n_it = QTableWidgetItem(st['name'])
+            i += 1  # GRI 행 때문에 +1
+            col   = rate_color(st['rate'])
+            rank  = st.get('rank', i+1)
+            name  = st['name']
+            char  = st.get('char', 'Normal')
+            is_selected = (name == self.selected_stock_name)
+
+            # 경고/위험 상태별 종목명 앞에 아이콘 추가
+            if char == 'BANKRUPT':
+                display_name = f"☠️ {name}"
+            elif char == 'DANGER':
+                display_name = f"🚨 {name}"
+            elif char == 'WARNING':
+                display_name = f"⚠️ {name}"
+            elif 'EXIT' in str(char):
+                display_name = f"💀 {name}"
+            else:
+                display_name = name
+
+            rank_it = QTableWidgetItem(str(rank))
+            rank_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            rank_it.setForeground(QColor("#555555"))
+            n_it = QTableWidgetItem(display_name)
             p_it = QTableWidgetItem(f"{int(st['price']):,}원")
             r_it = QTableWidgetItem(f"{st['rate']:+.2f}%")
-            h_it = QTableWidgetItem(str(rank))
-            if st['name'] == self.selected_stock_name:
+
+            # 색상 우선순위: 선택(연두) > BANKRUPT(빨강) > DANGER(주황빨강) > WARNING(노랑) > 기본
+            if is_selected:
                 n_it.setForeground(QColor("#00FF00"))
                 n_it.setFont(QFont("Malgun Gothic", 10, QFont.Weight.Bold))
-            p_it.setForeground(QColor(col)); r_it.setForeground(QColor(col))
-            self.stock_table.setVerticalHeaderItem(i, h_it)
-            self.stock_table.setItem(i, 0, n_it)
-            self.stock_table.setItem(i, 1, p_it)
-            self.stock_table.setItem(i, 2, r_it)
+                rank_it.setForeground(QColor("#00FF00"))
+            elif char == 'BANKRUPT':
+                n_it.setForeground(QColor("#FF4444"))
+                n_it.setFont(QFont("Malgun Gothic", 9, QFont.Weight.Bold))
+            elif char == 'DANGER':
+                n_it.setForeground(QColor("#FF6600"))
+                n_it.setFont(QFont("Malgun Gothic", 9, QFont.Weight.Bold))
+            elif char == 'WARNING':
+                n_it.setForeground(QColor("#FFD700"))
+                n_it.setFont(QFont("Malgun Gothic", 9, QFont.Weight.Bold))
+            elif 'EXIT' in str(char):
+                n_it.setForeground(QColor("#FFA500"))
+
+            p_it.setForeground(QColor(col))
+            r_it.setForeground(QColor(col))
+            self.stock_table.setItem(i, 0, rank_it)
+            self.stock_table.setItem(i, 1, n_it)
+            self.stock_table.setItem(i, 2, p_it)
+            self.stock_table.setItem(i, 3, r_it)
 
     def on_stock_clicked(self, r, c):
-        it = self.stock_table.item(r, 0)
-        if it:
-            self.selected_stock_name = it.text()
-            self._add_recent_stock(it.text())
+        # 0번 행 = GRI 고정 행 → 메인 차트에 GRI 표시
+        if r == 0:
+            self.selected_stock_name = "GRI"
             self.sync_ui_with_engine()
+            return
+
+        it = self.stock_table.item(r, 1)  # 컬럼 1 = 종목명
+        if it:
+            raw = it.text()
+            for prefix in ["☠️ ", "🚨 ", "⚠️ ", "💀 "]:
+                if raw.startswith(prefix):
+                    raw = raw[len(prefix):]
+                    break
+            self.selected_stock_name = raw
+            self._add_recent_stock(raw)
+            self.sync_ui_with_engine()
+
+    def _update_gri_report(self):
+        """GRI 선택 시 우측 리포트 패널에 GRI 정보 표시"""
+        s = self.game_service.s
+        gri  = s.gri
+        prev = getattr(s, 'prev_gri', gri)
+        rate = ((gri / max(1.0, prev)) - 1.0) * 100
+        col  = "#FF4444" if rate >= 0 else "#4444FF"
+        sign = "▲" if rate > 0 else ("▼" if rate < 0 else "─")
+        bubble = getattr(s, 'bubble_index', 0.0)
+
+        if   bubble >= 300: b_color = "#FF0000"; b_label = "🔴 위험"
+        elif bubble >= 200: b_color = "#FF6600"; b_label = "🟠 경고"
+        elif bubble >= 150: b_color = "#FFD700"; b_label = "🟡 주의"
+        elif bubble >= 50:  b_color = "#00FF00"; b_label = "🟢 정상"
+        else:               b_color = "#888888"; b_label = "⚪ 안정"
+
+        lv_names = {1: "1단계 (PC/인터넷)", 2: "2단계 (모바일/클라우드)",
+                    3: "3단계 (AI/양자)", 4: "4단계 (기술 특이점)"}
+        lv_name = lv_names.get(s.max_tech_reached, f"Lv.{s.max_tech_reached}")
+
+        self.report_panel.setHtml(f"""
+        <div style='font-family: Malgun Gothic; padding: 10px;'>
+            <p style='font-size:28px; font-weight:bold; color:#00FF00;'>GRI 지수</p>
+            <p style='font-size:36px; font-weight:bold; color:{col};'>
+                {gri:,.0f}
+                <span style='font-size:18px;'> {sign}{abs(rate):.2f}%</span>
+            </p>
+            <hr style='border:0.5px solid #333;'/>
+            <p><b style='color:#FFD700;'>기술 레벨</b><br/>
+            {lv_name}</p>
+            <p><b style='color:#FFD700;'>버블 지수</b><br/>
+            <span style='color:{b_color}; font-size:20px; font-weight:bold;'>{bubble:.1f}</span>
+            <span style='color:{b_color};'> {b_label}</span></p>
+            <p><b style='color:#FFD700;'>현재 시나리오</b><br/>
+            {s.current_scenario}</p>
+            <p><b style='color:#FFD700;'>거시경제</b><br/>
+            금리: {s.macro['interest_rate']:.2f}%<br/>
+            유가: ${s.macro['oil_price']:.1f}<br/>
+            환율: ₩{s.macro['exchange_rate']:,.0f}<br/>
+            CPI: {s.macro['cpi']:.2f}%</p>
+            <hr style='border:0.5px solid #333;'/>
+            <p style='color:#555; font-size:11px;'>* GRI 차트를 보려면 좌측 기간 버튼을 클릭하세요.</p>
+        </div>
+        """)
+        # 매수/매도 버튼 비활성화
+        self.btn_buy.setEnabled(False)
+        self.btn_sell.setEnabled(False)
+
+    @staticmethod
+    def _get_chart_step(count: int, tf: str = "전체") -> int:
+        """
+        데이터 기간에 따른 step 결정.
+        항상 최소 10포인트 이상 표시되도록 fallback 보장.
+
+        전체 버튼 — 실제 데이터 기간 기반:
+          1년 이하   : 1일
+          1~3년      : 1주  (7일)
+          3~10년     : 1달  (30일)
+          10~30년    : 1분기(90일)
+          30~50년    : 반기 (180일)
+          50년+      : 1년  (365일)
+
+        1년/5년 버튼도 데이터가 부족하면 자동으로 더 작은 step으로 fallback.
+        """
+        MIN_POINTS = 10
+
+        if tf in ("1주", "1달", "3달"):
+            step = 1
+        elif tf == "1년":
+            step = 7
+        elif tf == "5년":
+            step = 30
+        else:
+            years = count / 252
+            if   years <= 1:  step = 1
+            elif years <= 3:  step = 7
+            elif years <= 10: step = 30
+            elif years <= 30: step = 90
+            elif years <= 50: step = 180
+            else:             step = 365
+
+        # 데이터 부족 시 fallback: MIN_POINTS 이상이 되도록 step 축소
+        while step > 1 and count // step < MIN_POINTS:
+            if   step >= 365: step = 180
+            elif step >= 180: step = 90
+            elif step >= 90:  step = 30
+            elif step >= 30:  step = 7
+            else:             step = 1
+
+        return max(1, step)
+
+    def _refresh_gri_chart(self):
+        """메인 차트에 GRI 지수 표시"""
+        lim = self.TF_LIMITS.get(self.current_tf, 1)
+        s   = self.game_service.s
+
+        # ── 1일 버튼: 전일GRI → 현재GRI 단순 2포인트 표시 ──────
+        if lim == 1:
+            gri_now  = s.gri
+            gri_prev = getattr(s, 'prev_gri', gri_now)
+            disp = [gri_prev, gri_now]
+
+            # 기존 마커 제거
+            for attr in ['_gri_max_scatter','_gri_min_scatter','_gri_max_text','_gri_min_text']:
+                if hasattr(self, attr):
+                    try: self.chart_widget.removeItem(getattr(self, attr))
+                    except: pass
+
+            col = "#FF4444" if gri_now >= gri_prev else "#4444FF"
+            self.curve.setPen(pg.mkPen(color=col, width=2))
+            self.curve.setData(disp)
+
+            pad = max(1.0, abs(gri_now - gri_prev) * 0.5) if gri_now != gri_prev else gri_now * 0.001
+            self.chart_widget.setYRange(min(disp) - pad, max(disp) + pad)
+            self.baseline.setPos(float(gri_prev))
+            self.chart_widget.getAxis('bottom').setTicks([[(0, "전일"), (1, "현재")]])
+
+            rate  = ((gri_now / max(1.0, gri_prev)) - 1.0) * 100
+            sign  = "▲" if rate > 0 else ("▼" if rate < 0 else "─")
+            c_hex = "#FF4444" if rate > 0 else ("#4444FF" if rate < 0 else "#e0e0e0")
+            self.change_summary_label.setText(
+                f"<span style='color:#aaa;'>1일 기준: </span>"
+                f"<span style='color:#fff;'>{gri_prev:,.0f}</span>"
+                f" → <span style='color:{c_hex};font-weight:bold;'>{gri_now:,.0f} "
+                f"({sign}{abs(rate):.2f}%)</span>"
+            )
+            return
+
+        # ── 1일 외: DB에서 히스토리 조회 후 표시 ────────────────
+        rows = self.game_service.db.get_gri_history(0 if lim > 900_000 else lim)
+        if not rows:
+            return
+
+        dates  = [r[0] for r in rows]
+        prices = [float(r[1]) for r in rows]
+        if len(prices) == 1:
+            prices = [prices[0], prices[0]]
+            dates  = [dates[0], dates[0]]
+
+        count = len(prices)
+        step  = self._get_chart_step(count, self.current_tf)
+
+        disp       = prices[::step]
+        disp_dates = dates[::step]
+        if prices[-1] not in disp:
+            disp.append(prices[-1])
+            disp_dates.append(dates[-1])
+        if len(disp) < 2:
+            disp       = [prices[0], prices[-1]]
+            disp_dates = [dates[0], dates[-1]]
+
+        # X축 날짜 레이블
+        x_ticks  = []
+        n_ticks  = min(6, len(disp_dates))
+        t_indices = [int(i * (len(disp_dates)-1) / max(1, n_ticks-1)) for i in range(n_ticks)]
+        seen     = set()
+        for idx in t_indices:
+            if idx < len(disp_dates):
+                d = disp_dates[idx]
+                label = d[2:7] if len(d) >= 7 else d
+                if label not in seen:
+                    x_ticks.append((idx, label))
+                    seen.add(label)
+        self.chart_widget.getAxis('bottom').setTicks([x_ticks])
+
+        col = "#FF4444" if disp[-1] >= disp[0] else "#4444FF"
+        self.curve.setPen(pg.mkPen(color=col, width=2))
+        self.curve.setData(disp)
+
+        mn, mx = min(prices), max(prices)
+        pad = max(1.0, (mx - mn) * 0.05) if mx != mn else mx * 0.01
+        self.chart_widget.setYRange(mn - pad, mx + pad)
+        self.baseline.setPos(float(disp[0]))
+
+        # 기존 마커 제거 후 새로 추가
+        for attr in ['_gri_max_scatter','_gri_min_scatter','_gri_max_text','_gri_min_text']:
+            if hasattr(self, attr):
+                try: self.chart_widget.removeItem(getattr(self, attr)); delattr(self, attr)
+                except: pass
+
+        n       = len(disp)
+        max_idx = max(range(n), key=lambda i: disp[i])
+        min_idx = min(range(n), key=lambda i: disp[i])
+
+        self._gri_max_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#FF4444'), symbol='o')
+        self._gri_max_scatter.addPoints([{'pos': (max_idx, mx)}])
+        self.chart_widget.addItem(self._gri_max_scatter)
+
+        self._gri_min_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#4444FF'), symbol='o')
+        self._gri_min_scatter.addPoints([{'pos': (min_idx, mn)}])
+        self.chart_widget.addItem(self._gri_min_scatter)
+
+        max_anchor = (1.0, 1.0) if max_idx > n * 0.75 else (0.0, 1.0)
+        self._gri_max_text = pg.TextItem(
+            html=f"<span style='color:#FF4444;font-weight:bold;background-color:#000;'>최고: {mx:,.0f}</span>",
+            anchor=max_anchor)
+        self._gri_max_text.setPos(max_idx, mx)
+        self.chart_widget.addItem(self._gri_max_text)
+
+        min_anchor = (1.0, 0.0) if min_idx > n * 0.75 else (0.0, 0.0)
+        self._gri_min_text = pg.TextItem(
+            html=f"<span style='color:#4444FF;font-weight:bold;background-color:#000;'>최저: {mn:,.0f}</span>",
+            anchor=min_anchor)
+        self._gri_min_text.setPos(min_idx, mn)
+        self.chart_widget.addItem(self._gri_min_text)
+
+        rate  = ((disp[-1] / max(1.0, disp[0])) - 1.0) * 100
+        sign  = "▲" if rate > 0 else ("▼" if rate < 0 else "─")
+        c_hex = "#FF4444" if rate > 0 else ("#4444FF" if rate < 0 else "#e0e0e0")
+        self.change_summary_label.setText(
+            f"<span style='color:#aaa;'>{self.current_tf} 기준: </span>"
+            f"<span style='color:#fff;'>{disp[0]:,.0f}</span>"
+            f" → <span style='color:{c_hex};font-weight:bold;'>{disp[-1]:,.0f} "
+            f"({sign}{abs(rate):.2f}%)</span>"
+        )
+
+        col = "#FF4444" if disp[-1] >= disp[0] else "#4444FF"
+        self.curve.setPen(__import__('pyqtgraph', fromlist=['mkPen']).mkPen(color=col, width=2))
+        self.curve.setData(disp)
+
+        mn, mx = min(disp), max(disp)
+        pad = max(1.0, (mx - mn) * 0.05) if mx != mn else mx * 0.01
+        self.chart_widget.setYRange(mn - pad, mx + pad)
+
+        # baseline
+        self.baseline.setPos(float(disp[0]))
+
+        # 최고/최저 마커
+        import pyqtgraph as pg2
+        for attr in ['_gri_max_scatter','_gri_min_scatter','_gri_max_text','_gri_min_text']:
+            if hasattr(self, attr):
+                try: self.chart_widget.removeItem(getattr(self, attr))
+                except: pass
+
+        n = len(disp)
+        max_idx = max(range(n), key=lambda i: disp[i])
+        min_idx = min(range(n), key=lambda i: disp[i])
+
+        self._gri_max_scatter = pg2.ScatterPlotItem(size=10, brush=pg2.mkBrush('#FF4444'), symbol='o')
+        self._gri_max_scatter.addPoints([{'pos': (max_idx, mx)}])
+        self.chart_widget.addItem(self._gri_max_scatter)
+
+        self._gri_min_scatter = pg2.ScatterPlotItem(size=10, brush=pg2.mkBrush('#4444FF'), symbol='o')
+        self._gri_min_scatter.addPoints([{'pos': (min_idx, mn)}])
+        self.chart_widget.addItem(self._gri_min_scatter)
+
+        # anchor: (0,0)=텍스트 왼쪽상단이 점에 붙음, (1,0)=텍스트 오른쪽상단
+        # 우측 75% 이상이면 텍스트를 왼쪽으로 (anchor x=1)
+        # 좌측 25% 이하이면 텍스트를 오른쪽으로 (anchor x=0)
+        max_anchor = (1.0, 1.0) if max_idx > n * 0.75 else (0.0, 1.0)
+        self._gri_max_text = pg2.TextItem(
+            html=f"<span style='color:#FF4444;font-weight:bold;background-color:#000;'>최고: {mx:,.0f}</span>",
+            anchor=max_anchor)
+        self._gri_max_text.setPos(max_idx, mx)
+        self.chart_widget.addItem(self._gri_max_text)
+
+        min_anchor = (1.0, 0.0) if min_idx > n * 0.75 else (0.0, 0.0)
+        self._gri_min_text = pg2.TextItem(
+            html=f"<span style='color:#4444FF;font-weight:bold;background-color:#000;'>최저: {mn:,.0f}</span>",
+            anchor=min_anchor)
+        self._gri_min_text.setPos(min_idx, mn)
+        self.chart_widget.addItem(self._gri_min_text)
+
+        # 등락률 표시
+        rate = ((disp[-1] / max(1.0, disp[0])) - 1.0) * 100
+        sign = "▲" if rate > 0 else ("▼" if rate < 0 else "─")
+        c_hex = "#FF4444" if rate > 0 else ("#4444FF" if rate < 0 else "#e0e0e0")
+        self.change_summary_label.setText(
+            f"<span style='color:#aaa;'>{self.current_tf} 기준: </span>"
+            f"<span style='color:#fff;'>{disp[0]:,.0f}</span>"
+            f" → <span style='color:{c_hex};font-weight:bold;'>{disp[-1]:,.0f} "
+            f"({sign}{abs(rate):.2f}%)</span>"
+        )
 
     def scroll_to_selected(self):
         for i in range(self.stock_table.rowCount()):
-            it = self.stock_table.item(i, 0)
-            if it and it.text() == self.selected_stock_name:
-                self.stock_table.scrollToItem(it, QTableWidget.ScrollHint.PositionAtCenter)
-                break
+            it = self.stock_table.item(i, 1)
+            if it:
+                raw = it.text()
+                for prefix in ["☠️ ", "🚨 ", "⚠️ ", "💀 "]:
+                    if raw.startswith(prefix): raw = raw[len(prefix):]; break
+                if raw == self.selected_stock_name:
+                    self.stock_table.scrollToItem(it, QTableWidget.ScrollHint.PositionAtCenter)
+                    break
 
     def change_tf(self, tf: str):
         self.current_tf = tf
@@ -695,6 +1080,17 @@ class StockHTS(QMainWindow):
     # 차트
     # ─────────────────────────────────────────────
     def refresh_chart(self):
+        # GRI ↔ 주식 전환 시 ticks 초기화 (setAxisItems 절대 금지)
+        self.chart_widget.getAxis('bottom').setTicks(None)
+        for attr in ['_gri_max_scatter', '_gri_min_scatter', '_gri_max_text', '_gri_min_text']:
+            if hasattr(self, attr):
+                try: self.chart_widget.removeItem(getattr(self, attr))
+                except: pass
+
+        if self.selected_stock_name == "GRI":
+            self._refresh_gri_chart()
+            return
+
         s = self._get_selected_stock()
         if not s: return
         name = s['meta']['c_name']
@@ -721,23 +1117,59 @@ class StockHTS(QMainWindow):
         else:
             base_p = prices[0]
             count  = len(prices)
-            if self.current_tf in ("1주", "1달", "3달"):
-                step = 1
-            elif self.current_tf == "1년":
-                step = 7
-            elif self.current_tf == "5년":
-                step = 30
-            else:
-                step = 1 if count < 180 else (7 if count < 1095 else (30 if count < 3650 else (180 if count < 14600 else 365)))
-            indices    = list(range(0, count, step))
-            if indices[-1] != count - 1:
+
+            # 기간 기반 step — _get_chart_step이 데이터 부족 시 자동 fallback
+            step = self._get_chart_step(count, self.current_tf)
+
+            indices = list(range(0, count, step))
+            if not indices or indices[-1] != count - 1:
                 indices.append(count - 1)
+            indices = sorted(set(indices))
+
             disp       = [prices[i] for i in indices]
             disp_dates = [dates[i]  for i in indices]
-            # 마지막 값은 현재가로 고정
             disp[-1]   = cur_p
 
-        self.chart_widget.setAxisItems({'bottom': DateAxisItem(dates=disp_dates, orientation='bottom')})
+        # X축 날짜 ticks (setAxisItems 금지 — curve 분리 방지)
+        if len(disp_dates) >= 2:
+            n_ticks   = min(6, len(disp_dates))
+            t_indices = [int(i * (len(disp_dates)-1) / max(1, n_ticks-1)) for i in range(n_ticks)]
+            x_ticks   = []
+            seen_lbl  = set()
+            for idx in t_indices:
+                if idx < len(disp_dates):
+                    d = disp_dates[idx]
+                    label = d.strftime('%y-%m-%d') if hasattr(d, 'strftime') else str(d)[2:10]
+                    if label not in seen_lbl:
+                        x_ticks.append((idx, label))
+                        seen_lbl.add(label)
+            self.chart_widget.getAxis('bottom').setTicks([x_ticks])
+
+        smoothed = disp[:]
+        diff     = smoothed[-1] - smoothed[0]
+        period_r = (diff / base_p * 100) if base_p != 0 else 0
+        c_hex = "#FF4444" if diff > 0 else ("#4444FF" if diff < 0 else "#e0e0e0")
+        sign  = "▲" if diff > 0 else ("▼" if diff < 0 else "─")
+
+        self.curve.setPen(pg.mkPen(color=c_hex, width=2))
+        self.baseline.setPos(base_p)
+        self.curve.setData(smoothed)
+
+        raw_for_range = prices if self.current_tf != "1일" else smoothed
+        if raw_for_range:
+            y_min = min(raw_for_range)
+            y_max = max(raw_for_range)
+            y_pad = max(1.0, (y_max - y_min) * 0.05) if y_min != y_max else y_min * 0.01
+            self.chart_widget.setYRange(y_min - y_pad, y_max + y_pad)
+
+        self._update_chart_markers(smoothed, prices if self.current_tf != "1일" else None)
+        self.change_summary_label.setText(
+            f"<span style='color:#ffffff;'>{self.current_tf} 기준: </span>"
+            f"<span style='color:#aaaaaa;'>{int(base_p):,}원</span>"
+            f"<span style='color:#ffffff;'> → </span>"
+            f"<span style='color:{c_hex}; font-weight:bold;'>{int(smoothed[-1]):,}원 </span>"
+            f"<span style='color:{c_hex};'>({sign}{int(abs(diff)):,}원, {period_r:+.2f}%)</span>"
+        )
 
         smoothed = disp[:]
         diff     = smoothed[-1] - smoothed[0]
@@ -822,35 +1254,25 @@ class StockHTS(QMainWindow):
         self.chart_widget.addItem(self.min_text)
         
     def _update_report(self, stock: dict):
-        m     = stock['meta']
+        m         = stock['meta']
         all_snaps = sorted(self.game_service.s.stocks, key=lambda x: x.get('market_cap', 0), reverse=True)
-        rank  = next((i + 1 for i, s in enumerate(all_snaps) if s['meta'].get('c_name') == m.get('c_name')), 0)
+        rank      = next((i + 1 for i, s in enumerate(all_snaps) if s['meta'].get('c_name') == m.get('c_name')), 0)
 
-        # ── HP / Shield 수치 ─────────────────────────────────────
+        # ── HP / Shield ──────────────────────────────────────────
         hp       = m.get('hp', 0.0)
         soft_cap = m.get('hp_soft_cap', 60.0)
         shield   = m.get('shield', 0.0)
         hp_ratio = hp / max(1.0, soft_cap)
+        filled   = round(hp_ratio * 10)
+        hp_bar   = '■' * filled + '□' * (10 - filled)
 
-        # HP 게이지 바 (10칸)
-        filled = round(hp_ratio * 10)
-        hp_bar = '■' * filled + '□' * (10 - filled)
+        if hp_ratio >= 0.60:   hp_color = '#00FF00'
+        elif hp_ratio >= 0.30: hp_color = '#FFA500'
+        else:                  hp_color = '#FF4444'
 
-        # HP 비율별 색상
-        if hp_ratio >= 0.60:
-            hp_color = '#00FF00'
-        elif hp_ratio >= 0.30:
-            hp_color = '#FFA500'
-        else:
-            hp_color = '#FF4444'
-
-        # 쉴드 단위 변환
-        if shield >= 1_000_000_000_000:
-            shield_str = f"{shield / 1_000_000_000_000:.2f}조"
-        elif shield >= 100_000_000:
-            shield_str = f"{shield / 100_000_000:.1f}억"
-        else:
-            shield_str = f"{shield:,.0f}원"
+        if   shield >= 1_000_000_000_000: shield_str = f"{shield/1_000_000_000_000:.2f}조"
+        elif shield >= 100_000_000:       shield_str = f"{shield/100_000_000:.1f}억"
+        else:                              shield_str = f"{shield:,.0f}원"
 
         shield_active = hp_ratio < 0.30 and shield > 0
         shield_label  = "🛡️ 발동중" if shield_active else "대기중"
@@ -863,35 +1285,112 @@ class StockHTS(QMainWindow):
 
         if hp <= 0:
             warning_badge = "<span style='background-color:#FF0000;color:white;padding:2px 6px;border-radius:3px;font-size:13px;margin-left:5px;'>☠️ 상장폐지확정</span>"
-        elif warning_info and warning_info.get('type') == 'IN':
-            days_left = (warning_info['date'] - self.game_service.s.current_date).days
+        elif char == 'DANGER':
+            warning_badge = "<span style='background-color:#FF4400;color:white;padding:2px 6px;border-radius:3px;font-size:13px;font-weight:bold;margin-left:5px;'>🚨 상장폐지위험</span>"
+        elif warning_info and warning_info.get('type') in ('IN', 'DANGER'):
+            try:
+                w_date = warning_info['date']
+                if isinstance(w_date, str):
+                    from datetime import datetime as _dt
+                    w_date = _dt.strptime(w_date, '%Y-%m-%d')
+                days_left = max(0, (w_date.date() - self.game_service.s.current_date.date()).days)
+            except Exception:
+                days_left = 0
             warning_badge = f"<span style='background-color:#FF6600;color:white;padding:2px 6px;border-radius:3px;font-size:13px;margin-left:5px;'>⚠️ 투자경고 지정 예정 (D-{days_left})</span>"
-        elif "WARNING" in char:
+        elif 'WARNING' in char:
             warning_badge = "<span style='background-color:#FFA500;color:black;padding:2px 6px;border-radius:3px;font-size:13px;font-weight:bold;margin-left:5px;'>⚠️ 투자경고</span>"
-        elif warning_info and warning_info.get('type') == 'OUT':
-            days_left = (warning_info['date'] - self.game_service.s.current_date).days
-            warning_badge = f"<span style='background-color:#007700;color:white;padding:2px 6px;border-radius:3px;font-size:13px;margin-left:5px;'>🍀 경고해제 예정 (D-{days_left})</span>"
 
         vals  = [m.get(k, 0) * 100 for k in ['treasury_share','owner_share','foreign_share','inst_share','retail_share']]
         total = sum(vals)
         ts, os, fs, ins, rs = [(v / total * 100 if total > 0 else v) for v in vals]
         size  = {"대형주": "[대기업]", "중형주": "[중견기업]", "소형주": "[중소기업]"}.get(m.get('tier','소형주'), "[중소기업]")
 
-        # 시총 단위 변환 (경/조/억/원)
         def fmt_cap(v):
-            if v >= 1_000_000_000_000_000_0:
-                return f"{v/1_000_000_000_000_000_0:.2f}경"
-            elif v >= 1_000_000_000_000_000:
-                return f"{v/1_000_000_000_000_000:.1f}천조"
-            elif v >= 1_000_000_000_000:
-                return f"{v/1_000_000_000_000:.2f}조"
-            elif v >= 100_000_000:
-                return f"{v/100_000_000:.0f}억"
-            else:
-                return f"{v:,.0f}원"
+            if v >= 1e16:  return f"{v/1e16:.2f}경"
+            elif v >= 1e15: return f"{v/1e15:.1f}천조"
+            elif v >= 1e12: return f"{v/1e12:.2f}조"
+            elif v >= 1e8:  return f"{v/1e8:.0f}억"
+            else:           return f"{v:,.0f}원"
 
-        mc      = stock['market_cap']
-        mc_str  = fmt_cap(mc)
+        mc     = stock['market_cap']
+        mc_str = fmt_cap(mc)
+
+        # ── 밸류에이션 지표 계산 ─────────────────────────────────
+        name = m.get('c_name', '')
+        hist = self.game_service.s.earnings_history.get(name, {})
+        all_ni = []; all_op = []; all_rev = []
+        for yd in hist.values():
+            for qd in yd.values():
+                all_ni.append(qd.get('net_income', 0))
+                all_op.append(qd.get('op_income', 0))
+                all_rev.append(qd.get('revenue', 0))
+
+        recent_ni  = all_ni[-4:]  if len(all_ni)  >= 4 else all_ni
+        recent_op  = all_op[-4:]  if len(all_op)  >= 4 else all_op
+        recent_rev = all_rev[-4:] if len(all_rev) >= 4 else all_rev
+        annual_ni  = sum(recent_ni);  annual_op = sum(recent_op);  annual_rev = sum(recent_rev)
+        if 0 < len(recent_ni) < 4:
+            f = 4 / len(recent_ni)
+            annual_ni *= f; annual_op *= f; annual_rev *= f
+
+        assets = max(1.0, m.get('assets', 1.0))
+
+        # PER
+        if annual_ni > 0:
+            per_val  = mc / annual_ni
+            per_str  = f"{per_val:.1f}배"
+            per_icon = "🟢" if per_val < 15 else ("🟡" if per_val < 30 else ("🟠" if per_val < 50 else "🔴"))
+        elif annual_ni < 0:
+            per_str = "적자"; per_icon = "🔴"
+        else:
+            per_str = "N/A"; per_icon = "⚪"
+
+        # PBR
+        pbr_val  = mc / assets
+        # PBR 상한 표시 (비정상 수치 방지)
+        if pbr_val > 9999:
+            pbr_str = "N/A (데이터 오류)"; pbr_icon = "⚪"
+        else:
+            pbr_str  = f"{pbr_val:.2f}배"
+            pbr_icon = "🟢" if pbr_val < 1 else ("🟡" if pbr_val < 3 else ("🟠" if pbr_val < 5 else "🔴"))
+
+        # ROE
+        roe_val  = (annual_ni / assets * 100) if assets > 0 else 0.0
+        roe_str  = f"{roe_val:.1f}%"
+        roe_icon = "🟢" if roe_val >= 15 else ("🟡" if roe_val >= 8 else ("🟠" if roe_val >= 0 else "🔴"))
+
+        # 영업이익률
+        if annual_rev > 0:
+            op_margin = annual_op / annual_rev * 100
+            op_str    = f"{op_margin:.1f}%"
+            op_icon   = "🟢" if op_margin >= 15 else ("🟡" if op_margin >= 5 else ("🟠" if op_margin >= 0 else "🔴"))
+        else:
+            op_str = "N/A"; op_icon = "⚪"
+
+        # 부채비율
+        debt_ratio = m.get('debt_ratio', None)
+        if debt_ratio is not None:
+            dr_pct  = debt_ratio * 100
+            dr_str  = f"{dr_pct:.1f}%"
+            dr_icon = "🟢" if dr_pct < 50 else ("🟡" if dr_pct < 100 else ("🟠" if dr_pct < 200 else "🔴"))
+        else:
+            dr_str = "N/A"; dr_icon = "⚪"
+
+        # 신용등급
+        credit       = m.get('credit_grade', 'N/A')
+        credit_color = {'AA': '#00FF00', 'BB': '#FFA500', 'CCC': '#FF4444'}.get(credit, '#888888')
+
+        # 52주 신고가/신저가
+        high_52w   = m.get('price_52w_high', stock['price'])
+        low_52w    = m.get('price_52w_low',  stock['price'])
+        cur_p      = stock['price']
+        high_badge = " <b style='color:#FF4444;'>★신고가</b>" if cur_p >= high_52w * 0.999 else ""
+        low_badge  = " <b style='color:#4444FF;'>★신저가</b>" if cur_p <= low_52w  * 1.001 else ""
+
+        # 버핏 지수
+        buffett      = getattr(self.game_service.s, 'buffett_index', 0.0)
+        buffett_str  = f"{buffett:.1f}%"
+        buffett_icon = "🟢 저평가" if buffett < 80 else ("🟡 적정" if buffett < 100 else ("🟠 고평가" if buffett < 130 else "🔴 버블"))
 
         self.report_panel.setHtml(f"""
         <div style='font-family: Malgun Gothic;'>
@@ -907,13 +1406,13 @@ class StockHTS(QMainWindow):
             상태: <b style='color:#00FF00;'>{char}</b></p>
             <p style='font-size:13px;'><b>[발행 정보]</b><br/>
             주식수: {stock['shares']:,} 주<br/>
-            시총: {mc:,} 원
-            <span style='color:#FFD700;font-weight:bold;'> ({mc_str})</span></p>
+            <span style='color:{shield_color};'>방어막 {shield_str} [{shield_label}]</span><br/>
+            시총: {mc:,} 원 <span style='color:#FFD700;font-weight:bold;'>({mc_str})</span></p>
             <hr style='border: 0.5px solid #333;'/>
             <p style='font-size:13px;'><b>[지배구조]</b><br/>
-            자사주: {ts:.1f}% | 대주주: {os:.1f}%<br/>
-            외국인: {fs:.1f}% | 기관 : {ins:.1f}%<br/>
-            개인 : {rs:.1f}%</p>
+            자사주: {ts:.2f}% | 대주주: {os:.2f}%<br/>
+            외국인: {fs:.2f}% | 기관 : {ins:.2f}%<br/>
+            개인 : {rs:.2f}%</p>
             <hr style='border: 0.5px solid #333;'/>
             <p style='font-size:14px;'><b>[재무 체력]</b></p>
             <p style='font-size:20px;font-family:monospace;letter-spacing:2px;margin:4px 0;'>
@@ -921,9 +1420,19 @@ class StockHTS(QMainWindow):
             <p style='font-size:15px;font-weight:bold;margin:4px 0;'>
             <span style='color:{hp_color};'>HP {hp:.2f} / {soft_cap:.0f}</span>
             <span style='color:#888;font-size:13px;'> ({hp_ratio*100:.1f}%)</span></p>
-            <p style='font-size:14px;margin:4px 0;'>
-            <span style='color:{shield_color};'>방어막 {shield_str}</span>
-            <span style='color:{shield_color};font-size:12px;'> [{shield_label}]</span></p>
+            <hr style='border: 0.5px solid #333;'/>
+            <p style='font-size:13px;'><b>[밸류에이션]</b><br/>
+            PER&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: {per_icon} {per_str}<br/>
+            PBR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: {pbr_icon} {pbr_str}<br/>
+            ROE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: {roe_icon} {roe_str}<br/>
+            영업이익률: {op_icon} {op_str}<br/>
+            부채비율&nbsp;&nbsp;: {dr_icon} {dr_str}<br/>
+            신용등급&nbsp;&nbsp;: <b style='color:{credit_color};'>{credit}</b></p>
+            <hr style='border: 0.5px solid #333;'/>
+            <p style='font-size:13px;'><b>[시장 지표]</b><br/>
+            52주 신고가: {int(high_52w):,}원{high_badge}<br/>
+            52주 신저가: {int(low_52w):,}원{low_badge}<br/>
+            버핏 지수&nbsp;&nbsp;: {buffett_str} {buffett_icon}</p>
         </div>""")
 
     # ─────────────────────────────────────────────
@@ -950,10 +1459,14 @@ class StockHTS(QMainWindow):
             self.selected_stock_name = name
             self.search_bar.clear()
             for i in range(self.stock_table.rowCount()):
-                it = self.stock_table.item(i, 0)
-                if it and it.text() == name:
-                    self.stock_table.setCurrentCell(i, 0)
-                    break
+                it = self.stock_table.item(i, 1)
+                if it:
+                    raw = it.text()
+                    for prefix in ["☠️ ", "🚨 ", "⚠️ ", "💀 "]:
+                        if raw.startswith(prefix): raw = raw[len(prefix):]; break
+                    if raw == name:
+                        self.stock_table.setCurrentCell(i, 1)
+                        break
             self.sync_ui_with_engine()
 
     def _get_selected_stock(self) -> dict | None:
@@ -970,45 +1483,166 @@ class StockHTS(QMainWindow):
 class InfoTableDialog(QDialog):
     def __init__(self, title: str, headers: list, game_service, parent=None):
         super().__init__(parent)
-        self.gs = game_service
+        self.gs        = game_service
+        self.all_data  = []   # 전체 데이터 캐시
         self.setWindowTitle(title)
-        self.resize(1300, 700)
+        self.resize(1300, 750)
         self.setStyleSheet(HTS_STYLE)
 
         layout = QVBoxLayout()
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # ── 상단: 총 개수 + 검색창 + 필터 ───────────────────────
+        top_bar = QHBoxLayout()
+
+        # 총 개수 라벨
+        self.count_label = QLabel("총 0개")
+        self.count_label.setStyleSheet(
+            "color: #FF4444; font-weight: bold; font-size: 13px; "
+            "background: #1a0000; border: 1px solid #FF4444; "
+            "padding: 4px 10px; border-radius: 3px;"
+        )
+        self.count_label.setFixedWidth(90)
+
+        # 필터 콤보박스
+        from PyQt6.QtWidgets import QComboBox
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems([
+            "전체 검색", "회사명", "그룹명", "산업", "섹터", "생애주기", "등급"
+        ])
+        self.filter_combo.setStyleSheet(
+            "QComboBox { background:#111; color:#eee; border:1px solid #444; "
+            "padding:4px; border-radius:3px; min-width:100px; }"
+            "QComboBox QAbstractItemView { background:#111; color:#eee; "
+            "selection-background-color:#1a331a; }"
+        )
+        self.filter_combo.currentIndexChanged.connect(self._apply_filter)
+
+        # 검색 입력창
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 검색어를 입력하세요...")
+        self.search_input.setStyleSheet(
+            "QLineEdit { background:#000; color:#00FF00; border:1px solid #00FF00; "
+            "padding:5px; border-radius:3px; font-size:13px; }"
+        )
+        self.search_input.textChanged.connect(self._apply_filter)
+
+        # 초기화 버튼
+        btn_clear = QPushButton("초기화")
+        btn_clear.setFixedWidth(70)
+        btn_clear.setStyleSheet(
+            "QPushButton { background:#222; color:#aaa; border:1px solid #444; "
+            "padding:5px; border-radius:3px; }"
+            "QPushButton:hover { background:#333; color:#fff; }"
+        )
+        btn_clear.clicked.connect(lambda: self.search_input.clear())
+
+        top_bar.addWidget(self.count_label)
+        top_bar.addWidget(self.filter_combo)
+        top_bar.addWidget(self.search_input)
+        top_bar.addWidget(btn_clear)
+        layout.addLayout(top_bar)
+
+        # ── 테이블 ────────────────────────────────────────────────
         self.table = QTableWidget(0, len(headers))
         self.table.setHorizontalHeaderLabels(headers)
         self.table.setStyleSheet(
             "QTableWidget { background-color: #000; color: #e0e0e0; gridline-color: #222; } "
             "QHeaderView::section { background-color: #222; color: #00FF00; }"
         )
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         layout.addWidget(self.table)
         self.setLayout(layout)
         self.table.cellClicked.connect(self._on_cell_clicked)
         self.refresh_data()
 
     def refresh_data(self):
-        delisted = self.gs.s.delisted_stocks
-        self.table.setRowCount(len(delisted))
-        for i, st in enumerate(delisted):
-            m   = st['meta']
-            row = [
-                i + 1,
-                f"{m.get('listed_date')}~{m.get('delisted_date')}",
-                "[소]", "[DELISTED]",
-                m.get('group', '-'), m['ind'], m['c_name'],
-                f"{m['ind']}({m['sub']})",
-                f"{int(st['price']):,}원",
-                f"{st['shares']:,}주",
-                f"{m.get('treasury_share', 0)*100:.1f}%",
+        """전체 데이터 로드 및 캐시"""
+        delisted    = self.gs.s.delisted_stocks
+        total_count = len(delisted)
+
+        # 총 개수 업데이트
+        self.count_label.setText(f"총 {total_count:,}개")
+
+        # 데이터 캐시 (역순: 최근 상폐가 위로)
+        self.all_data = []
+        for i, st in enumerate(reversed(delisted)):
+            m    = st['meta']
+            tier = m.get('tier', '소형주')
+            tier_map = {'대형주': '[대]', '중형주': '[중]', '소형주': '[소]'}
+            tier_str = tier_map.get(tier, '[소]')
+            self.all_data.append({
+                'no':        total_count - i,
+                'lifecycle': f"{m.get('listed_date', '-')} ~ {m.get('delisted_date', '-')}",
+                'tier':      tier_str,
+                'status':    '[DELISTED]',
+                'group':     m.get('group', '독립'),
+                'sector':    m.get('ind', '-'),
+                'name':      m['c_name'],
+                'sub':       f"{m['ind']}({m['sub']})",
+                'price':     f"{int(st['price']):,}원",
+                'shares':    f"{st['shares']:,}주",
+                'treasury':  f"{m.get('treasury_share', 0)*100:.1f}%",
+                '_stock':    st,
+            })
+
+        self._apply_filter()
+
+    def _apply_filter(self):
+        """검색 필터 적용"""
+        keyword = self.search_input.text().lower().strip()
+        idx     = self.filter_combo.currentIndex()
+
+        filtered = []
+        for row in self.all_data:
+            if not keyword:
+                filtered.append(row)
+                continue
+
+            if   idx == 0:  # 전체
+                target = f"{row['name']} {row['group']} {row['sector']} {row['sub']} {row['lifecycle']}"
+            elif idx == 1:  # 회사명
+                target = row['name']
+            elif idx == 2:  # 그룹명
+                target = row['group']
+            elif idx == 3:  # 산업
+                target = row['sector']
+            elif idx == 4:  # 섹터
+                target = row['sub']
+            elif idx == 5:  # 생애주기
+                target = row['lifecycle']
+            elif idx == 6:  # 등급
+                target = row['tier']
+            else:
+                target = str(row)
+
+            if keyword in target.lower():
+                filtered.append(row)
+
+        self.table.setRowCount(len(filtered))
+        for i, row in enumerate(filtered):
+            vals = [
+                row['no'], row['lifecycle'], row['tier'], row['status'],
+                row['group'], row['sector'], row['name'], row['sub'],
+                row['price'], row['shares'], row['treasury'],
             ]
-            for j, val in enumerate(row):
+            for j, val in enumerate(vals):
                 it = QTableWidgetItem(str(val))
                 it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if "[DELISTED]" in str(val): it.setForeground(QColor("#FF4444"))
+                it.setData(Qt.ItemDataRole.UserRole, row['_stock'])
+                if '[DELISTED]' in str(val):
+                    it.setForeground(QColor("#FF4444"))
+                elif '[대]' in str(val):
+                    it.setForeground(QColor("#FFD700"))
+                elif '[중]' in str(val):
+                    it.setForeground(QColor("#00AAFF"))
                 self.table.setItem(i, j, it)
+
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.table.resizeColumnsToContents()
+        for col in range(self.table.columnCount()):
+            self.table.setColumnWidth(col, self.table.columnWidth(col) + 15)
 
     def closeEvent(self, event):
         parent = self.parent()
@@ -1017,10 +1651,9 @@ class InfoTableDialog(QDialog):
         event.accept()
 
     def _on_cell_clicked(self, row, col):
-        it = self.table.item(row, 6)
+        it = self.table.item(row, 0)
         if it:
-            name = it.text()
-            stock_obj = next((s for s in self.gs.s.delisted_stocks if s['meta']['c_name'] == name), None)
+            stock_obj = it.data(Qt.ItemDataRole.UserRole)
             if stock_obj:
                 d = DelistedDetailDialog(stock_obj, self.gs, self)
                 d.show()

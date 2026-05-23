@@ -18,13 +18,32 @@ class EarningsManager:
         meta = stock['meta']
         tier = meta.get('tier', '소형주')
 
-        revenue   = meta['assets'] * random.uniform(0.04, 0.10)
-        base_cost = {"대형주": 0.015, "중형주": 0.025, "소형주": 0.04}.get(tier, 0.04)
-        tier_bonus = {"대형주": 0.02, "중형주": 0.00, "소형주": -0.01}.get(tier, 0)
+        # ★ 경기 사이클 → 실적 연동
+        cycle = getattr(self.s, 'cycle_stage', '확장')
+        cycle_revenue_mult = {
+            "확장": 1.10,   # 확장기: 매출 10% 증가
+            "정점": 1.00,   # 정점기: 보통
+            "수축": 0.88,   # 수축기: 매출 12% 감소
+            "저점": 0.80,   # 저점기: 매출 20% 감소
+        }.get(cycle, 1.0)
+        cycle_cost_mult = {
+            "확장": 0.95,   # 확장기: 비용 절감
+            "정점": 1.00,
+            "수축": 1.10,   # 수축기: 비용 증가
+            "저점": 1.15,   # 저점기: 비용 더 증가
+        }.get(cycle, 1.0)
+
+        revenue   = meta['assets'] * random.uniform(0.04, 0.10) * cycle_revenue_mult
+        base_cost = {"대형주": 0.015, "중형주": 0.020, "소형주": 0.030}.get(tier, 0.030)
+        base_cost *= cycle_cost_mult   # 경기 사이클 비용 반영
+        tier_bonus = {"대형주": 0.02, "중형주": 0.01, "소형주": 0.00}.get(tier, 0)
 
         op_margin  = meta['efficiency'] - base_cost + tier_bonus
         op_income  = revenue * op_margin
         interest_rate  = self.s.macro.get('interest_rate', 4.0)
+        # 피드백 루프 3: 금리↑ → 기업 이자비용↑ → 실적↓
+        # 기존 0.01 → 0.05 (5배 강화, 금리 10%에서 실질 타격)
+        # 이자비용 완화: 0.05 → 0.01 (전 종목 적자 방지)
         interest_cost  = meta['assets'] * (interest_rate / 100) * 0.01
         net_income = op_income - interest_cost
 
@@ -110,43 +129,66 @@ class EarningsManager:
             # 연속 적자 카운트
             meta['continuous_loss_count'] = meta.get('continuous_loss_count', 0) + 1
 
-            # 시나리오 가중치: 대공황 시 성장주 1.6, 방어주 0.5 / 평시 1.0
             from engine.constants import SECTOR_MAP
             scenario = self.s.current_scenario
             sector   = SECTOR_MAP.get(meta.get('ind', ''), 'Value')
             if '대공황' in scenario and '극복' not in scenario:
-                sw = 1.6 if sector == 'Growth' else 0.5 if sector == 'Defensive' else 1.0
+                sw = 1.3 if sector == 'Growth' else 0.6 if sector == 'Defensive' else 1.0
             else:
                 sw = 1.0
 
-            # ① 원화 기준 총 대미지
-            cash_dmg = abs(net_income) * sensitivity * sw
+            loss_ratio = abs(net_income) / max(1.0, revenue)
+            hp_dmg_raw = loss_ratio * 100 * sensitivity * sw
+            _HP_DMG_CAP = {'대형주': 0.5, '중형주': 1.0, '소형주': 1.5}
+            hp_dmg = min(hp_dmg_raw, _HP_DMG_CAP.get(tier, 1.5))
 
-            # ② HP가 soft_cap의 30% 미만일 때만 쉴드 발동
+            # ★ 방어막 버그 수정: assets 감소해도 방어막 금액 자체가 줄어야 함
+            # shield_cap 기준으로 방어막 상한 재조정
+            shield_cap_now = market_cap * spec['cap_ratio']
+            if shield > shield_cap_now:
+                meta['shield'] = shield = round(shield_cap_now, 2)
+
+            # 방어막이 너무 작으면 소진 처리 (무한 지속 방지)
+            if shield < 100:
+                meta['shield'] = shield = 0.0
+
+            # HP가 soft_cap의 30% 미만일 때만 쉴드 발동
             hp_ratio    = hp / max(1.0, soft_cap)
             shield_mode = hp_ratio < 0.30
 
             if shield_mode and shield > 0:
-                # 쉴드 방어 모드
-                if shield >= cash_dmg:
-                    meta['shield'] = round(shield - cash_dmg, 2)
-                    # 쉴드 완전 방어 → HP 피해 없음
+                # 방어막으로 HP 차감 방어
+                # shield_hp_val: 방어막이 HP 몇 포인트 방어 가능한지
+                shield_hp_val = shield / max(1.0, assets) * 100
+                if shield_hp_val >= hp_dmg:
+                    meta['shield'] = round(max(0.0, shield - hp_dmg / 100 * assets), 2)
                 else:
-                    # 쉴드 전소 후 남은 대미지 HP 차감
-                    remaining_cash = cash_dmg - shield
+                    remaining_dmg  = hp_dmg - shield_hp_val
                     meta['shield'] = 0.0
-                    hp_dmg = remaining_cash / assets * 100
-                    meta['hp'] = round(max(0.0, hp - hp_dmg), 2)
+                    meta['hp']     = round(max(0.0, hp - remaining_dmg), 2)
             else:
-                # 쉴드 미발동 → HP 직접 차감
-                hp_dmg     = cash_dmg / assets * 100
                 meta['hp'] = round(max(0.0, hp - hp_dmg), 2)
+
+            # ★ 적자 시 assets 감소 (하한선 보장)
+            init_assets = meta.get('initial_assets', assets)
+            meta['assets'] = max(
+                init_assets * 0.1,   # 하한선: 초기값의 10%
+                meta['assets'] + net_income
+            )
+
+            # ★ 적자 시 assets 감소 (하한선 보장)
+            init_assets = meta.get('initial_assets', assets)
+            meta['assets'] = max(
+                init_assets * 0.1,
+                meta['assets'] + net_income
+            )
 
         else:
             # ── 흑자: 연속 적자 초기화 + HP 회복 + 오버플로우 쉴드 적립 ──
             meta['continuous_loss_count'] = 0
 
-            heal   = (net_income / assets * 100) * 0.5
+            # HP 회복량 상향 (0.5 → 0.8배)
+            heal   = (net_income / assets * 100) * 0.8
             new_hp = hp + heal
 
             if new_hp <= soft_cap:
@@ -174,7 +216,25 @@ class EarningsManager:
             "surprise":   "공시 완료",
         }
 
-        meta['assets'] += net_income
+        # assets는 적자/흑자 각 블록에서 처리됨 (위에서 처리)
+        # 흑자 시 assets 증가
+        if net_income > 0:
+            init_assets_v = meta.get('initial_assets', meta['assets'])
+            meta['assets'] = min(
+                init_assets_v * 100,  # 상한선: 초기값의 100배
+                meta['assets'] + net_income
+            )
+
+        # market.py 지배구조/momentum 반영용 플래그
+        meta['_earnings_just_released'] = True
+        # 실적 서프라이즈 충격 (momentum에 반영됨)
+        if net_income > 0:
+            surprise = min(0.15, net_income / max(1.0, meta['assets']) * 2.0)
+            meta['_earnings_shock'] = surprise
+        else:
+            shock = max(-0.20, -(abs(net_income) / max(1.0, meta['assets']) * 3.0))
+            meta['_earnings_shock'] = shock
+
         return True
 
     # ─────────────────────────────────────────────
