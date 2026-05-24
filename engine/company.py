@@ -18,10 +18,30 @@ class CompanyManager:
         random.shuffle(self.name_pool)
         self.current_generation: int = 1
 
+    def sync_from_state(self):
+        """세이브 파일 로드 후 이름 생성기 상태를 MarketState에서 복원"""
+        gen  = getattr(self.state, '_name_generation', 1)
+        pool = getattr(self.state, '_name_pool', [])
+        if gen > 1 or pool:
+            self.current_generation = gen
+            self.name_pool = pool if pool else [
+                n for n in NAME_DB if n not in GROUP_BASE_NAMES
+            ]
+        # used_all_time은 MarketState에서 직접 관리
+        self.used_all_time = self.state.used_all_time
+
+    def sync_to_state(self):
+        """매 턴 이름 생성기 상태를 MarketState에 저장"""
+        self.state._name_generation = self.current_generation
+        self.state._name_pool       = list(self.name_pool)
+
     # ─────────────────────────────────────────────
     # 이름 생성
     # ─────────────────────────────────────────────
     def get_unique_name(self, is_group_member: bool, group_name, info) -> str:
+        # used_all_time은 항상 state와 동기화
+        self.used_all_time = self.state.used_all_time
+
         if is_group_member:
             final_name = f"{group_name} {info}"
             if final_name in self.used_all_time:
@@ -30,25 +50,26 @@ class CompanyManager:
                     suffix += 1
                 final_name = f"{final_name} {suffix}"
             self.used_all_time.add(final_name)
+            self.sync_to_state()
             return final_name
 
         # ── 독립 기업 이름 생성 (루프 구조) ──────────────────────
-        # 재귀 대신 루프로 변경 — 현재 세대 풀을 진짜 다 소진해야 다음 세대로 넘어감
+        # 현재 세대 풀을 진짜 다 소진해야 다음 세대로 넘어감
         while True:
-            # 현재 풀에서 순서대로 후보 탐색
             while self.name_pool:
                 candidate = self.name_pool.pop(0)
                 suffix = f" {self.current_generation}" if self.current_generation > 1 else ""
                 final_name = f"{candidate}{suffix}"
                 if final_name not in self.used_all_time:
                     self.used_all_time.add(final_name)
+                    self.sync_to_state()
                     return final_name
-                # 이미 사용된 이름이면 다음 후보로 넘어감 (세대 올리지 않음)
 
             # 현재 세대 풀을 전부 소진했을 때만 다음 세대로 넘어감
             self.current_generation += 1
             self.name_pool = [n for n in NAME_DB if n not in GROUP_BASE_NAMES]
             random.shuffle(self.name_pool)
+            self.sync_to_state()
 
     # ─────────────────────────────────────────────
     # 종목 생성
@@ -199,6 +220,7 @@ class CompanyManager:
                 "initial_price":        float(p),        # ★ 주가/HP 연결용 초기 주가
                 "debt":                 init_debt,       # ★ 신규: 부채
                 "debt_ratio":           init_debt_ratio, # ★ 신규: 부채비율
+                "target_debt_ratio":    init_debt_ratio, # ★ 신규: 기업별 목표 부채비율 (하한선)
                 "credit_grade":         init_credit,     # ★ 신규: 신용등급
                 "efficiency":           {
                     "대1": random.uniform(0.08, 0.15),  # 최상위: 고효율

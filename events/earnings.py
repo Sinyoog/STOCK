@@ -48,6 +48,31 @@ class EarningsManager:
             effective_efficiency = meta.get('efficiency', 0.05)
 
         revenue   = meta['assets'] * random.uniform(0.04, 0.10) * cycle_revenue_mult
+
+        # ★ 테크 레벨 성장 가중치
+        # 현재 테크 레벨 사업 보유 시 보너스, 구시대 사업은 페널티 없이 유지
+        try:
+            from engine.constants import INDUSTRY_LEVELS
+            current_lv   = self.s.max_tech_reached
+            ind          = meta.get('ind', '')
+            current_subs = [x.strip() for x in meta.get('sub', '').split(',')]
+            lv_industries = INDUSTRY_LEVELS.get(ind, {})
+
+            current_lv_list = lv_industries.get(current_lv, [])
+            old_lv_list = []
+            for lv in range(1, current_lv):
+                old_lv_list.extend(lv_industries.get(lv, []))
+
+            if any(s in current_lv_list for s in current_subs):
+                tech_mult = 1.3   # 현재 테크 사업 → 30% 성장 보너스
+            elif any(s in old_lv_list for s in current_subs):
+                tech_mult = 1.0   # 구시대 사업 → 페널티 없이 유지
+            else:
+                tech_mult = 1.0
+        except Exception:
+            tech_mult = 1.0
+
+        revenue *= tech_mult
         base_cost = {"대형주": 0.015, "중형주": 0.020, "소형주": 0.030}.get(tier, 0.030)
         base_cost *= cycle_cost_mult   # 경기 사이클 비용 반영
         tier_bonus = {"대형주": 0.02, "중형주": 0.01, "소형주": 0.00}.get(tier, 0)
@@ -78,6 +103,21 @@ class EarningsManager:
             f"영업이익: {int(op_income):,} 원\n"
             f"당기순이익: {int(net_income):,} 원"
         )
+
+        # ★ 기관 컨센서스 저장 (선행매매 트리거용)
+        # 실제 발표값에 ±20% 노이즈를 더해 기관의 "예측" 수치로 저장
+        import random as _rnd
+        consensus_noise = _rnd.uniform(-0.20, 0.20)
+        consensus_ni    = net_income * (1.0 + consensus_noise)
+        name = meta.get('c_name', '')
+        if name:
+            prev_consensus = self.s.earnings_consensus.get(name, {}).get('expected_ni', 0)
+            self.s.earnings_consensus[name] = {
+                "expected_ni":  consensus_ni,
+                "direction":    1 if consensus_ni > 0 else -1,
+                "confidence":   max(0.3, 1.0 - abs(consensus_noise)),  # 노이즈 작을수록 확신 높음
+                "prev_ni":      prev_consensus,
+            }
 
         return {
             "revenue":              revenue,
@@ -231,15 +271,15 @@ class EarningsManager:
             # ── 흑자: 연속 적자 초기화 + HP 회복 + 부채 감소 ──
             meta['continuous_loss_count'] = 0
 
-            # ★ 흑자 시 부채 일부 상환 (현실적 구조)
-            # 단, 부채비율 최솟값 유지 (완전 무부채는 비현실적)
+            # ★ 흑자 시 부채 상환 — 기업별 목표 부채비율로 수렴 (고정 하한선 제거)
             debt = meta.get('debt', 0.0)
             assets_now = meta.get('assets', 1.0)
 
-            # 최소 부채비율: 대형주 20%, 중형주 30%, 소형주 40%
-            _MIN_DEBT_RATIO = {'대형주': 0.20, '중형주': 0.30, '소형주': 0.40}
-            min_debt_ratio  = _MIN_DEBT_RATIO.get(tier, 0.30)
-            min_debt        = assets_now * min_debt_ratio
+            # 기업 생성 시 배정된 목표 부채비율 사용 (없으면 티어별 기본값)
+            _DEFAULT_TARGET = {'대형주': 0.40, '중형주': 0.50, '소형주': 0.60}
+            target_debt_ratio = meta.get('target_debt_ratio',
+                                         _DEFAULT_TARGET.get(tier, 0.40))
+            min_debt = assets_now * target_debt_ratio
 
             debt_repay = min(max(0.0, debt - min_debt), net_income * 0.3)
             meta['debt'] = max(min_debt, debt - debt_repay)
@@ -300,13 +340,37 @@ class EarningsManager:
 
         # market.py 지배구조/momentum 반영용 플래그
         meta['_earnings_just_released'] = True
-        # 실적 서프라이즈 충격 (momentum에 반영됨)
-        if net_income > 0:
-            surprise = min(0.15, net_income / max(1.0, meta['assets']) * 2.0)
-            meta['_earnings_shock'] = surprise
+
+        # ★ 실적 서프라이즈/쇼크 — 컨센서스 대비로 계산
+        consensus = self.s.earnings_consensus.get(name, {})
+        consensus_ni = consensus.get('expected_ni', net_income)  # 컨센서스 없으면 실제값 사용
+
+        if abs(consensus_ni) > 0:
+            surprise_ratio = (net_income - consensus_ni) / abs(consensus_ni)
+        elif net_income > 0:
+            surprise_ratio = 0.15   # 흑자 전환
         else:
-            shock = max(-0.20, -(abs(net_income) / max(1.0, meta['assets']) * 3.0))
-            meta['_earnings_shock'] = shock
+            surprise_ratio = -0.15  # 적자 전환
+
+        # 서프라이즈 강도에 따라 shock 값 결정
+        if surprise_ratio > 0.30:      # 컨센서스 30%+ 초과 → 강한 서프라이즈
+            meta['_earnings_shock'] = min(0.20, surprise_ratio * 0.3)
+        elif surprise_ratio > 0.10:    # 10~30% 초과 → 약한 서프라이즈
+            meta['_earnings_shock'] = min(0.10, surprise_ratio * 0.2)
+        elif surprise_ratio < -0.30:   # 컨센서스 30%+ 미달 → 강한 쇼크
+            meta['_earnings_shock'] = max(-0.25, surprise_ratio * 0.3)
+        elif surprise_ratio < -0.10:   # 10~30% 미달 → 약한 쇼크
+            meta['_earnings_shock'] = max(-0.12, surprise_ratio * 0.2)
+        else:                          # ±10% 이내 → 무반응
+            meta['_earnings_shock'] = 0.0
+
+        # 컨센서스 업데이트 (발표 후 실제값으로 갱신)
+        self.s.earnings_consensus[name] = {
+            "expected_ni": net_income,
+            "direction":   1 if net_income > 0 else -1,
+            "confidence":  0.9,
+            "prev_ni":     consensus_ni,
+        }
 
         return True
 

@@ -20,7 +20,8 @@ from .styles import HTS_STYLE, COLOR, rate_color, rate_arrow
 from .dialogs import (
     TradeDialog, EarningsDialog, MyInvestmentDialog,
     StockFilterDialog, DelistedDetailDialog,
-    SystemMenuDialog, CustomConfirmDialog
+    SystemMenuDialog, CustomConfirmDialog,
+    InvestorVolumeDialog
 )
 from .group_view import GroupInfoDialog
 from .news_view  import NewsWindow
@@ -265,7 +266,16 @@ class StockHTS(QMainWindow):
         btn_earn.setFixedHeight(35)
         btn_earn.setStyleSheet(f"QPushButton {{ background-color: #1a1a1a; color: {COLOR['accent_green']}; border: 1px solid {COLOR['accent_green']}; border-radius: 5px; }}")
         btn_earn.clicked.connect(self.open_earnings_window)
-        rep_lay.addWidget(btn_earn)
+
+        btn_volume = QPushButton("📈 호가창")
+        btn_volume.setFixedHeight(35)
+        btn_volume.setStyleSheet(f"QPushButton {{ background-color: #1a1a1a; color: #00FFFF; border: 1px solid #00FFFF; border-radius: 5px; }}")
+        btn_volume.clicked.connect(self.open_investor_volume_window)
+
+        earn_row = QHBoxLayout()
+        earn_row.addWidget(btn_earn)
+        earn_row.addWidget(btn_volume)
+        rep_lay.addLayout(earn_row)
         content_lay.addLayout(rep_lay, 3)
         main_layout.addLayout(content_lay)
 
@@ -369,9 +379,10 @@ class StockHTS(QMainWindow):
             try:
                 if not dialog or not dialog.isVisible(): continue
                 cn = dialog.__class__.__name__
-                if cn == "GroupInfoDialog":   dialog.update_all_info()
-                elif cn == "InfoTableDialog": dialog.refresh_data()
-                elif cn == "EarningsDialog":  dialog.load_cur()
+                if cn == "GroupInfoDialog":        dialog.update_all_info()
+                elif cn == "InfoTableDialog":      dialog.refresh_data()
+                elif cn == "EarningsDialog":       dialog.load_cur()
+                elif cn == "InvestorVolumeDialog": dialog.refresh_data()
                 elif cn in ("MyInvestmentDialog", "TradeDialog"): dialog.update_info()
             except Exception as e:
                 if dialog in self.active_dialogs: self.active_dialogs.remove(dialog)
@@ -457,6 +468,14 @@ class StockHTS(QMainWindow):
             d = EarningsDialog(self.selected_stock_name, self.game_service, self)
             d.show(); self.active_dialogs.append(d)
 
+    def open_investor_volume_window(self):
+        """호가창 — 실시간 갱신 지원"""
+        if not self.selected_stock_name:
+            self.show_toast("종목을 선택하세요.", "#FFA500")
+            return
+        dlg = InvestorVolumeDialog(self.selected_stock_name, self.game_service, self)
+        dlg.show()
+        self.active_dialogs.append(dlg)
     def open_investment_window(self):
         d = MyInvestmentDialog(self)
         d.show(); self.active_dialogs.append(d)
@@ -519,8 +538,6 @@ class StockHTS(QMainWindow):
     # ─────────────────────────────────────────────
     def sync_ui_with_engine(self):
         s = self.game_service.s
-        if s.virtual_weekday <= 4:
-            s.is_market_open = True
         is_open = s.is_market_open
         self.btn_buy.setEnabled(is_open)
         self.btn_sell.setEnabled(is_open)

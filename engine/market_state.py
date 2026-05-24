@@ -121,5 +121,31 @@ class MarketState:
 
         # ── ★ 신규: 그룹별 산업 재진입 쿨다운 ───
         # {그룹ID: {산업명: 재진입_가능_날짜(datetime)}}
-        # 계열사 상장폐지 후 5년간 같은 산업 재진입 불가
         self.group_industry_cooldown: dict = {}
+
+        # ── ★ 신규: 이름 생성기 상태 (세이브/로드 시 유지용) ─────
+        self._name_generation: int = 1
+        self._name_pool: list      = []
+
+        # ── ★ 신규: 수급 트렌드 연속성 ──────────────────────────
+        # {종목명: {"foreign": {"dir": +1/0/-1, "days": N},
+        #           "inst":    {"dir": +1/0/-1, "days": N},
+        #           "retail":  {"dir": +1/0/-1, "days": N}}}
+        self.investor_trends: dict = {}
+
+        # ── ★ 신규: 신용잔고 (소형주 반대매매용) ────────────────
+        # {종목명: float}  — 개인이 빚내서 산 물량 비율 (0.0~0.3)
+        self.margin_balance: dict = {}
+
+        # ── ★ 신규: 일별 투자자별 거래량 (호가창용) ─────────────
+        # {종목명: [{"date": str, "foreign": int, "inst": int, "retail": int}, ...]}
+        # 최근 60일치만 유지
+        self.daily_volume: dict = {}
+
+        # ── ★ 신규: 기관 컨센서스 (선행매매용) ──────────────────
+        # {종목명: {"expected_ni": float, "direction": +1/-1, "confidence": 0~1}}
+        self.earnings_consensus: dict = {}
+
+        # ── ★ 신규: 대주주 행동 공시 큐 ─────────────────────────
+        # {종목명: {"action": "buy"/"sell", "ratio": float, "days_left": int}}
+        self.major_holder_action: dict = {}

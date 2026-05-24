@@ -35,15 +35,17 @@ class GameService:
         import random
         print("🚀 [시스템] v19.0 가치 본위 엔진 가동 중...")
 
+        # ★ CompanyManager의 used_all_time을 state와 동일 객체로 연결
+        self.cm.used_all_time = self.s.used_all_time
+
         # ── 그룹사 생성 ──────────────────────────────────────────
         # 최상위 3개 그룹 ("대1" 티어: 시총 30~50조)
         top3_groups = ["제니스", "서한", "가온"]
         for gn in top3_groups:
             gid = f"GROUP_{gn}"
             self.s.groups[gid] = {"name": gn, "active": True}
-            # 그룹 내 산업 중복 방지: 2개를 겹치지 않게 뽑음
-            ind1 = random.choice(MAIN_INDUSTRIES)
-            ind2 = random.choice([i for i in MAIN_INDUSTRIES if i != ind1])
+            # 대표 계열사 1개는 최상위 티어
+            ind1, ind2 = random.sample(MAIN_INDUSTRIES, 2)
             self.s.stocks.append(self.cm.create_stock_data(None, ind1, "대1", gid))
             self.s.stocks.append(self.cm.create_stock_data(None, ind2, "대", gid))
 
@@ -52,27 +54,25 @@ class GameService:
         for gn in normal_groups:
             gid = f"GROUP_{gn}"
             self.s.groups[gid] = {"name": gn, "active": True}
-            # 그룹 내 산업 중복 방지
-            inds = random.sample(MAIN_INDUSTRIES, 2)
-            for ind in inds:
+            for ind in random.sample(MAIN_INDUSTRIES, 2):
                 self.s.stocks.append(self.cm.create_stock_data(None, ind, "대", gid))
 
         # ── 독립 대기업 5개 (1조~20조) ───────────────────────────
         for _ in range(5):
             self.s.stocks.append(
-                self.cm.create_stock_data(random.choice(NAME_DB), random.choice(MAIN_INDUSTRIES), "대")
+                self.cm.create_stock_data(None, random.choice(MAIN_INDUSTRIES), "대")
             )
 
         # ── 독립 중견 25개 (1000억~2조) ──────────────────────────
         for _ in range(25):
             self.s.stocks.append(
-                self.cm.create_stock_data(random.choice(NAME_DB), random.choice(MAIN_INDUSTRIES), "중")
+                self.cm.create_stock_data(None, random.choice(MAIN_INDUSTRIES), "중")
             )
 
         # ── 독립 중소 10개 (100억~1500억) ────────────────────────
         for _ in range(10):
             self.s.stocks.append(
-                self.cm.create_stock_data(random.choice(NAME_DB), random.choice(MAIN_INDUSTRIES), "소")
+                self.cm.create_stock_data(None, random.choice(MAIN_INDUSTRIES), "소")
             )
 
         # reassign_tiers_by_cap은 초기화 시 호출하지 않음
@@ -239,7 +239,11 @@ class GameService:
         self.db.save_game(my_cash, my_portfolio)
 
     def load_game(self) -> dict | None:
-        return self.db.load_game()
+        result = self.db.load_game()
+        if result is not None:
+            # 세이브 파일 로드 후 이름 생성기 상태 복원
+            self.cm.sync_from_state()
+        return result
 
     def reset_game(self, my_cash: float, my_portfolio: dict):
         """완전 초기화 후 새 게임 시작"""
@@ -249,6 +253,13 @@ class GameService:
         # state를 새 인스턴스로 교체하는 대신 필드를 리셋
         new = MarketState()
         self.s.__dict__.update(new.__dict__)
+        # ★ CompanyManager도 완전 리셋 (이전 이름 상태 초기화)
+        from engine.constants import NAME_DB, GROUP_BASE_NAMES
+        import random
+        self.cm.used_all_time      = self.s.used_all_time  # state와 동일 객체 참조
+        self.cm.current_generation = 1
+        self.cm.name_pool          = [n for n in NAME_DB if n not in GROUP_BASE_NAMES]
+        random.shuffle(self.cm.name_pool)
         self.initialize_market()
 
     # ─────────────────────────────────────────────
@@ -265,6 +276,11 @@ class GameService:
             "exchange":    m.get("exchange_rate", 0),
             "cpi_display": f"물가체감: 2000년 ₩1,000 → 현재 ₩{self.s.base_item_price:,.0f}",
         }
+
+    def get_investor_volume(self, name: str, days: int = 252) -> list:
+        """호가창용 — DB 없이 state에서 직접 조회"""
+        vol_list = self.s.daily_volume.get(name, [])
+        return vol_list[-days:] if len(vol_list) > days else vol_list
 
     def get_chart_data(self, company_name: str, days: int = 30) -> list:
         return self.db.get_chart_data(company_name, days)

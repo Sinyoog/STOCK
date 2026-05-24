@@ -319,27 +319,43 @@ class EarningsDialog(QDialog):
         for q_n in ["1분기", "2분기", "3분기", "4분기"]:
             if q_n not in data:
                 continue
-            d   = data[q_n]
-            rev_s = ""
+            d = data[q_n]
+
+            # 전 분기 값 가져오기
+            p_rev = p_op = p_net = None
             try:
                 idx = sorted_keys.index((year, q_n))
                 if idx > 0:
                     p_y, p_q = sorted_keys[idx - 1]
                     p_rev = all_h[p_y][p_q]['revenue']
-                    rev_s = " <b style='color:#FF4444;'>(↑)</b>" if d['revenue'] > p_rev else " <b style='color:#4444FF;'>(↓)</b>"
+                    p_op  = all_h[p_y][p_q]['op_income']
+                    p_net = all_h[p_y][p_q]['net_income']
             except Exception:
                 pass
 
-            op_c  = "#FF4444" if d['op_income']  > 0 else "#4444FF"
-            net_c = "#FF4444" if d['net_income']  > 0 else "#4444FF"
-            op_s  = "흑자" if d['op_income']  > 0 else "적자"
-            net_s = "흑자" if d['net_income']  > 0 else "적자"
+            def num_c(val):
+                """숫자 색: 흑자=빨간, 적자=파란"""
+                return "#FF4444" if val >= 0 else "#4444FF"
+
+            def arrow_html(cur, prev):
+                """화살표: 전 분기 대비, 없으면 빈 문자열"""
+                if prev is None: return ""
+                if cur > prev: return " <b style='color:#FF4444;'>▲</b>"
+                if cur < prev: return " <b style='color:#4444FF;'>▼</b>"
+                return " <b style='color:#888;'>─</b>"
+
+            rev  = d['revenue']
+            op   = d['op_income']
+            net  = d['net_income']
 
             html += (
-                f"<tr style='text-align: center;'><td>{q_n}</td><td>{d['date']}</td>"
-                f"<td>{d['revenue']:,.0f}원{rev_s}</td>"
-                f"<td style='color:{op_c};'><b>{d['op_income']:,.0f}원 ({op_s})</b></td>"
-                f"<td style='color:{net_c};'><b>{d['net_income']:,.0f}원 ({net_s})</b></td></tr>"
+                f"<tr style='text-align: center;'>"
+                f"<td>{q_n}</td>"
+                f"<td>{d['date']}</td>"
+                f"<td style='color:{num_c(rev)};'><b>{rev:,.0f}원</b>{arrow_html(rev, p_rev)}</td>"
+                f"<td style='color:{num_c(op)};'><b>{op:,.0f}원</b>{arrow_html(op, p_op)}</td>"
+                f"<td style='color:{num_c(net)};'><b>{net:,.0f}원</b>{arrow_html(net, p_net)}</td>"
+                f"</tr>"
             )
         return html + "</table><br/>"
 
@@ -672,20 +688,38 @@ class DelistedDetailDialog(QDialog):
         self.report_panel.setReadOnly(True)
         self.report_panel.setStyleSheet("QTextEdit { background-color: #000; color: #e0e0e0; border: 1px solid #333; font-size: 13px; padding: 10px; }")
         self._update_report_html()
-        right_vbox.addWidget(self.report_panel, 4)
+        right_vbox.addWidget(self.report_panel, 1)
 
-        self.earnings_table = QTableWidget(0, 4)
-        self.earnings_table.setHorizontalHeaderLabels(["분기", "매출액 (원)", "영업이익 (원)", "순이익 (원)"])
-        self.earnings_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.earnings_table.setStyleSheet("QTableWidget { background-color: #000; color: #e0e0e0; gridline-color: #222; border: 1px solid #333; } QHeaderView::section { background-color: #222; color: #00FF00; }")
-        self.earnings_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        right_vbox.addWidget(self.earnings_table, 6)
+        # ★ 하단 버튼 2개 — 각각 새 창으로 열림
+        btn_style = ("QPushButton { background-color: #1a1a1a; color: #00FF00; "
+                     "border: 1px solid #00FF00; border-radius: 3px; padding: 8px; "
+                     "font-weight: bold; font-size: 13px; } "
+                     "QPushButton:hover { background-color: #003300; }")
+        btn_volume_style = ("QPushButton { background-color: #1a1a1a; color: #00FFFF; "
+                            "border: 1px solid #00FFFF; border-radius: 3px; padding: 8px; "
+                            "font-weight: bold; font-size: 13px; } "
+                            "QPushButton:hover { background-color: #001a1a; }")
+
+        btn_row = QHBoxLayout()
+        btn_earnings = QPushButton("📊 실적 상세조회")
+        btn_earnings.setFixedHeight(40)
+        btn_earnings.setStyleSheet(btn_style)
+        btn_earnings.clicked.connect(self._open_earnings_window)
+
+        btn_volume = QPushButton("📈 호가창")
+        btn_volume.setFixedHeight(40)
+        btn_volume.setStyleSheet(btn_volume_style)
+        btn_volume.clicked.connect(self._open_volume_window)
+
+        btn_row.addWidget(btn_earnings)
+        btn_row.addWidget(btn_volume)
+        right_vbox.addLayout(btn_row)
+
         content_lay.addLayout(right_vbox, 3)
         main_layout.addLayout(content_lay)
         self.setLayout(main_layout)
 
         self._load_full_history()
-        self._load_earnings_table()
 
     def _update_report_html(self):
         m     = self.meta
@@ -824,15 +858,61 @@ class DelistedDetailDialog(QDialog):
                    for y in sorted(history.keys())
                    for q in ["1분기","2분기","3분기","4분기"] if q in history[y]
                    for d in [history[y][q]]]
+
+        # 컬럼: 분기 | 매출액 | ▲▼ | 영업이익 | ▲▼ | 당기순이익 | ▲▼
+        self.earnings_table.setColumnCount(7)
+        self.earnings_table.setHorizontalHeaderLabels([
+            "분기", "매출액 (원)", "↕", "영업이익 (원)", "↕", "당기순이익 (원)", "↕"
+        ])
+        hdr = self.earnings_table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed); self.earnings_table.setColumnWidth(2, 28)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed); self.earnings_table.setColumnWidth(4, 28)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed); self.earnings_table.setColumnWidth(6, 28)
+
         self.earnings_table.setRowCount(len(records))
+
         for i, (qtr, rev, op, net) in enumerate(records):
-            for j, (val, colored) in enumerate([(qtr, False), (f"{rev:,.0f}", False), (f"{op:,.0f}", True), (f"{net:,.0f}", True)]):
-                it = QTableWidgetItem(val)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter if j == 0 else Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-                if colored:
-                    num = op if j == 2 else net
-                    it.setForeground(QColor("#FF4444" if num >= 0 else "#4444FF"))
-                self.earnings_table.setItem(i, j, it)
+            prev_rev = records[i-1][1] if i > 0 else None
+            prev_op  = records[i-1][2] if i > 0 else None
+            prev_net = records[i-1][3] if i > 0 else None
+
+            def num_color(val):
+                return "#FF4444" if val >= 0 else "#4444FF"
+
+            def arrow_sym(cur, prev):
+                if prev is None: return ""
+                return "▲" if cur > prev else ("▼" if cur < prev else "─")
+
+            def arrow_col(cur, prev):
+                if prev is None: return "#888888"
+                return "#FF4444" if cur > prev else ("#4444FF" if cur < prev else "#888888")
+
+            # 분기
+            it0 = QTableWidgetItem(qtr)
+            it0.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it0.setForeground(QColor("#aaaaaa"))
+            self.earnings_table.setItem(i, 0, it0)
+
+            for col_idx, (val, prev_val) in enumerate(
+                [(rev, prev_rev), (op, prev_op), (net, prev_net)]
+            ):
+                base_col = 1 + col_idx * 2
+
+                # 숫자 셀 — 색상: 흑자/적자
+                it_num = QTableWidgetItem(f"{val:,.0f}")
+                it_num.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_num.setForeground(QColor(num_color(val)))
+                self.earnings_table.setItem(i, base_col, it_num)
+
+                # 화살표 셀 — 색상: 전 분기 대비
+                it_arr = QTableWidgetItem(arrow_sym(val, prev_val))
+                it_arr.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_arr.setForeground(QColor(arrow_col(val, prev_val)))
+                self.earnings_table.setItem(i, base_col + 1, it_arr)
 
     def _load_full_history(self):
         try:
@@ -916,6 +996,229 @@ class DelistedDetailDialog(QDialog):
         except Exception as e:
             print(f"❌ 상장폐지 차트 로드 실패: {e}")
 
+    def _open_earnings_window(self):
+        """실적 상세조회 — 새 창"""
+        history = self.gs.get_earnings_history(self.stock_name)
+        records = [(f"{y} {q}", d['revenue'], d['op_income'], d.get('net_income', 0))
+                   for y in sorted(history.keys())
+                   for q in ["1분기","2분기","3분기","4분기"] if q in history[y]
+                   for d in [history[y][q]]]
+
+        dlg = QDialog(self, Qt.WindowType.Window)
+        dlg.setWindowTitle(f"📊 실적 상세조회 — {self.stock_name}")
+        dlg.resize(820, 550)
+        dlg.setStyleSheet(HTS_STYLE)
+
+        layout = QVBoxLayout()
+        title = QLabel(f"[ {self.stock_name} ] 전체 실적 기록")
+        title.setStyleSheet("color: #00FF00; font-weight: bold; font-size: 14px; padding: 5px;")
+        layout.addWidget(title)
+
+        table = QTableWidget(0, 7)
+        table.setHorizontalHeaderLabels([
+            "분기", "매출액 (원)", "↕", "영업이익 (원)", "↕", "당기순이익 (원)", "↕"
+        ])
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setStyleSheet(
+            "QTableWidget { background-color: #000; color: #e0e0e0; gridline-color: #222; border: 1px solid #333; }"
+            "QHeaderView::section { background-color: #222; color: #00FF00; }"
+        )
+        hdr = table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed); table.setColumnWidth(2, 28)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed); table.setColumnWidth(4, 28)
+        hdr.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed); table.setColumnWidth(6, 28)
+        table.setRowCount(len(records))
+
+        def num_color(val):
+            return "#FF4444" if val >= 0 else "#4444FF"
+
+        def arrow_sym(cur, prev):
+            if prev is None: return ""
+            return "▲" if cur > prev else ("▼" if cur < prev else "─")
+
+        def arrow_col(cur, prev):
+            if prev is None: return "#888888"
+            return "#FF4444" if cur > prev else ("#4444FF" if cur < prev else "#888888")
+
+        for i, (qtr, rev, op, net) in enumerate(records):
+            prev_rev = records[i-1][1] if i > 0 else None
+            prev_op  = records[i-1][2] if i > 0 else None
+            prev_net = records[i-1][3] if i > 0 else None
+
+            it0 = QTableWidgetItem(qtr)
+            it0.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            it0.setForeground(QColor("#aaaaaa"))
+            table.setItem(i, 0, it0)
+
+            for col_idx, (val, prev_val) in enumerate(
+                [(rev, prev_rev), (op, prev_op), (net, prev_net)]
+            ):
+                base_col = 1 + col_idx * 2
+                it_num = QTableWidgetItem(f"{val:,.0f}")
+                it_num.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it_num.setForeground(QColor(num_color(val)))
+                table.setItem(i, base_col, it_num)
+
+                it_arr = QTableWidgetItem(arrow_sym(val, prev_val))
+                it_arr.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                it_arr.setForeground(QColor(arrow_col(val, prev_val)))
+                table.setItem(i, base_col + 1, it_arr)
+
+        layout.addWidget(table)
+        dlg.setLayout(layout)
+        dlg.show()
+
+    def _open_volume_window(self):
+        """호가창 — 새 창 (상폐일 기준 1년, state에서 직접 읽기)"""
+        try:
+            records = self.gs.get_investor_volume(self.stock_name, days=252)
+        except Exception:
+            records = []
+
+        dlg = QDialog(self, Qt.WindowType.Window)
+        dlg.setWindowTitle(f"📈 호가창 (수급 기록) — {self.stock_name}")
+        dlg.resize(700, 500)
+        dlg.setStyleSheet(HTS_STYLE)
+
+        layout = QVBoxLayout()
+        title = QLabel(f"[ {self.stock_name} ] 투자자별 순매수/순매도 (상폐일 기준 최근 1년)")
+        title.setStyleSheet("color: #00FFFF; font-weight: bold; font-size: 14px; padding: 5px;")
+        layout.addWidget(title)
+
+        table = QTableWidget(0, 4)
+        table.setHorizontalHeaderLabels(["일자", "외국인", "기관", "개인"])
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setStyleSheet(
+            "QTableWidget { background-color: #000; color: #e0e0e0; gridline-color: #222; border: 1px solid #333; }"
+            "QHeaderView::section { background-color: #222; color: #00FFFF; }"
+        )
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        table.setRowCount(len(records))
+
+        for i, rec in enumerate(records):
+            date_it = QTableWidgetItem(rec['date'])
+            date_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            date_it.setForeground(QColor("#aaaaaa"))
+            table.setItem(i, 0, date_it)
+            for j, key in enumerate(["foreign", "inst", "retail"], start=1):
+                val  = rec[key]
+                sign = "+" if val >= 0 else ""
+                it   = QTableWidgetItem(f"{sign}{val:,}")
+                it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                it.setForeground(QColor("#FF4444") if val > 0 else (QColor("#4444FF") if val < 0 else QColor("#888888")))
+                table.setItem(i, j, it)
+
+        layout.addWidget(table)
+        dlg.setLayout(layout)
+        dlg.show()
+
     @staticmethod
     def _moving_avg(data: list, window: int = 3) -> list:
         return [sum(data[max(0, i - window + 1):i + 1]) / len(data[max(0, i - window + 1):i + 1]) for i in range(len(data))]
+
+# ─────────────────────────────────────────────
+# InvestorVolumeDialog — 호가창 (실시간 갱신)
+# ─────────────────────────────────────────────
+class InvestorVolumeDialog(QDialog):
+    def __init__(self, stock_name: str, game_service, parent=None):
+        super().__init__(parent, Qt.WindowType.Window)
+        self.stock_name   = stock_name
+        self.gs           = game_service
+        self.setWindowTitle(f"📈 호가창 (수급 현황) — {stock_name}")
+        self.resize(720, 520)
+        self.setStyleSheet(HTS_STYLE)
+        self._init_ui()
+        self.refresh_data()
+
+    def _init_ui(self):
+        layout = QVBoxLayout()
+        layout.setContentsMargins(12, 12, 12, 12)
+
+        # 헤더
+        header = QHBoxLayout()
+        self.title_label = QLabel(f"[ {self.stock_name} ] 투자자별 순매수/순매도 (최근 1년)")
+        self.title_label.setStyleSheet("color: #00FFFF; font-weight: bold; font-size: 14px;")
+        self.date_label  = QLabel("")
+        self.date_label.setStyleSheet("color: #888; font-size: 12px;")
+        header.addWidget(self.title_label)
+        header.addStretch()
+        header.addWidget(self.date_label)
+        layout.addLayout(header)
+
+        # 합산 요약 바
+        self.summary_label = QLabel("")
+        self.summary_label.setStyleSheet(
+            "background-color: #111; border: 1px solid #333; "
+            "padding: 6px; font-size: 12px; color: #ccc;"
+        )
+        self.summary_label.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(self.summary_label)
+
+        # 테이블
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["일자", "외국인", "기관", "개인"])
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setStyleSheet(
+            "QTableWidget { background-color: #000; color: #e0e0e0; gridline-color: #1a1a1a; }"
+            "QHeaderView::section { background-color: #1a1a1a; color: #00FFFF; padding: 6px; }"
+            "QTableWidget::item:selected { background-color: #001a1a; }"
+        )
+        hdr = self.table.horizontalHeader()
+        hdr.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        hdr.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table)
+        self.setLayout(layout)
+
+    def refresh_data(self):
+        """NEXT DAY 때마다 호출 — state에서 직접 읽기 (DB 없음)"""
+        try:
+            records = self.gs.get_investor_volume(self.stock_name, days=252)
+        except Exception:
+            records = []
+
+        self.table.setRowCount(len(records))
+
+        total_f = total_i = total_r = 0
+
+        for i, rec in enumerate(reversed(records)):   # 최신 날짜가 위로
+            date_it = QTableWidgetItem(rec['date'])
+            date_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            date_it.setForeground(QColor("#888888"))
+            self.table.setItem(i, 0, date_it)
+
+            for j, key in enumerate(["foreign", "inst", "retail"], start=1):
+                val  = rec[key]
+                sign = "+" if val >= 0 else ""
+                it   = QTableWidgetItem(f"{sign}{val:,}")
+                it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                color = "#FF4444" if val > 0 else ("#4444FF" if val < 0 else "#888888")
+                it.setForeground(QColor(color))
+                self.table.setItem(i, j, it)
+
+            total_f += rec['foreign']
+            total_i += rec['inst']
+            total_r += rec['retail']
+
+        # 날짜 라벨 갱신
+        if records:
+            self.date_label.setText(f"기준일: {records[-1]['date']} | 최근 {len(records)}거래일 (최대 1년)")
+
+        # 합산 요약
+        def fmt(v):
+            sign  = "+" if v >= 0 else ""
+            color = "#FF4444" if v > 0 else ("#4444FF" if v < 0 else "#888888")
+            return f"<span style='color:{color};font-weight:bold;'>{sign}{v:,}</span>"
+
+        self.summary_label.setText(
+            f"1년 합산 &nbsp;|&nbsp; "
+            f"외국인: {fmt(total_f)} &nbsp; "
+            f"기관: {fmt(total_i)} &nbsp; "
+            f"개인: {fmt(total_r)}"
+        )

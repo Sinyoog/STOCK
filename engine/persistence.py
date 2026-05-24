@@ -43,9 +43,70 @@ class SaveManager:
                     bubble_index REAL
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS investor_volume (
+                    date         TEXT,
+                    company_name TEXT,
+                    foreign_vol  INTEGER,
+                    inst_vol     INTEGER,
+                    retail_vol   INTEGER,
+                    PRIMARY KEY (date, company_name)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_investor_volume_name_date
+                ON investor_volume (company_name, date DESC)
+            """)
             self.conn.commit()
         except Exception as e:
             print(f"❌ DB 테이블 생성 실패: {e}")
+
+    def insert_investor_volume(self, date_str: str, name: str,
+                               foreign_vol: int, inst_vol: int, retail_vol: int):
+        """일별 투자자별 거래량 저장"""
+        try:
+            cur = self.conn.cursor()
+            cur.execute(
+                "INSERT OR REPLACE INTO investor_volume VALUES (?, ?, ?, ?, ?)",
+                (date_str, name, int(foreign_vol), int(inst_vol), int(retail_vol))
+            )
+            self.conn.commit()
+        except Exception as e:
+            print(f"❌ 거래량 DB 저장 오류: {e}")
+
+    def get_investor_volume(self, name: str, days: int = 1260,
+                            since_date: str = None) -> list:
+        """
+        일별 투자자별 거래량 조회.
+        days: 최대 조회 일수 (기본 1260 = 5년치 거래일)
+        since_date: 이 날짜 이후만 조회 (상폐 역사관용 — 상폐일 기준 5년 전)
+        """
+        try:
+            cur = self.conn.cursor()
+            if since_date:
+                cur.execute(
+                    """SELECT date, foreign_vol, inst_vol, retail_vol
+                       FROM investor_volume
+                       WHERE company_name=? AND date >= ?
+                       ORDER BY date DESC LIMIT ?""",
+                    (name, since_date, days)
+                )
+            else:
+                cur.execute(
+                    """SELECT date, foreign_vol, inst_vol, retail_vol
+                       FROM investor_volume
+                       WHERE company_name=?
+                       ORDER BY date DESC LIMIT ?""",
+                    (name, days)
+                )
+            rows = cur.fetchall()
+            return [
+                {"date": r[0], "foreign": r[1], "inst": r[2], "retail": r[3]}
+                for r in reversed(rows)
+            ]
+        except Exception as e:
+            print(f"❌ 거래량 DB 조회 오류: {e}")
+            return []
 
     def insert_gri_record(self, date_str: str, gri: float, bubble_index: float = 0.0):
         """GRI 일별 데이터 저장"""
@@ -152,6 +213,7 @@ class SaveManager:
             cur = self.conn.cursor()
             cur.execute("DELETE FROM stock_history")
             cur.execute("DELETE FROM gri_history")
+            cur.execute("DELETE FROM investor_volume")
             self.conn.commit()
         except Exception as e:
             print(f"❌ DB 초기화 중 오류: {e}")
@@ -219,10 +281,21 @@ class SaveManager:
                     "buffett_index":         getattr(self.s, 'buffett_index', 0.0),
                     "foreign_flow_index":    getattr(self.s, 'foreign_flow_index', 0.0),
                     "used_all_time":         list(self.s.used_all_time),
-                    "group_industry_cooldown": {
-                        gid: {ind: dt.strftime("%Y-%m-%d") for ind, dt in inds.items()}
-                        for gid, inds in getattr(self.s, 'group_industry_cooldown', {}).items()
+                    "name_generation":       getattr(self.s, '_name_generation', 1),
+                    "name_pool":             getattr(self.s, '_name_pool', []),
+                    "investor_trends":       getattr(self.s, 'investor_trends', {}),
+                    "margin_balance":        getattr(self.s, 'margin_balance', {}),
+                    "earnings_consensus":    getattr(self.s, 'earnings_consensus', {}),
+                    "major_holder_action":   getattr(self.s, 'major_holder_action', {}),
+                    "daily_volume":          getattr(self.s, 'daily_volume', {}),
+                    "pending_delist":        {
+                        k: {"date": v["date"].strftime("%Y-%m-%d") if hasattr(v.get("date"), "strftime") else str(v.get("date", "")), "reason": v.get("reason", "")}
+                        if isinstance(v, dict) else str(v)
+                        for k, v in self.s.pending_events.get("delist", {}).items()
                     },
+                    "gdp":                   getattr(self.s, 'gdp', 600_000_000_000_000.0),
+                    "buffett_index":         getattr(self.s, 'buffett_index', 0.0),
+                    "foreign_flow_index":    getattr(self.s, 'foreign_flow_index', 0.0),
                 },
                 "player": {
                     "my_cash":       my_cash,
@@ -286,20 +359,21 @@ class SaveManager:
             self.s.earnings_history      = eng["earnings_history"]
             self.s.used_all_time         = set(eng.get("used_all_time", []))
 
+            # ★ 이름 생성기 상태 복원 (세대/풀 유지)
+            self.s._name_generation = eng.get("name_generation", 1)
+            self.s._name_pool       = eng.get("name_pool", [])
+
+            # ★ 신규 state 복원
+            self.s.investor_trends      = eng.get("investor_trends", {})
+            self.s.margin_balance       = eng.get("margin_balance", {})
+            self.s.earnings_consensus   = eng.get("earnings_consensus", {})
+            self.s.major_holder_action  = eng.get("major_holder_action", {})
+            self.s.daily_volume         = eng.get("daily_volume", {})
+
             # 신규 필드 복원
             self.s.gdp                = eng.get("gdp", 600_000_000_000_000.0)
             self.s.buffett_index      = eng.get("buffett_index", 0.0)
             self.s.foreign_flow_index = eng.get("foreign_flow_index", 0.0)
-
-            # ★ 그룹 산업 재진입 쿨다운 복원
-            raw_cooldown = eng.get("group_industry_cooldown", {})
-            self.s.group_industry_cooldown = {
-                gid: {
-                    ind: datetime.strptime(dt_str, "%Y-%m-%d")
-                    for ind, dt_str in inds.items()
-                }
-                for gid, inds in raw_cooldown.items()
-            }
 
             # pending_events delist 복원
             pending_delist = eng.get("pending_delist", {})

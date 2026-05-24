@@ -338,6 +338,30 @@ class StockMarket:
             if bubble_index > 200 and "소형" in tier:
                 daily_return -= min(0.002, (bubble_index - 200) / 100 * 0.002)
 
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+            # ★ 신규 adj 레이어 (기존 로직에 더하기만)
+            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+            # [1] 컨센서스 선행매매 adj
+            # 실적 발표 D-30 ~ D-7: 기관이 컨센서스 방향으로 서서히 포지션
+            daily_return += self._calc_consensus_adj(name, cur_date, tier, sector)
+
+            # [2] 테마 군집 adj
+            # 같은 산업 내 평균 등락에 일부 동조
+            daily_return += self._calc_cluster_adj(stock, sector)
+
+            # [3] 유동성 함정 adj
+            # 소형주: 거래량 희박 → 변동성 증폭
+            daily_return += self._calc_liquidity_adj(stock, tier)
+
+            # [4] 대주주 행동 adj
+            # 대주주 매수/매도 공시 → 주가 압력
+            daily_return += self._calc_major_holder_adj(name, meta, tier)
+
+            # [5] 신용잔고 반대매매 adj
+            # 소형 테마주 하락 시 신용잔고 → 반대매매 → 추가 하락
+            daily_return += self._calc_margin_call_adj(name, stock, tier, sector)
+
             # ★ 계절성 보정
             daily_return += self._get_seasonal_adj(cur_date, sector, tier)
 
@@ -612,10 +636,32 @@ class StockMarket:
         # 자산에서 이자 차감
         meta['assets'] = max(10000.0, meta['assets'] - daily_interest)
 
-        # ★ 고금리 + 고부채 → HP 추가 차감
+        # ★ 부채비율 독립 HP 차감 (금리 무관 — 부채 자체의 구조적 위험)
+        # 부채비율 200% 이상이면 매일 소량 HP 차감
+        # 현실: 이자보상배율 악화, 자금조달 비용 상승, 신용경색 리스크
         debt_ratio = meta.get('debt_ratio', 0.5)
-        if interest_rate >= 7.0 and debt_ratio >= 1.5:
-            extra_hp_dmg = (interest_rate - 7.0) * debt_ratio * 0.002
+        tier       = meta.get('tier', '소형주')
+
+        if debt_ratio >= 5.0:       # 500%+: 자본잠식 수준
+            debt_hp_dmg = 0.08
+        elif debt_ratio >= 3.0:     # 300%+: 심각한 과부채
+            debt_hp_dmg = 0.04
+        elif debt_ratio >= 2.0:     # 200%+: 위험 수준
+            debt_hp_dmg = 0.015
+        else:
+            debt_hp_dmg = 0.0
+
+        # 대형주는 자금조달 능력이 있으므로 50% 완화
+        if "대형" in tier:
+            debt_hp_dmg *= 0.5
+
+        if debt_hp_dmg > 0:
+            meta['hp'] = max(0.0, meta.get('hp', 50.0) - debt_hp_dmg)
+
+        # ★ 금리 + 고부채 → HP 추가 차감 (기존 7% → 3%로 완화)
+        # Lv1 정상 금리(3~4%)에서도 고부채 기업 타격 가능하도록
+        if interest_rate >= 3.0 and debt_ratio >= 1.5:
+            extra_hp_dmg = (interest_rate - 3.0) * debt_ratio * 0.002
             meta['hp'] = max(0.0, meta.get('hp', 50.0) - extra_hp_dmg)
 
     # ─────────────────────────────────────────────
@@ -717,8 +763,18 @@ class StockMarket:
         lim = LIMITS.get(tier, LIMITS["소형주"])
 
         foreign_delta = 0.0
-        if cycle == "확장" and "대형" in tier: foreign_delta += 0.0008
-        elif cycle in ("수축", "저점"):        foreign_delta -= 0.0010
+        # ★ 확장기 대형주도 매일 방향이 바뀌도록 — 편향은 작게, 노이즈는 크게
+        cycle_base = {
+            "확장": +0.0002, "정점": 0.0,
+            "수축": -0.0004, "저점": -0.0002,
+        }.get(cycle, 0.0)
+        if "대형" in tier:
+            foreign_delta += cycle_base + random.gauss(0, 0.0012)
+        elif "중형" in tier:
+            foreign_delta += cycle_base * 0.5 + random.gauss(0, 0.0008)
+        else:
+            foreign_delta += random.gauss(0, 0.0003)  # 소형주: 외국인 거의 없음
+
         foreign_delta -= rate_delta * 0.0008
         if macro.get('exchange_rate', 1100) > 1400: foreign_delta -= 0.0008
         elif macro.get('exchange_rate', 1100) < 1050: foreign_delta += 0.0005
@@ -734,6 +790,15 @@ class StockMarket:
         foreign_delta += flow_idx * 0.00005
 
         inst_delta = 0.0
+        # ★ 기관: 대형주에서 외국인 반대 성향 + 노이즈
+        if "대형" in tier:
+            # 외국인이 강하게 매수하면 기관은 차익실현 경향
+            inst_delta += -foreign_delta * 0.4 + random.gauss(0, 0.0010)
+        elif "중형" in tier:
+            inst_delta += random.gauss(0, 0.0008)
+        else:
+            inst_delta += random.gauss(0, 0.0005)
+
         if meta.get('_earnings_just_released'):
             lc = meta.get('continuous_loss_count', 0)
             inst_delta += -0.012 if lc >= 2 else (-0.005 if lc == 1 else +0.007)
@@ -750,9 +815,15 @@ class StockMarket:
             inst_delta += 0.003
 
         retail_delta = 0.0
-        if   rate < -0.05: retail_delta += 0.010
+        # ★ 개인: 역매매 성향 + 노이즈 (대형 우량주는 장기보유로 변동 작음)
+        if "대형" in tier:
+            retail_delta += -(foreign_delta + inst_delta) * 0.3 + random.gauss(0, 0.0008)
+        else:
+            retail_delta += random.gauss(0, 0.0015)
+
+        if   rate < -0.05: retail_delta += 0.010   # 급락 시 저점 매수
         elif rate < -0.02: retail_delta += 0.004
-        elif rate >  0.05: retail_delta -= 0.005
+        elif rate >  0.05: retail_delta -= 0.005   # 급등 시 차익실현
         elif rate >  0.02: retail_delta -= 0.002
         sentiment = getattr(self.s, 'sentiment', 50.0)
         if sentiment > 75 and bubble_index > 150: retail_delta += 0.002
@@ -780,6 +851,99 @@ class StockMarket:
         meta['inst_share']    = round(max(0.0, ni), 4)
         meta['retail_share']  = round(max(0.0, nr), 4)
         meta.pop('_earnings_just_released', None)
+
+        # ★ 수급 트렌드 연속성 업데이트
+        name = meta['c_name']
+        trends = self.s.investor_trends.setdefault(name, {
+            "foreign": {"dir": 0, "days": 0},
+            "inst":    {"dir": 0, "days": 0},
+            "retail":  {"dir": 0, "days": 0},
+        })
+
+        for key, delta in [("foreign", foreign_delta), ("inst", inst_delta), ("retail", retail_delta)]:
+            t = trends[key]
+            new_dir = 1 if delta > 0.0005 else (-1 if delta < -0.0005 else 0)
+            if new_dir == t["dir"] and new_dir != 0:
+                t["days"] = min(t["days"] + 1, 30)  # 최대 30일 트렌드
+            else:
+                t["dir"]  = new_dir
+                t["days"] = 1 if new_dir != 0 else 0
+
+        # ★ 일별 거래량 계산 및 저장 (호가창용)
+        # 유통주식수 = 총발행 - 자사주 - 대주주
+        shares_total = stock.get('shares', 1)
+        fixed_ratio  = meta.get('treasury_share', 0.0) + meta.get('owner_share', 0.0)
+        float_shares = max(1, int(shares_total * (1.0 - fixed_ratio)))
+
+        # ★ 거래량은 delta와 완전 분리 — 회전율로만 결정
+        # 현실: 유통주식 기준 회전율 ~1%/일
+        # 총발행주식 기준으로 환산 (유통비율 약 50~60% 가정)
+        # 대형주: 총발행의 0.5~1.2%/일 (유통기준 ~1%)
+        # 중형주: 총발행의 0.8~2.0%/일
+        # 소형주: 총발행의 1.5~4.0%/일
+        base_turnover = {
+            "대형주": random.uniform(0.005, 0.012),
+            "중형주": random.uniform(0.008, 0.020),
+            "소형주": random.uniform(0.015, 0.040),
+        }.get(tier, 0.010)
+
+        # 등락률 클수록 거래량 증가
+        abs_rate_pct = abs(stock.get('rate', 0.0))
+        vol_mult     = 1.0 + abs_rate_pct * 0.3
+        if meta.get('_earnings_just_released'):
+            vol_mult *= 3.0
+        turnover  = min(0.50, base_turnover * vol_mult)
+        total_vol = max(1, int(float_shares * turnover))
+
+        # 투자자별 거래 규모 — 비중 비례
+        f_share   = meta.get('foreign_share', 0.0)
+        i_share   = meta.get('inst_share', 0.0)
+        r_share   = meta.get('retail_share', 0.1)
+        share_sum = max(0.01, f_share + i_share + r_share)
+
+        f_vol = int(total_vol * (f_share / share_sum))
+        i_vol = int(total_vol * (i_share / share_sum))
+        r_vol = total_vol - f_vol - i_vol
+
+        # ★ 방향만 delta 부호에서 결정 — 거래량 크기와 무관
+        def delta_to_direction(delta):
+            """delta 부호 → 방향 (±1), 중립이면 작은 랜덤"""
+            if delta > 0.0001:  return 1
+            if delta < -0.0001: return -1
+            return 1 if random.random() > 0.5 else -1
+
+        f_dir = delta_to_direction(foreign_delta)
+        i_dir = delta_to_direction(inst_delta)
+        r_dir = delta_to_direction(retail_delta)
+
+        # 순매수/순매도량 = 거래량의 20~60% (나머지는 양방향 거래)
+        f_net = int(f_vol * random.uniform(0.20, 0.60) * f_dir)
+        i_net = int(i_vol * random.uniform(0.20, 0.60) * i_dir)
+        r_net = int(r_vol * random.uniform(0.20, 0.60) * r_dir)
+
+        # ★ 제로섬 제약 — 합계가 0되도록 delta 가장 약한 주체가 잔여 흡수
+        residual = f_net + i_net + r_net
+        if residual != 0:
+            abs_f = abs(foreign_delta)
+            abs_i = abs(inst_delta)
+            abs_r = abs(retail_delta)
+            if abs_r <= abs_f and abs_r <= abs_i:
+                r_net -= residual
+            elif abs_i <= abs_f and abs_i <= abs_r:
+                i_net -= residual
+            else:
+                f_net -= residual
+
+        date_str = self.s.current_date.strftime('%Y-%m-%d')
+        vol_list = self.s.daily_volume.setdefault(name, [])
+        vol_list.append({
+            "date":    date_str,
+            "foreign": f_net,
+            "inst":    i_net,
+            "retail":  r_net,
+        })
+        if len(vol_list) > 252:
+            self.s.daily_volume[name] = vol_list[-252:]
 
     def _apply_convergence(self, stock, is_protected):
         meta = stock['meta']
@@ -1046,14 +1210,6 @@ class StockMarket:
             self.s.pending_events.get("delist", {}).pop(name, None)
             self.s.pending_events.get("warning", {}).pop(name, None)
             remaining -= 1
-            # ★ 그룹 계열사 즉시 상폐 시 5년 쿨다운 등록
-            group_id = meta.get('group_id')
-            if group_id:
-                ind = meta.get('ind')
-                if ind:
-                    from datetime import timedelta
-                    cooldown_date = self.s.current_date + timedelta(days=365 * 5)
-                    self.s.group_industry_cooldown.setdefault(group_id, {})[ind] = cooldown_date
 
         delisted_this_turn = []
         is_depression = (
@@ -1113,14 +1269,6 @@ class StockMarket:
                 ds['meta']['is_officially_delisted'] = True
                 self.s.delisted_stocks.append(ds)
                 self.s.stocks.remove(ds)
-                # ★ 그룹 계열사 상폐 시 5년 쿨다운 등록
-                group_id = ds['meta'].get('group_id')
-                if group_id:
-                    ind = ds['meta'].get('ind')
-                    if ind:
-                        from datetime import timedelta
-                        cooldown_date = self.s.current_date + timedelta(days=365 * 5)
-                        self.s.group_industry_cooldown.setdefault(group_id, {})[ind] = cooldown_date
 
     # ─────────────────────────────────────────────
     # 그룹 확장 (기존 유지)
@@ -1180,13 +1328,7 @@ class StockMarket:
             members = [s for s in self.s.stocks if s['meta']['group_id'] == gid]
             if len(members) < limit and random.random() < 0.03:
                 existing_inds = [m['meta']['ind'] for m in members]
-                # ★ 쿨다운 중인 산업 제외 (상폐 후 5년 이내)
-                cooldown = self.s.group_industry_cooldown.get(gid, {})
-                avail = [
-                    i for i in MAIN_INDUSTRIES
-                    if i not in existing_inds
-                    and self.s.current_date >= cooldown.get(i, self.s.current_date)
-                ]
+                avail = [i for i in MAIN_INDUSTRIES if i not in existing_inds]
                 if avail:
                     new_ind = random.choice(avail)
                     self.s.stocks.append(self.cm.create_stock_data(None, new_ind, "중", gid))
@@ -1197,7 +1339,7 @@ class StockMarket:
     # 신규 상장
     # ─────────────────────────────────────────────
     def handle_new_listings(self, silent: bool):
-        from .constants import NAME_DB
+        from .constants import MAIN_INDUSTRIES
         if len(self.s.stocks) >= self.s.MAX_STOCKS:
             return
 
@@ -1263,7 +1405,7 @@ class StockMarket:
             # 중형주 비율 적용
             tier = "중" if random.random() < mid_ratio else "소"
             new_s = self.cm.create_stock_data(
-                random.choice(NAME_DB),
+                None,
                 random.choice(MAIN_INDUSTRIES),
                 tier
             )
@@ -1627,3 +1769,236 @@ class StockMarket:
                 stock['market_cap'] = stock['price'] * stock['shares']
                 if not self.s.silent_mode:
                     self.s.daily_news.append(f"💉 [유상증자] {meta['c_name']}가 생존을 위해 증자를 단행했습니다. (가치 희석)")
+    # ─────────────────────────────────────────────
+    # ★ 신규: 컨센서스 선행매매 adj
+    # ─────────────────────────────────────────────
+    def _calc_consensus_adj(self, name: str, cur_date, tier: str, sector: str) -> float:
+        """
+        실적 발표 D-30~D-7: 기관이 컨센서스 방향으로 서서히 선행매매
+        실적 발표 후: 소문에 사고 뉴스에 팔기 패턴 (기관 차익실현)
+        """
+        consensus = self.s.earnings_consensus.get(name)
+        if not consensus:
+            return 0.0
+
+        direction   = consensus.get('direction', 0)
+        confidence  = consensus.get('confidence', 0.5)
+
+        # 실적 예정일 체크 (pending_events earnings에서 조회)
+        earnings_ev = self.s.pending_events.get('earnings', {}).get(name)
+        if not earnings_ev:
+            return 0.0
+
+        announce_date = earnings_ev.get('date') or earnings_ev.get('announce_date')
+        if not announce_date:
+            return 0.0
+        if isinstance(announce_date, str):
+            try:
+                from datetime import datetime as _dt
+                announce_date = _dt.strptime(announce_date, '%Y-%m-%d')
+            except Exception:
+                return 0.0
+
+        days_to_announce = (announce_date.date() - cur_date.date()).days
+
+        # D-30 ~ D-7: 기관 선행매매 (서서히 포지션 쌓기)
+        if 7 <= days_to_announce <= 30:
+            intensity = (30 - days_to_announce) / 23.0   # 가까울수록 강해짐
+            base_adj  = direction * confidence * intensity * 0.0008
+            # 대형주는 선행매매 효과 더 강함 (기관 비중 높음)
+            if "대형" in tier:   base_adj *= 1.5
+            elif "소형" in tier: base_adj *= 0.3
+            return base_adj
+
+        # D-7 ~ D-0: 본격 선행매매
+        elif 0 < days_to_announce < 7:
+            intensity = (7 - days_to_announce) / 7.0
+            base_adj  = direction * confidence * intensity * 0.0015
+            if "대형" in tier:   base_adj *= 1.5
+            elif "소형" in tier: base_adj *= 0.3
+            return base_adj
+
+        # 발표 직후 (D+1 ~ D+3): 소문에 사고 뉴스에 팔기
+        elif -3 <= days_to_announce <= 0:
+            # 기관이 이미 선취매했으므로 발표 후 차익실현 → 반대 방향
+            return -direction * confidence * 0.0010
+
+        return 0.0
+
+    # ─────────────────────────────────────────────
+    # ★ 신규: 테마 군집 adj
+    # ─────────────────────────────────────────────
+    def _calc_cluster_adj(self, stock: dict, sector: str) -> float:
+        """
+        같은 산업 내 다른 종목들의 평균 등락에 일부 동조
+        현실: A기업 어닝서프라이즈 → 같은 산업 B, C도 동반 상승
+        """
+        meta = stock['meta']
+        ind  = meta.get('ind', '')
+        if not ind:
+            return 0.0
+
+        same_ind_rates = [
+            s.get('rate', 0.0)
+            for s in self.s.stocks
+            if s['meta'].get('ind') == ind and s['meta']['c_name'] != meta['c_name']
+        ]
+        if not same_ind_rates:
+            return 0.0
+
+        avg_rate = sum(same_ind_rates) / len(same_ind_rates)
+
+        # 군집 강도: 섹터별 차등
+        # Theme/Growth는 군집 현상 강함, Defensive는 약함
+        cluster_strength = {
+            "Theme":     0.15,   # 테마주: 강한 군집
+            "Growth":    0.10,   # 성장주: 중간
+            "Value":     0.06,
+            "Defensive": 0.04,   # 방어주: 약한 군집
+        }.get(sector, 0.08)
+
+        return (avg_rate / 100.0) * cluster_strength
+
+    # ─────────────────────────────────────────────
+    # ★ 신규: 유동성 함정 adj
+    # ─────────────────────────────────────────────
+    def _calc_liquidity_adj(self, stock: dict, tier: str) -> float:
+        """
+        소형주: 거래량 희박 → 조금만 사도 급등, 조금만 팔아도 급락
+        대형주: 유동성 풍부 → 완충 효과
+        """
+        if "대형" in tier:
+            return 0.0   # 대형주는 유동성 충분
+
+        meta   = stock['meta']
+        name   = meta['c_name']
+        shares = max(1, stock.get('shares', 1))
+
+        # 유통주식수 계산
+        fixed  = meta.get('treasury_share', 0.0) + meta.get('owner_share', 0.0)
+        float_ratio = max(0.05, 1.0 - fixed)
+
+        # 개인 비중 높을수록 유동성 함정 강화
+        retail = meta.get('retail_share', 0.3)
+
+        if "소형" in tier:
+            # 소형주: 개인 비중 50%+ 이고 유통물량 적으면 변동성 증폭
+            if retail > 0.50 and float_ratio < 0.50:
+                rate = stock.get('rate', 0.0)
+                # 오를 때 더 오르고, 내릴 때 더 내리는 효과
+                return (rate / 100.0) * 0.08
+            elif retail > 0.40:
+                rate = stock.get('rate', 0.0)
+                return (rate / 100.0) * 0.04
+        elif "중형" in tier:
+            if retail > 0.45 and float_ratio < 0.55:
+                rate = stock.get('rate', 0.0)
+                return (rate / 100.0) * 0.03
+
+        return 0.0
+
+    # ─────────────────────────────────────────────
+    # ★ 신규: 대주주 행동 adj
+    # ─────────────────────────────────────────────
+    def _calc_major_holder_adj(self, name: str, meta: dict, tier: str) -> float:
+        """
+        대주주 매수 → 호재 / 대주주 매도 → 악재
+        랜덤하게 공시 이벤트 발생, 며칠간 지속
+        """
+        action_info = self.s.major_holder_action.get(name)
+
+        # 신규 대주주 행동 발생 (낮은 확률)
+        if not action_info:
+            prob = 0.0003 if "대형" in tier else (0.0005 if "중형" in tier else 0.0008)
+            if random.random() < prob:
+                owner_share = meta.get('owner_share', 0.3)
+                hp_ratio    = meta.get('hp', 50.0) / max(1.0, meta.get('hp_soft_cap', 60.0))
+
+                # HP 낮으면 대주주 매도 확률 높음, 높으면 매수 확률 높음
+                sell_prob = 0.3 + (1.0 - hp_ratio) * 0.4
+                action    = "sell" if random.random() < sell_prob else "buy"
+                ratio     = random.uniform(0.005, 0.02)   # 지분의 0.5~2%
+                days      = random.randint(3, 10)
+
+                self.s.major_holder_action[name] = {
+                    "action":   action,
+                    "ratio":    ratio,
+                    "days_left": days,
+                }
+                # 뉴스 발행
+                if not self.s.silent_mode:
+                    if action == "buy":
+                        self.s.daily_news.append(
+                            f"📢 [대주주 공시] {name} 대주주가 자사주 {ratio*100:.1f}% 추가 매입 공시"
+                        )
+                    else:
+                        self.s.daily_news.append(
+                            f"📢 [대주주 공시] {name} 대주주가 보유 지분 {ratio*100:.1f}% 매도 공시"
+                        )
+                action_info = self.s.major_holder_action[name]
+
+        if not action_info:
+            return 0.0
+
+        # 진행 중인 대주주 행동 적용
+        action   = action_info['action']
+        days_left = action_info['days_left']
+
+        if days_left <= 0:
+            del self.s.major_holder_action[name]
+            return 0.0
+
+        self.s.major_holder_action[name]['days_left'] -= 1
+
+        # 대형주는 대주주 행동 영향 작음 (분산된 지분 구조)
+        intensity = {"대형주": 0.3, "중형주": 0.7, "소형주": 1.0}.get(tier, 0.7)
+
+        if action == "buy":
+            return +0.0008 * intensity
+        else:
+            return -0.0010 * intensity
+
+    # ─────────────────────────────────────────────
+    # ★ 신규: 신용잔고 반대매매 adj
+    # ─────────────────────────────────────────────
+    def _calc_margin_call_adj(self, name: str, stock: dict, tier: str, sector: str) -> float:
+        """
+        개인이 빚내서 산 종목(신용잔고) → 하락 시 반대매매 → 추가 하락
+        소형 테마주에서 가장 강하게 나타남
+        """
+        # 대형주는 신용잔고 반대매매 거의 없음
+        if "대형" in tier:
+            return 0.0
+
+        # 신용잔고 초기화 (신규 종목)
+        if name not in self.s.margin_balance:
+            # 소형 테마주는 기본 신용잔고 높게 시작
+            if "소형" in tier and sector == "Theme":
+                self.s.margin_balance[name] = random.uniform(0.05, 0.15)
+            elif "소형" in tier:
+                self.s.margin_balance[name] = random.uniform(0.02, 0.08)
+            else:
+                self.s.margin_balance[name] = random.uniform(0.01, 0.05)
+
+        margin = self.s.margin_balance[name]
+        rate   = stock.get('rate', 0.0)
+
+        # 주가 상승 시: 신용잔고 소폭 증가 (개인 레버리지 추가)
+        if rate > 2.0:
+            self.s.margin_balance[name] = min(0.30, margin + 0.002)
+            return 0.0
+
+        # 주가 하락 시: 신용잔고 반대매매 발동
+        if rate < -3.0:
+            # -3% 이하: 반대매매 시작
+            call_intensity = min(0.20, abs(rate) / 100.0 * 2.0) * margin
+            # 신용잔고 소진
+            self.s.margin_balance[name] = max(0.0, margin - call_intensity * 0.5)
+            # 추가 하락 압력
+            return -call_intensity * 0.5
+        elif rate < -1.5:
+            call_intensity = margin * 0.02
+            self.s.margin_balance[name] = max(0.0, margin - call_intensity)
+            return -call_intensity * 0.3
+
+        return 0.0
