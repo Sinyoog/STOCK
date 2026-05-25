@@ -115,6 +115,15 @@ class StockMarket:
             k: sum(v) / len(v) for k, v in _ind_rates.items()
         }
 
+        # ★ 서킷브레이커 사전 계산 (루프 밖에서 한 번만)
+        # prev_gri 없는 첫날은 발동 안 함
+        _prev_gri_for_cb = getattr(self.s, 'prev_gri', None)
+        _circuit_breaker = False
+        if _prev_gri_for_cb and _prev_gri_for_cb > 0:
+            _gri_daily_chg = (self.s.gri - _prev_gri_for_cb) / _prev_gri_for_cb
+            if _gri_daily_chg <= -0.05:
+                _circuit_breaker = True
+
         # ★ PER 계산은 메인 루프 안에서 함께 처리 (O(n) 루프 1회 절약)
         for stock in self.s.stocks:
             meta      = stock['meta']
@@ -123,15 +132,24 @@ class StockMarket:
             tier      = meta.get('tier', '소형주')
             sector    = SECTOR_MAP.get(meta.get('ind', ''), 'Value')
 
-            # ★ 체급별 변동성 확대 (상승폭 현실화)
-            if   "대형" in tier: vol = 0.010; tier_mult = 0.8
-            elif "중형" in tier: vol = 0.015; tier_mult = 1.0
-            else:                vol = 0.020; tier_mult = 1.2
+            # ★ 수급 구조 기반 변동성 (tier hard cap 제거)
+            # 기관·외국인 비중 높을수록 변동성 낮아짐, 개인 비중 높을수록 커짐
+            foreign_share = meta.get('foreign_share', 0.1)
+            inst_share    = meta.get('inst_share',    0.15)
+            retail_share  = meta.get('retail_share',  0.5)
+
+            if   "대형" in tier: base_vol = 0.010; tier_mult = 0.8
+            elif "중형" in tier: base_vol = 0.015; tier_mult = 1.0
+            else:                base_vol = 0.020; tier_mult = 1.2
+
+            vol_multiplier = 1.0 + (retail_share * 1.5) - (inst_share * 1.0) - (foreign_share * 0.8)
+            vol_multiplier = max(0.4, min(2.5, vol_multiplier))
+            vol = base_vol * vol_multiplier
 
             # ★ 섹터별 변동성 추가 조정
-            if sector == "Theme":   vol *= 1.4   # 테마주: 변동성 가장 큼
-            elif sector == "Growth": vol *= 1.2  # 성장주: 변동성 큼
-            elif sector == "Defensive": vol *= 0.8  # 방어주: 변동성 작음
+            if sector == "Theme":       vol *= 1.4   # 테마주: 변동성 가장 큼
+            elif sector == "Growth":    vol *= 1.2   # 성장주: 변동성 큼
+            elif sector == "Defensive": vol *= 0.8   # 방어주: 변동성 작음
 
             eff   = meta.get('efficiency', 0.05) * tier_mult
             # ★ 경기 사이클별 efficiency 변동
@@ -220,16 +238,32 @@ class StockMarket:
             hp_ratio = hp / max(1.0, soft_cap)
             shield   = meta.get('shield', 0.0)
 
-            if   hp_ratio <= 0.0:  hp_panic = 0.70
-            elif hp_ratio < 0.15:  hp_panic = 0.85
-            elif hp_ratio < 0.40:  hp_panic = 0.95
-            else:                  hp_panic = 1.0
+            # ★ hp_panic 직접 곱셈 제거 — HP는 간접 경로로만 영향
+            # HP 개념(호재→상승, 악재→하락, HP=0→상폐)은 유지
+            # 대신 수급 이탈 + efficiency 하락 + 워크아웃 이벤트로 간접 전달
 
-            # ★ HP → 주가 하락 압력 (HP 낮을수록 주가 하락)
+            # HP 30% 미만: 수급 이탈 가속
+            if hp_ratio < 0.30:
+                meta['foreign_share'] = max(0.0, meta.get('foreign_share', 0.0) - 0.003)
+                meta['inst_share']    = max(0.0, meta.get('inst_share', 0.0)    - 0.004)
+
+            # HP 15% 미만: efficiency 점진 하락 → 다음 분기 실적 악화
+            if hp_ratio < 0.15:
+                meta['efficiency'] = meta.get('efficiency', 0.05) * 0.97
+
+            # HP 5% 미만: 워크아웃 이벤트 → 단기 급등 가능 (좀비주 현상)
+            if hp_ratio < 0.05 and random.random() < 0.02:
+                meta['_hp_overflow_pump'] = random.uniform(0.10, 0.30)
+                if not self.s.silent_mode:
+                    self.s.daily_news.append(
+                        f"🔔 [워크아웃] {name} 구조조정 기대감으로 단기 급등 발생"
+                    )
+
+            # ★ HP → 주가 하락 압력 (간접 — 수급 이탈 후 시장 반응)
             hp_pressure = 0.0
-            if   hp_ratio < 0.15: hp_pressure = -0.003
-            elif hp_ratio < 0.30: hp_pressure = -0.001
-            elif hp_ratio < 0.50: hp_pressure = -0.0003
+            if   hp_ratio < 0.15: hp_pressure = -0.002
+            elif hp_ratio < 0.30: hp_pressure = -0.0008
+            elif hp_ratio < 0.50: hp_pressure = -0.0002
 
             # ★ 방어막 발동 중 → 소폭 호재 (버텨준다는 신호)
             shield_active = hp_ratio < 0.30 and shield > 0
@@ -251,7 +285,7 @@ class StockMarket:
             daily_return = (
                 market_drift + alpha + sector_adj + earnings_adj
                 + momentum_adj + rate_boost + hp_pressure + shield_boost + noise
-            ) * panic_factor * hp_panic * fear_mult
+            ) * panic_factor * fear_mult   # ★ hp_panic 제거 — HP는 간접 경로로만 작동
 
             pump = meta.pop('_hp_overflow_pump', 0.0)
             daily_return += pump
@@ -374,19 +408,17 @@ class StockMarket:
             elif old_price < meta.get('price_52w_low', old_price) * 0.999:
                 daily_return -= 0.0003   # 신저가 하향 압력
 
-            if   "대형" in tier: cap = 0.08
-            elif "중형" in tier: cap = 0.12
-            else:                cap = 0.12
+            # ★ 전 종목 ±30% (현실 상한가/하한가)
+            # 대형주가 덜 움직이는 건 vol(수급 연동)이 낮아서 자연스럽게 결정됨
+            cap = 0.30
 
-            # ★ 고주가 종목 추가 변동성 제한 (SKT형 급락 방지)
-            if old_price >= 1_000_000:
-                cap = min(cap, 0.05)   # 주가 100만원 이상: 일 5% 상한
-            elif old_price >= 200_000:
-                cap = min(cap, 0.07)   # 주가 20만원 이상: 일 7% 상한
+            # ★ 서킷브레이커: GRI 하루 -5% 이상이면 당일 변동폭 절반
+            if _circuit_breaker:
+                cap = 0.15
 
             # ★ 확장기에는 하루 하락 하한선 적용 (무조건 하락 방지)
             if cycle == "확장" and not is_depression:
-                daily_return = max(-0.03, daily_return)
+                daily_return = max(-0.05, daily_return)
             daily_return = max(-cap, min(cap, daily_return))
 
             new_price = old_price * (1.0 + daily_return)
@@ -468,7 +500,9 @@ class StockMarket:
                     ld = __import__('datetime').datetime.strptime(
                         stock['meta']['listed_date'], '%Y-%m-%d')
                 if (cur_date - ld).days < 30:
-                    continue
+                    # 초기 종목(1999-12-31 상장)은 예외 — 이미 오래된 기업이므로 제한 불필요
+                    if ld.strftime('%Y-%m-%d') != '1999-12-31':
+                        continue
             except Exception:
                 pass
 
@@ -490,14 +524,20 @@ class StockMarket:
         weighted_avg_rate = max(-down_cb, min(up_cb, weighted_avg_rate))
 
         years_elapsed = max(0, cur_date.year - 2000)
-        # lv_target: 2045년 Lv3 기준 목표 25,000~30,000 역산
-        # Lv1(~2015): 연 8%, Lv2(2015~2035): 연 10%, Lv3(2035~): 연 9%
-        lv_target = {
+        # ★ lv_target: GDP 누적치 연동 — 경기침체 누적 시 낮아지고 호황 지속 시 높아짐
+        # GDP 기준(2000년 600조) 대비 성장 비율을 0.7승으로 반영 (완전 연동 아님)
+        gdp_now       = getattr(self.s, 'gdp', 600_000_000_000_000.0)
+        gdp_base      = 600_000_000_000_000.0
+        gdp_ratio     = gdp_now / max(1.0, gdp_base)
+        gdp_factor    = (gdp_ratio ** 0.7)   # 0.7승: GDP 변화를 70% 반영
+
+        lv_base = {
             1: 1000 * (1.08 ** years_elapsed),
             2: 1000 * (1.08 ** 15) * (1.10 ** max(0, years_elapsed - 15)),
             3: 1000 * (1.08 ** 15) * (1.10 ** 20) * (1.09 ** max(0, years_elapsed - 35)),
             4: 1000 * (1.08 ** 15) * (1.10 ** 20) * (1.09 ** 25) * (1.13 ** max(0, years_elapsed - 60)),
         }.get(lv, 1000.0)
+        lv_target = lv_base * gdp_factor   # GDP 역성장 시 lv_target도 낮아짐
 
         anchor = self.s.gri / max(1.0, lv_target)
         # anchor 브레이크: 오버슈팅 방지 (단계적 강화)
@@ -520,51 +560,85 @@ class StockMarket:
         if not _math.isfinite(raw_gri): raw_gri = self.s.gri
         self.s.gri = max(100.0, raw_gri)
 
-        # ★ GDP 연간 성장 (매년 1월 1일)
+        # ★ GDP 연간 성장 (매년 1월 1일) — 경기 사이클 연동
         if cur_date.month == 1 and cur_date.day == 1:
-            gdp_growth = getattr(self.s, 'gdp_growth_rate', 0.05)
-            # 기술 레벨별 GDP 성장률 보정
-            lv_growth = {1: 0.05, 2: 0.07, 3: 0.06, 4: 0.09}.get(lv, 0.05)
-            self.s.gdp = getattr(self.s, 'gdp', 600_000_000_000_000.0) * (1 + lv_growth)
+            # 기술 레벨별 기본 성장률
+            lv_base_growth = {1: 0.05, 2: 0.07, 3: 0.06, 4: 0.09}.get(lv, 0.05)
+
+            # 경기 사이클별 보정 (현실 반영)
+            cycle_gdp_mult = {
+                "확장": random.uniform(0.04, 0.06),    # 확장기: +4~6%
+                "정점": random.uniform(0.02, 0.03),    # 정점기: +2~3% (성장 둔화)
+                "수축": random.uniform(-0.01, -0.005), # 수축기: -0.5~-1% (역성장)
+                "저점": random.uniform(-0.04, -0.02),  # 저점기: -2~-4%
+            }.get(cycle, lv_base_growth)
+
+            # 대공황: GDP 급격히 역성장
+            if is_depression:
+                cycle_gdp_mult = random.uniform(-0.10, -0.06)  # -6~-10%
+
+            self.s.gdp = getattr(self.s, 'gdp', 600_000_000_000_000.0) * (1 + cycle_gdp_mult)
+            self.s.gdp_growth_rate = cycle_gdp_mult   # 뉴스 표시용
+
+            # GDP 성장률 뉴스 (교육 효과)
+            if not self.s.silent_mode:
+                gdp_pct = cycle_gdp_mult * 100
+                if gdp_pct < 0:
+                    self.s.daily_news.append(
+                        f"📉 [GDP 발표] {cur_date.year}년 GDP 성장률 {gdp_pct:+.1f}% "
+                        f"(GDP↓ → 버핏 지수↑ → 시장 고평가 압력)"
+                    )
+                else:
+                    self.s.daily_news.append(
+                        f"📈 [GDP 발표] {cur_date.year}년 GDP 성장률 {gdp_pct:+.1f}%"
+                    )
 
         # ★ 버핏 지수 갱신
         gdp = getattr(self.s, 'gdp', 600_000_000_000_000.0)
         self.s.buffett_index = (total_market_cap / max(1.0, gdp)) * 100
 
-        # ★ 버블 지수: GRI / lv_target 비율 기반으로 재계산
-        # prev_gri는 이미 위에서 저장됨
-        prev_gri_v = getattr(self.s, 'prev_gri', self.s.gri)
-        gri_change = (self.s.gri - prev_gri_v) / max(1.0, prev_gri_v)
+        # ★ 버블 지수: 버핏 지수(시총/GDP) 기반으로 재계산
+        # 현실: 버블은 실물 경제 대비 금융 자산의 괴리
+        # 버핏 60% 미만 → 버블 0~30 / 100~130% → 버블 80~150 / 160%+ → 버블 250~300
+        buffett = getattr(self.s, 'buffett_index', 0.0)
 
-        # lv_target_bi = lv_target (위에서 이미 계산됨, 재사용)
-        lv_target_bi = lv_target
+        if buffett < 60:
+            target_bubble = buffett * 0.5                            # 0~30
+        elif buffett < 100:
+            target_bubble = 30 + (buffett - 60) * 1.25              # 30~80
+        elif buffett < 130:
+            target_bubble = 80 + (buffett - 100) * 2.33             # 80~150
+        elif buffett < 160:
+            target_bubble = 150 + (buffett - 130) * 3.33            # 150~250
+        else:
+            target_bubble = min(300.0, 250 + (buffett - 160) * 1.67)  # 250~300
 
-        # T3 유지: 목표값 낮게 (박스권)
+        # T3 유지 / 대공황 극복 시 버블 억제
         if "T3 유지" in self.s.current_scenario:
-            lv_target_bi *= 0.6
-        # 대공황 극복: 목표값 T3보다 낮게
+            target_bubble *= 0.6
         elif "극복" in self.s.current_scenario:
-            lv_target_bi *= 0.5
-
-        # 버블 = (GRI / lv_target - 1.0) × 200
-        # GRI가 목표치 2배 → 버블 200, 목표치와 같으면 0, 목표 미만이면 음수→0
-        gri_ratio_bi  = self.s.gri / max(1.0, lv_target_bi)
-        target_bubble = max(0.0, (gri_ratio_bi - 1.0) * 200.0)
+            target_bubble *= 0.5
 
         # 실제 버블 지수를 목표값으로 서서히 수렴 (급변 방지)
-        bi          = getattr(self.s, 'bubble_index', 0.0)
-        bubble_diff = target_bubble - bi
+        bi             = getattr(self.s, 'bubble_index', 0.0)
+        bubble_diff    = target_bubble - bi
         # 하루 최대 변화폭: +2.0 / -3.0 (하락이 더 빠르게)
         bubble_delta_final = max(-3.0, min(2.0, bubble_diff * 0.05))
         self.s.bubble_index = max(0.0, min(300.0, bi + bubble_delta_final))
 
-        # 이하 버핏 지수 연동 추가 보정
-        buffett = getattr(self.s, 'buffett_index', 0.0)
-        if buffett > 150 and self.s.bubble_index < 200:
-            self.s.bubble_index = min(300.0, self.s.bubble_index + 0.3)
-
-        # ★ 버핏 지수 추가 보정 (이미 위에서 bubble_index에 직접 반영)
-        # bubble_delta는 새 방식에서 사용 안 함 (bubble_delta_final로 대체)
+        # 버블 경고 뉴스 (교육 효과)
+        bi_now = self.s.bubble_index
+        if not self.s.silent_mode:
+            if 149 < bi_now <= 151:
+                self.s.daily_news.append(
+                    f"⚠️ [버블 주의] 버블 지수 {bi_now:.0f} — "
+                    f"시총/GDP 비율 과열 (역사적으로 1~2년 내 조정 선행 신호)"
+                )
+            elif 249 < bi_now <= 251:
+                self.s.daily_news.append(
+                    f"🚨 [버블 경고] 버블 지수 {bi_now:.0f} — "
+                    f"닷컴버블(2000) 수준 도달, 대규모 조정 위험"
+                )
 
         # ★ 버블 300 도달 시 대공황 예약 (D-90, 아직 예약 없을 때만)
         if self.s.bubble_index >= 300 and not self.s.pending_events.get("crash"):
@@ -1408,25 +1482,45 @@ class StockMarket:
             elif bubble_index > 200:
                 ipo_max = min(self.s.MAX_STOCKS - cur_count, ipo_max + 1)
 
-        ipo_count = random.randint(ipo_min, ipo_max)
+        # ★ 5순위: 산업별 IPO 가중치 계산
+        # 포화 산업(현재 수 / 상한 수 비율이 높을수록) IPO 확률 낮아짐
+        from .constants import INDUSTRY_MAX_COMPANIES
+        lv_now = self.s.max_tech_reached
+        ind_counts = {}
+        for st in self.s.stocks:
+            ind = st['meta'].get('ind', '')
+            ind_counts[ind] = ind_counts.get(ind, 0) + 1
+
+        ipo_weights = []
+        for ind in MAIN_INDUSTRIES:
+            max_co    = INDUSTRY_MAX_COMPANIES.get(ind, {}).get(lv_now, 30)
+            cur_co    = ind_counts.get(ind, 0)
+            saturation = cur_co / max(1, max_co)
+            weight    = max(0.05, 1.0 - saturation)   # 포화될수록 낮아짐, 최소 0.05
+            ipo_weights.append(weight)
+
+        ipo_count = random.randint(ipo_min, max(ipo_min, ipo_max))
         for _ in range(ipo_count):
             # 종목 수 다시 체크 (루프 중 MAX 초과 방지)
             if len(self.s.stocks) + len(self.s.pending_listings) >= self.s.MAX_STOCKS:
                 break
 
+            # ★ 가중치 기반 산업 선택 (포화 산업은 확률 낮음)
+            chosen_ind = random.choices(MAIN_INDUSTRIES, weights=ipo_weights, k=1)[0]
+
             # 중형주 비율 적용
             tier = "중" if random.random() < mid_ratio else "소"
-            new_s = self.cm.create_stock_data(
-                None,
-                random.choice(MAIN_INDUSTRIES),
-                tier
-            )
-            # ★ GRI → 공모가 연동 (GRI 높을수록 공모가 높게)
-            gri_ratio_ipo = self.s.gri / 1000.0  # 기준 GRI 1000
+            new_s = self.cm.create_stock_data(None, chosen_ind, tier)
+
+            # ★ GRI → 공모가 연동 개선
+            # 기존: GRI 전체 배율 그대로 적용 → 소형주 공모가 폭등 문제
+            # 개선: 산업 평균 PER 기준 역산 + GRI 배율 완화 (최대 2배)
+            gri_ratio_ipo = self.s.gri / 1000.0
             if gri_ratio_ipo > 1.0:
-                price_boost = min(3.0, gri_ratio_ipo)  # 최대 3배
+                price_boost = min(2.0, 1.0 + (gri_ratio_ipo - 1.0) * 0.3)  # 완화된 배율
                 new_s['price'] = int(new_s['price'] * price_boost)
                 new_s['market_cap'] = new_s['price'] * new_s['shares']
+
             listing_date = self.s.current_date + timedelta(days=7)
             new_s['meta']['listed_date'] = listing_date.strftime('%Y-%m-%d')
             self.s.pending_listings.append(new_s)

@@ -1025,6 +1025,10 @@ class StockHTS(QMainWindow):
                 except: pass
 
         n       = len(disp)
+        # ★ 최고/최저값과 X위치를 모두 disp 기준으로 통일
+        # prices 기준으로 뽑으면 disp에 없는 값이 나와서 마커가 엉뚱한 곳에 찍힘
+        mx      = max(disp)
+        mn      = min(disp)
         max_idx = max(range(n), key=lambda i: disp[i])
         min_idx = min(range(n), key=lambda i: disp[i])
 
@@ -1060,65 +1064,6 @@ class StockHTS(QMainWindow):
             f"({sign}{abs(rate):.2f}%)</span>"
         )
 
-        col = "#FF4444" if disp[-1] >= disp[0] else "#4444FF"
-        self.curve.setPen(__import__('pyqtgraph', fromlist=['mkPen']).mkPen(color=col, width=2))
-        self.curve.setData(disp)
-
-        mn, mx = min(disp), max(disp)
-        pad = max(1.0, (mx - mn) * 0.05) if mx != mn else mx * 0.01
-        self.chart_widget.setYRange(mn - pad, mx + pad)
-
-        # baseline
-        self.baseline.setPos(float(disp[0]))
-
-        # 최고/최저 마커
-        import pyqtgraph as pg2
-        for attr in ['_gri_max_scatter','_gri_min_scatter','_gri_max_text','_gri_min_text']:
-            if hasattr(self, attr):
-                try: self.chart_widget.removeItem(getattr(self, attr))
-                except: pass
-
-        n = len(disp)
-        max_idx = max(range(n), key=lambda i: disp[i])
-        min_idx = min(range(n), key=lambda i: disp[i])
-
-        self._gri_max_scatter = pg2.ScatterPlotItem(size=10, brush=pg2.mkBrush('#FF4444'), symbol='o')
-        self._gri_max_scatter.addPoints([{'pos': (max_idx, mx)}])
-        self.chart_widget.addItem(self._gri_max_scatter)
-
-        self._gri_min_scatter = pg2.ScatterPlotItem(size=10, brush=pg2.mkBrush('#4444FF'), symbol='o')
-        self._gri_min_scatter.addPoints([{'pos': (min_idx, mn)}])
-        self.chart_widget.addItem(self._gri_min_scatter)
-
-        # anchor: (0,0)=텍스트 왼쪽상단이 점에 붙음, (1,0)=텍스트 오른쪽상단
-        # 우측 75% 이상이면 텍스트를 왼쪽으로 (anchor x=1)
-        # 좌측 25% 이하이면 텍스트를 오른쪽으로 (anchor x=0)
-        max_anchor = (1.0, 1.0) if max_idx > n * 0.75 else (0.0, 1.0)
-        self._gri_max_text = pg2.TextItem(
-            html=f"<span style='color:#FF4444;font-weight:bold;background-color:#000;'>최고: {mx:,.0f}</span>",
-            anchor=max_anchor)
-        self._gri_max_text.setPos(max_idx, mx)
-        self.chart_widget.addItem(self._gri_max_text)
-
-        min_anchor = (1.0, 0.0) if min_idx > n * 0.75 else (0.0, 0.0)
-        self._gri_min_text = pg2.TextItem(
-            html=f"<span style='color:#4444FF;font-weight:bold;background-color:#000;'>최저: {mn:,.0f}</span>",
-            anchor=min_anchor)
-        self._gri_min_text.setPos(min_idx, mn)
-        self.chart_widget.addItem(self._gri_min_text)
-
-        # 등락률 표시
-        rate = ((disp[-1] / max(1.0, disp[0])) - 1.0) * 100
-        sign = "▲" if rate > 0 else ("▼" if rate < 0 else "─")
-        c_hex = "#FF4444" if rate > 0 else ("#4444FF" if rate < 0 else "#e0e0e0")
-        self.change_summary_label.setText(
-            f"<span style='color:#aaa;'>{self.current_tf} 기준: </span>"
-            f"<span style='color:#fff;'>{disp[0]:,.0f}</span>"
-            f" → <span style='color:{c_hex};font-weight:bold;'>{disp[-1]:,.0f} "
-            f"({sign}{abs(rate):.2f}%)</span>"
-        )
-
-    def scroll_to_selected(self):
         for i in range(self.stock_table.rowCount()):
             it = self.stock_table.item(i, 1)
             if it:

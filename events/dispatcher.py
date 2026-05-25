@@ -57,6 +57,10 @@ class EventDispatcher:
         if self.s.is_market_open:
             self.mkt.handle_group_expansion(silent)
             self.eco.update_macro_logic()
+            # ★ 6순위: 공급망 패널티 적용
+            self.eco.apply_supply_chain_penalty()
+            # ★ 8순위: 외부 충격 이벤트 체크 (매년 1월 1일)
+            self._check_external_shock(silent)
             self.mkt.apply_price_change()
             self.mkt.update_company_technology()
             # 경고 진입/해제 7일 선반영 시스템
@@ -558,3 +562,100 @@ class EventDispatcher:
                     self.s.daily_news.append(
                         f"📉 [즉시강등] {name}: {old_tier} → {to_tier} ({reason})"
                     )
+    # ─────────────────────────────────────────────
+    # ★ 외부 충격 이벤트 (8순위)
+    # 매년 1월 1일 확률 체크 — 무조건 발생하지 않음, 시드마다 다름
+    # 내부 버블과 무관하게 외부에서 오는 경제 충격
+    # 현실 사례: 닷컴버블(2000), 금융위기(2008), 코로나(2020)
+    # ─────────────────────────────────────────────
+    def _check_external_shock(self, silent: bool):
+        import random as _rnd
+        cur = self.s.current_date
+
+        # 매년 1월 1~7일 중 한 번만 체크
+        if cur.month != 1 or cur.day > 7:
+            return
+
+        # 이미 대공황 진행 중이면 외부 충격 없음
+        if "대공황" in self.s.current_scenario and "극복" not in self.s.current_scenario:
+            return
+
+        # 이미 올해 외부 충격이 발생했으면 스킵
+        last_shock_year = getattr(self.s, '_last_external_shock_year', 0)
+        if last_shock_year == cur.year:
+            return
+
+        # ★ 종목 수가 한 번이라도 400개를 달성한 후에만 외부 충격 발동
+        # 시장이 충분히 형성되기 전 충격은 비현실적이고 게임 밸런스를 해침
+        # 한 번 400개 달성 후 종목이 줄어도 플래그는 유지됨
+        if len(self.s.stocks) >= self.s.MAX_STOCKS:
+            self.s._market_fully_formed = True
+        if not getattr(self.s, '_market_fully_formed', False):
+            return
+
+        # ── 충격 유형별 확률 ──────────────────────
+        # 3~5년 주기로 발생 가능 (확률 기반)
+        years_since_shock = cur.year - last_shock_year if last_shock_year > 0 else 5
+        base_prob = min(0.25, years_since_shock * 0.04)   # 최대 25%
+
+        roll = _rnd.random()
+        if roll > base_prob:
+            return   # 이번 해는 외부 충격 없음
+
+        # 충격 유형 결정
+        shock_type = _rnd.choices(
+            ["글로벌 금융위기", "글로벌 침체 동조", "일시적 패닉"],
+            weights=[0.20, 0.35, 0.45]
+        )[0]
+
+        self.s._last_external_shock_year = cur.year
+
+        if shock_type == "글로벌 금융위기":
+            # GRI -30~50%, 회복 2~5년
+            intensity      = _rnd.uniform(0.30, 0.50)
+            duration_days  = _rnd.randint(504, 1260)   # 2~5년
+            scenario_name  = "📉 글로벌 금융위기 (외부 충격)"
+            edu_text       = "(글로벌 경기 동조화 → 내부 버블 없어도 동반 하락 가능)"
+
+        elif shock_type == "글로벌 침체 동조":
+            # GRI -15~30%, 회복 1~2년
+            intensity      = _rnd.uniform(0.15, 0.30)
+            duration_days  = _rnd.randint(252, 504)    # 1~2년
+            scenario_name  = "📉 글로벌 침체 동조 (외부 충격)"
+            edu_text       = "(해외 경기침체 동조화 → 수출 감소 → 기업 실적 악화)"
+
+        else:   # 일시적 패닉
+            # GRI -10~20%, 회복 1~3개월
+            intensity      = _rnd.uniform(0.10, 0.20)
+            duration_days  = _rnd.randint(21, 63)      # 1~3개월
+            scenario_name  = "📉 일시적 시장 패닉 (외부 충격)"
+            edu_text       = "(단기 패닉 → 빠른 회복 가능 (코로나형))"
+
+        # GRI 즉시 충격 적용
+        shock_gri = self.s.gri * (1.0 - intensity)
+        self.s.gri = max(100.0, shock_gri)
+
+        # 시나리오 전환 + 타이머
+        prev_scenario = self.s.current_scenario
+        self.s.current_scenario = scenario_name
+        self.s.scenario_timer   = duration_days
+
+        # 회복 이벤트 예약
+        from datetime import timedelta
+        recovery_date = cur + timedelta(days=duration_days)
+        self.s.pending_events["recovery"] = {
+            "date":     recovery_date,
+            "scenario": f"✨ {shock_type} 극복 (회복 국면)",
+            "notified": False,
+        }
+
+        # 뉴스
+        if not silent:
+            self.s.daily_news.append(
+                f"🌏 [외부 충격] {cur.year}년 {shock_type} 발생! "
+                f"GRI -{intensity*100:.0f}% 충격 예상 {edu_text}"
+            )
+            self.s.daily_news.append(
+                f"  └ 예상 지속 기간: 약 {duration_days//252}년 {(duration_days%252)//21}개월 "
+                f"| 회복 예정: {recovery_date.strftime('%Y-%m-%d')}"
+            )

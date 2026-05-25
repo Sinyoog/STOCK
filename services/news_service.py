@@ -502,3 +502,104 @@ class NewsService:
         cur_month  = current_date.month
         cur_day    = current_date.day
         return cur_month in [3, 6, 9, 12] and cur_day == report_day
+    # ─────────────────────────────────────────────
+    # ★ 7순위: 뉴스 교육 텍스트 생성
+    # 경제 이벤트 뉴스에 인과관계 설명을 자동으로 붙여주는 헬퍼
+    # dispatcher.py / economy.py의 daily_news에 직접 쓰는 대신
+    # 이 함수를 통해 교육 텍스트를 붙인 뉴스를 생성
+    # ─────────────────────────────────────────────
+    def make_edu_news(self, event_type: str, **kwargs) -> str:
+        """
+        event_type별 교육 텍스트가 붙은 뉴스 문자열 반환
+        """
+        templates = {
+            "금리인상": (
+                "🏦 [금리 인상] 기준금리 {delta:+.2f}%p 인상 → 현재 {rate:.2f}%\n"
+                "   (금리↑ → 기업 이자비용↑ → 실적↓ / 성장주 밸류에이션↓)"
+            ),
+            "금리인하": (
+                "🏦 [금리 인하] 기준금리 {delta:+.2f}%p 인하 → 현재 {rate:.2f}%\n"
+                "   (금리↓ → 기업 이자비용↓ → 실적↑ / 성장주 상승 모멘텀↑)"
+            ),
+            "gdp역성장": (
+                "📉 [GDP 발표] {year}년 GDP 성장률 {rate:+.1f}%\n"
+                "   (GDP↓ → 버핏 지수↑ → 시장 고평가 신호 → 버블 축적 압력)"
+            ),
+            "버블경고150": (
+                "⚠️ [버블 주의] 버블 지수 {bi:.0f} 도달\n"
+                "   (시총/GDP 비율 과열 → 역사적으로 1~2년 내 조정 선행 신호)"
+            ),
+            "버블경고250": (
+                "🚨 [버블 경고] 버블 지수 {bi:.0f} — 닷컴버블(2000) 수준\n"
+                "   (극단적 고평가 → 대규모 조정 위험 고조)"
+            ),
+            "유가급등": (
+                "🛢️ [유가 급등] 국제유가 ${price:.1f}\n"
+                "   (유가↑ → 물류비·원가↑ → CPI↑ → 금리 인상 압박)"
+            ),
+            "유가급락": (
+                "🛢️ [유가 급락] 국제유가 ${price:.1f}\n"
+                "   (유가↓ → 에너지 섹터 실적↓ / 물가 안정 → 금리 인하 기대)"
+            ),
+            "기술전환": (
+                "🚀 [기술 패러다임 전환] LV.{lv} 도약\n"
+                "   (기술 전환 → 기존 산업 창조적 파괴 → 신섹터 프리미엄 / 구섹터 도태)"
+            ),
+            "경기수축": (
+                "📊 [경기 수축 진입] 선행지수 {leading:.1f}\n"
+                "   (수축기 → 소비·투자 감소 → 실적 악화 → 방어주 선호 증가)"
+            ),
+            "경기확장": (
+                "📊 [경기 확장 전환] 선행지수 {leading:.1f}\n"
+                "   (확장기 → 소비·투자 증가 → 성장주·테마주 강세 국면)"
+            ),
+            "공급망충격": (
+                "🔗 [공급망 충격] {victim_ind} ← {source_ind} 침체\n"
+                "   ({source_ind} 공급 차질 → {victim_ind} 마진 압박 → 연쇄 실적 악화)"
+            ),
+            "외부충격": (
+                "🌏 [외부 충격] {shock_type} 발생\n"
+                "   (글로벌 경기 동조화 → 내부 버블 없어도 동반 하락 가능)"
+            ),
+        }
+        template = templates.get(event_type, "{event_type} 이벤트 발생")
+        try:
+            return template.format(event_type=event_type, **kwargs)
+        except Exception:
+            return f"{event_type} 이벤트 발생"
+
+    def get_macro_edu_news(self) -> list:
+        """
+        현재 거시경제 상태 기반 교육 뉴스 목록 생성
+        매일 호출하면 중복이 많으므로 중요 변화가 있을 때만 사용
+        """
+        news = []
+        m    = self.s.macro
+
+        # 금리 변화 체크
+        prev_snap = getattr(self.s, '_prev_macro_snapshot', {})
+        prev_rate = prev_snap.get('interest_rate', m['interest_rate'])
+        delta     = m['interest_rate'] - prev_rate
+        if abs(delta) >= 0.1:
+            etype = "금리인상" if delta > 0 else "금리인하"
+            news.append(self.make_edu_news(etype, delta=delta, rate=m['interest_rate']))
+
+        # 유가 급변 체크
+        prev_oil = prev_snap.get('oil_price', m['oil_price'])
+        oil_chg  = (m['oil_price'] - prev_oil) / max(1.0, prev_oil)
+        if oil_chg >= 0.10:
+            news.append(self.make_edu_news("유가급등", price=m['oil_price']))
+        elif oil_chg <= -0.10:
+            news.append(self.make_edu_news("유가급락", price=m['oil_price']))
+
+        # 경기 사이클 전환 체크
+        prev_cycle = prev_snap.get('cycle_stage', '')
+        cur_cycle  = getattr(self.s, 'cycle_stage', '')
+        leading    = getattr(self.s, 'leading_index', 0.0)
+        if prev_cycle and prev_cycle != cur_cycle:
+            if cur_cycle in ("수축", "저점"):
+                news.append(self.make_edu_news("경기수축", leading=leading))
+            elif cur_cycle == "확장":
+                news.append(self.make_edu_news("경기확장", leading=leading))
+
+        return news

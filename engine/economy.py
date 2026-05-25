@@ -568,3 +568,59 @@ class MacroEngine:
             shock_factor = random.uniform(-0.001, 0.001) * total_inst
 
         return perf + (shock_factor * ipo_multiplier)
+    # ─────────────────────────────────────────────
+    # ★ 공급망 패널티 적용 (6순위)
+    # update_macro_logic에서 매일 호출
+    # 의존 대상 산업이 수축/저점기이면 피해 산업 efficiency에 패널티
+    # ─────────────────────────────────────────────
+    def apply_supply_chain_penalty(self):
+        from engine.constants import SUPPLY_CHAIN
+        cycle = getattr(self.s, 'cycle_stage', '확장')
+
+        # 산업별 현재 경기 단계 판단 (전체 사이클 기준으로 단순화)
+        is_downturn = cycle in ("수축", "저점")
+        is_depression = ("대공황" in self.s.current_scenario
+                         and "극복" not in self.s.current_scenario)
+
+        if not (is_downturn or is_depression):
+            return   # 확장/정점기엔 패널티 없음
+
+        # 산업별 평균 efficiency 사전 계산
+        ind_efficiency = {}
+        for stock in self.s.stocks:
+            ind = stock['meta'].get('ind', '')
+            eff = stock['meta'].get('efficiency', 0.05)
+            if ind not in ind_efficiency:
+                ind_efficiency[ind] = []
+            ind_efficiency[ind].append(eff)
+        ind_avg_eff = {ind: sum(v)/len(v) for ind, v in ind_efficiency.items()}
+
+        # 공급망 패널티 적용
+        penalty_mult = 1.5 if is_depression else 1.0
+        for stock in self.s.stocks:
+            meta = stock['meta']
+            ind  = meta.get('ind', '')
+            if ind not in SUPPLY_CHAIN:
+                continue
+
+            total_penalty = 0.0
+            for dep_ind, dep_ratio in SUPPLY_CHAIN[ind]:
+                dep_avg = ind_avg_eff.get(dep_ind, 0.05)
+                # 의존 대상 산업의 efficiency가 낮을수록 패널티 강화
+                if dep_avg < 0.03:   # 매우 낮은 efficiency → 강한 패널티
+                    total_penalty += dep_ratio * 0.5 * penalty_mult
+                elif dep_avg < 0.05:
+                    total_penalty += dep_ratio * 0.25 * penalty_mult
+
+            if total_penalty > 0:
+                old_eff = meta.get('efficiency', 0.05)
+                meta['efficiency'] = max(0.005, old_eff * (1.0 - total_penalty))
+
+                # 뉴스 (낮은 확률로 공급망 충격 뉴스 발행)
+                if not self.s.silent_mode and total_penalty > 0.1 and random.random() < 0.02:
+                    dep_names = ', '.join(d for d, _ in SUPPLY_CHAIN[ind])
+                    self.s.daily_news.append(
+                        f"🔗 [공급망 충격] {meta['c_name']} — "
+                        f"{dep_names} 침체로 {ind} 마진 압박 "
+                        f"({dep_names} 공급 차질 → {ind} efficiency 하락)"
+                    )
