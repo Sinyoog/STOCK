@@ -730,10 +730,14 @@ class DelistedDetailDialog(QDialog):
 
         # 시총 단위 변환
         mc = self.s['market_cap']
-        if mc >= 10_000_000_000_000_000: mc_str = f"{mc/10_000_000_000_000_000:.2f}경"
-        elif mc >= 1_000_000_000_000:    mc_str = f"{mc/1_000_000_000_000:.2f}조"
-        elif mc >= 100_000_000:          mc_str = f"{mc/100_000_000:.0f}억"
-        else:                            mc_str = f"{mc:,.0f}원"
+        _조 = 1_000_000_000_000
+        _경 = 10_000_000_000_000_000
+        if   mc >= _경:           mc_str = f"{mc/_경:.2f}경"
+        elif mc >= 100 * _조:     mc_str = f"{mc//_조:,.0f}조"
+        elif mc >= 10  * _조:     mc_str = f"{mc/_조:.0f}조"
+        elif mc >= _조:           mc_str = f"{mc/_조:.1f}조"
+        elif mc >= 100_000_000:   mc_str = f"{mc/100_000_000:.0f}억"
+        else:                     mc_str = f"{mc:,.0f}원"
 
         # HP / Shield
         hp       = m.get('hp', 0.0)

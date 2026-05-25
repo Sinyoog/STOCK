@@ -5,3 +5,6 @@ stock_data.db
 save_game.json
 fix.py
 *.zip
+*.db
+*.db-shm
+*.db-wal

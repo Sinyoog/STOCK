@@ -14,7 +14,9 @@ class EarningsManager:
     # ─────────────────────────────────────────────
     # 실적 수치 사전 확정 (PENDING 상태로 금고에 박제)
     # ─────────────────────────────────────────────
-    def calculate_potential_earnings(self, stock: dict) -> dict:
+    def calculate_potential_earnings(self, stock: dict,
+                                      _current_lv_cache: dict = None,
+                                      _old_lv_cache: dict = None) -> dict:
         meta = stock['meta']
         tier = meta.get('tier', '소형주')
 
@@ -49,24 +51,25 @@ class EarningsManager:
 
         revenue   = meta['assets'] * random.uniform(0.04, 0.10) * cycle_revenue_mult
 
-        # ★ 테크 레벨 성장 가중치
-        # 현재 테크 레벨 사업 보유 시 보너스, 구시대 사업은 페널티 없이 유지
+        # ★ 테크 레벨 성장 가중치 (캐시 우선 사용, 없으면 직접 계산)
         try:
-            from engine.constants import INDUSTRY_LEVELS
-            current_lv   = self.s.max_tech_reached
             ind          = meta.get('ind', '')
             current_subs = [x.strip() for x in meta.get('sub', '').split(',')]
-            lv_industries = INDUSTRY_LEVELS.get(ind, {})
-
-            current_lv_list = lv_industries.get(current_lv, [])
-            old_lv_list = []
-            for lv in range(1, current_lv):
-                old_lv_list.extend(lv_industries.get(lv, []))
+            if _current_lv_cache is not None:
+                current_lv_list = _current_lv_cache.get(ind, [])
+                old_lv_list     = _old_lv_cache.get(ind, [])
+            else:
+                from engine.constants import INDUSTRY_LEVELS
+                current_lv    = self.s.max_tech_reached
+                lv_industries = INDUSTRY_LEVELS.get(ind, {})
+                current_lv_list = lv_industries.get(current_lv, [])
+                old_lv_list = [s for lv in range(1, current_lv)
+                               for s in lv_industries.get(lv, [])]
 
             if any(s in current_lv_list for s in current_subs):
-                tech_mult = 1.3   # 현재 테크 사업 → 30% 성장 보너스
+                tech_mult = 1.3
             elif any(s in old_lv_list for s in current_subs):
-                tech_mult = 1.0   # 구시대 사업 → 페널티 없이 유지
+                tech_mult = 1.0
             else:
                 tech_mult = 1.0
         except Exception:
@@ -383,11 +386,25 @@ class EarningsManager:
 
         # 1일: 다음 실적 발표일 예약 + 수치 확정
         if cur_month in [2, 5, 8, 11] and cur_day == 1:
+            # ★ INDUSTRY_LEVELS 캐시 — 400종목 루프에서 매번 import 방지
+            from engine.constants import INDUSTRY_LEVELS as _IL
+            current_lv = self.s.max_tech_reached
+            # 현재 레벨 산업 목록 및 구세대 산업 목록을 미리 계산 (루프 밖 1회)
+            _current_lv_cache = {
+                ind: _IL.get(ind, {}).get(current_lv, [])
+                for ind in _IL
+            }
+            _old_lv_cache = {
+                ind: [s for lv in range(1, current_lv) for s in _IL.get(ind, {}).get(lv, [])]
+                for ind in _IL
+            }
             for stock in self.s.stocks:
                 meta = stock['meta']
-                meta['report_day']         = random.randint(7, 28)
-                meta['earning_news_date']  = self.s.current_date.strftime('%Y-%m-%d')
-                meta['expected_earnings']  = self.calculate_potential_earnings(stock)
+                meta['report_day']        = random.randint(7, 28)
+                meta['earning_news_date'] = self.s.current_date.strftime('%Y-%m-%d')
+                meta['expected_earnings'] = self.calculate_potential_earnings(
+                    stock, _current_lv_cache, _old_lv_cache
+                )
                 is_surplus = meta['expected_earnings'].get('is_surplus', True)
                 meta['momentum'] += 0.05 if is_surplus else -0.05
 

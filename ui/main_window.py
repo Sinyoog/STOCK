@@ -4,6 +4,7 @@ StockHTS: 메인 HTS 프레임.
 엔진 데이터를 직접 건드리지 않고 game_service만 호출합니다.
 """
 import math
+import threading
 from datetime import datetime, timedelta
 import pyqtgraph as pg
 
@@ -359,9 +360,13 @@ class StockHTS(QMainWindow):
                 else:
                     s.has_paid_news_access = False
 
-        # 금요일 자동 저장
+        # 금요일 자동 저장 (비동기 — UI 멈춤 방지)
         if s.virtual_weekday == 4:
-            self.game_service.save_game(self.my_cash, self.my_portfolio)
+            threading.Thread(
+                target=self.game_service.save_game,
+                args=(self.my_cash, self.my_portfolio),
+                daemon=True
+            ).start()
 
         self.sync_ui_with_engine()
 
@@ -503,8 +508,37 @@ class StockHTS(QMainWindow):
     # ─────────────────────────────────────────────
     def save_and_exit(self):
         self.game_service.save_game(self.my_cash, self.my_portfolio)
+        # DB 명시적 종료 — 종료 딜레이 방지
+        if hasattr(self.game_service, 'persistence'):
+            self.game_service.persistence.close()
         from PyQt6.QtWidgets import QApplication
         QApplication.quit()
+
+    def _post_reset_ui(self):
+        """reset 완료 후 메인 스레드에서 UI 갱신"""
+        self.sync_ui_with_engine()
+        self.report_panel.clear()
+        # 차트 명시적 초기화 — 빈 데이터로 0~1 축 뜨는 문제 방지
+        self.curve.setData([1000.0, 1000.0])
+        self.curve.setPen(pg.mkPen(color='#00FF00', width=2))
+        self.chart_widget.setYRange(999.0, 1001.0)
+        self.baseline.setPos(1000.0)
+        self.chart_widget.getAxis('bottom').setTicks([[(0, "전일"), (1, "현재")]])
+        self.refresh_chart()
+
+    def closeEvent(self, event):
+        """메인 창 닫힐 때 타이머 정리 + DB 명시적 종료"""
+        if hasattr(self, 'auto_timer') and self.auto_timer is not None:
+            try:
+                self.auto_timer.stop()
+            except Exception:
+                pass
+        if hasattr(self.game_service, 'persistence'):
+            try:
+                self.game_service.persistence.close()
+            except Exception:
+                pass
+        event.accept()
 
     def reset_game_logic(self):
         if hasattr(self, 'news_window') and self.news_window:
@@ -518,7 +552,14 @@ class StockHTS(QMainWindow):
                 pass
         self.news_window = None
 
-        self.game_service.reset_game(self.my_cash, self.my_portfolio)
+        # DB DROP/재생성이 무거우므로 백그라운드 스레드에서 실행
+        import threading
+        def _do_reset():
+            self.game_service.reset_game(self.my_cash, self.my_portfolio)
+            # 완료 후 UI 갱신은 메인 스레드에서 (QTimer.singleShot 사용)
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, self._post_reset_ui)
+        threading.Thread(target=_do_reset, daemon=True).start()
         self.my_cash         = 1_000_000
         self.my_portfolio    = {}
         self.selected_stock_name = ""
@@ -1323,11 +1364,12 @@ class StockHTS(QMainWindow):
         size  = {"대형주": "[대기업]", "중형주": "[중견기업]", "소형주": "[중소기업]"}.get(m.get('tier','소형주'), "[중소기업]")
 
         def fmt_cap(v):
-            if v >= 1e16:  return f"{v/1e16:.2f}경"
-            elif v >= 1e15: return f"{v/1e15:.1f}천조"
-            elif v >= 1e12: return f"{v/1e12:.2f}조"
-            elif v >= 1e8:  return f"{v/1e8:.0f}억"
-            else:           return f"{v:,.0f}원"
+            if   v >= 1e16:          return f"{v/1e16:.2f}경"
+            elif v >= 100 * 1e12:    return f"{v//1e12:,.0f}조"   # 100조 이상 → 1,104조
+            elif v >= 10  * 1e12:    return f"{v/1e12:.0f}조"     # 10조~100조
+            elif v >= 1e12:          return f"{v/1e12:.1f}조"     # 1조~10조
+            elif v >= 1e8:           return f"{v/1e8:.0f}억"
+            else:                    return f"{v:,.0f}원"
 
         mc     = stock['market_cap']
         mc_str = fmt_cap(mc)
@@ -1576,7 +1618,7 @@ class InfoTableDialog(QDialog):
 
     def refresh_data(self):
         """전체 데이터 로드 및 캐시"""
-        delisted    = self.gs.s.delisted_stocks
+        delisted    = self.gs.get_delisted_stocks()
         total_count = len(delisted)
 
         # 총 개수 업데이트

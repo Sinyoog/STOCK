@@ -11,6 +11,21 @@ class NewsService:
     def __init__(self, state):
         self.s = state
 
+    def _is_subscribed(self) -> bool:
+        """next_billing_date 기준 구독 여부 — 해제 후에도 만료일까지 프리미엄 유지"""
+        from datetime import datetime
+        b_date = self.s.next_billing_date
+        if not b_date:
+            return False
+        if isinstance(b_date, str):
+            try:    b_date = datetime.strptime(b_date, '%Y-%m-%d').date()
+            except: return False
+        elif hasattr(b_date, 'date'):
+            b_date = b_date.date()
+        cur = self.s.current_date
+        cur_date = cur.date() if hasattr(cur, 'date') else cur
+        return cur_date <= b_date
+
     # ─────────────────────────────────────────────
     # 현재 날짜 기준 뉴스 목록 생성
     # ─────────────────────────────────────────────
@@ -28,7 +43,7 @@ class NewsService:
             expected = meta.get('expected_earnings')
 
             if expected and self._is_earnings_day(meta, current_date):
-                if self.s.has_paid_news_access:
+                if self._is_subscribed():
                     net = expected.get('net_income', 0)
                     content = f"[{name}] 분기 실적 발표: 당기순이익 {int(net):,}원 달성"
                 else:
@@ -83,7 +98,7 @@ class NewsService:
         cumulative  = []
         curr_dt_obj = self.s.current_date
         curr_date   = curr_dt_obj.date()
-        is_sub      = self.s.has_paid_news_access
+        is_sub      = self._is_subscribed()
 
         # 1. 상장 예정 리스트
         for stock in self.s.pending_listings:
@@ -403,7 +418,7 @@ class NewsService:
             return f"{q_name}\n데이터 분석 중입니다..."
 
         # 프리미엄 미구독 + 예고 → 예상 공시일만 표시
-        if mode == "예고" and not self.s.has_paid_news_access:
+        if mode == "예고" and not self._is_subscribed():
             d_val = r_date.strftime('%Y년 %m월 %d일') if r_date else '예정'
             return (
                 f"■ {q_name} 실적 예고\n"

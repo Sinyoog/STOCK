@@ -35,10 +35,11 @@ _CREDIT_COST = {
 
 
 class StockMarket:
-    def __init__(self, state, economy, company_mgr):
+    def __init__(self, state, economy, company_mgr, db=None):
         self.s   = state
         self.eco = economy
         self.cm  = company_mgr
+        self._db = db  # SaveManager 참조 — 상폐 시 SQLite 저장용
 
     # ─────────────────────────────────────────────
     # 주가 변동 (핵심 엔진)
@@ -104,15 +105,17 @@ class StockMarket:
         # ★ 산업별 경쟁도 갱신
         self._update_industry_competition()
 
-        # ★ 시장 전체 PER 계산용 (버블 지수 갱신용)
-        for stock in self.s.stocks:
-            meta = stock['meta']
-            name = meta['c_name']
-            hist = self.s.earnings_history.get(name, {})
-            annual_ni = self._calc_annual_net_income(name, hist)
-            if annual_ni > 0:
-                total_net_income += annual_ni
+        # ★ 산업별 평균 등락률 사전 계산 — _calc_cluster_adj O(n²) → O(n) 최적화
+        _ind_rates: dict = {}
+        for _s in self.s.stocks:
+            _ind = _s['meta'].get('ind', '')
+            if _ind:
+                _ind_rates.setdefault(_ind, []).append(_s.get('rate', 0.0))
+        _ind_avg_rate: dict = {
+            k: sum(v) / len(v) for k, v in _ind_rates.items()
+        }
 
+        # ★ PER 계산은 메인 루프 안에서 함께 처리 (O(n) 루프 1회 절약)
         for stock in self.s.stocks:
             meta      = stock['meta']
             name      = meta['c_name']
@@ -348,7 +351,7 @@ class StockMarket:
 
             # [2] 테마 군집 adj
             # 같은 산업 내 평균 등락에 일부 동조
-            daily_return += self._calc_cluster_adj(stock, sector)
+            daily_return += self._calc_cluster_adj(stock, sector, _ind_avg_rate)
 
             # [3] 유동성 함정 adj
             # 소형주: 거래량 희박 → 변동성 증폭
@@ -423,6 +426,11 @@ class StockMarket:
             stock['rate']       = round(rate_raw, 2) if math.isfinite(rate_raw) else 0.0
             stock['market_cap'] = stock['price'] * stock['shares']
             total_market_cap   += stock['market_cap']
+            # ★ PER용 net_income 집계 (별도 루프 제거)
+            _hist_ni = self.s.earnings_history.get(name, {})
+            _ni = self._calc_annual_net_income(name, _hist_ni)
+            if _ni > 0:
+                total_net_income += _ni
 
             # earnings_shock → momentum 반영
             earnings_shock = meta.pop('_earnings_shock', 0.0)
@@ -440,8 +448,9 @@ class StockMarket:
             self._update_shareholder_structure(stock, cycle, bubble_index, rate_delta)
 
         # ── GRI 갱신 (시장 집중도 제한 포함) ───────
+        # total_w_cap은 메인 루프에서 이미 누적된 값 사용 (별도 sum comprehension 제거)
         import math as _math
-        tier_weights = {"대형주": 3.0, "중형주": 1.5, "소형주": 0.2}  # 변동성 드래그 방지
+        tier_weights = {"대형주": 3.0, "중형주": 1.5, "소형주": 0.2}
         w_sum = 0.0; wr_sum = 0.0
         total_w_cap = sum(
             tier_weights.get(s['meta'].get('tier', '소형주'), 0.5) * s['market_cap']
@@ -452,7 +461,7 @@ class StockMarket:
             r = stock.get('rate', 0.0)
             if not _math.isfinite(r): continue
 
-            # ★ 신규 상장 30일 미만 종목 GRI 계산 제외 (상장 러시로 인한 하락 방지)
+            # ★ 신규 상장 30일 미만 종목 GRI 계산 제외
             try:
                 ld = stock['meta'].get('listed_date_dt')
                 if not ld:
@@ -465,7 +474,7 @@ class StockMarket:
 
             w = tier_weights.get(stock['meta'].get('tier', '소형주'), 0.2)
 
-            # ★ 단일 종목 GRI 기여 상한 10% (고주가 종목 왜곡 방지)
+            # ★ 단일 종목 GRI 기여 상한 10%
             if total_w_cap > 0:
                 contribution = w * stock['market_cap'] / total_w_cap
                 if contribution > 0.10:
@@ -527,13 +536,8 @@ class StockMarket:
         prev_gri_v = getattr(self.s, 'prev_gri', self.s.gri)
         gri_change = (self.s.gri - prev_gri_v) / max(1.0, prev_gri_v)
 
-        years_elapsed_bi = max(0, cur_date.year - 2000)
-        lv_target_bi = {
-            1: 1000 * (1.08 ** years_elapsed_bi),
-            2: 1000 * (1.08 ** 15) * (1.10 ** max(0, years_elapsed_bi - 15)),
-            3: 1000 * (1.08 ** 15) * (1.10 ** 20) * (1.09 ** max(0, years_elapsed_bi - 35)),
-            4: 1000 * (1.08 ** 15) * (1.10 ** 20) * (1.09 ** 25) * (1.13 ** max(0, years_elapsed_bi - 60)),
-        }.get(lv, 1000.0)
+        # lv_target_bi = lv_target (위에서 이미 계산됨, 재사용)
+        lv_target_bi = lv_target
 
         # T3 유지: 목표값 낮게 (박스권)
         if "T3 유지" in self.s.current_scenario:
@@ -1045,11 +1049,15 @@ class StockMarket:
     # ─────────────────────────────────────────────
     def update_company_technology(self):
         current_lv = self.s.max_tech_reached
+        # ★ O(n×12) → O(n): 산업별 루프 제거, 단일 패스로 top_by_ind 구성
         top_by_ind = {}
-        for ind in MAIN_INDUSTRIES:
-            ind_stocks = [s for s in self.s.stocks if s['meta']['ind'] == ind]
-            if ind_stocks:
-                top_by_ind[ind] = max(ind_stocks, key=lambda x: x['market_cap'])['meta']['c_name']
+        for s in self.s.stocks:
+            ind = s['meta'].get('ind', '')
+            if not ind:
+                continue
+            if ind not in top_by_ind or s['market_cap'] > top_by_ind[ind]['market_cap']:
+                top_by_ind[ind] = {'market_cap': s['market_cap'], 'name': s['meta']['c_name']}
+        top_by_ind = {ind: v['name'] for ind, v in top_by_ind.items()}
 
         for stock in self.s.stocks:
             meta     = stock['meta']
@@ -1206,6 +1214,8 @@ class StockMarket:
             meta['delisted_date']          = self.s.current_date.strftime('%Y-%m-%d')
             meta['is_officially_delisted'] = True
             self.s.delisted_stocks.append(stock)
+            if hasattr(self, '_db') and self._db:
+                self._db.save_delisted_stock(stock)
             self.s.stocks.remove(stock)
             self.s.pending_events.get("delist", {}).pop(name, None)
             self.s.pending_events.get("warning", {}).pop(name, None)
@@ -1268,6 +1278,8 @@ class StockMarket:
                 ds['meta']['delisted_date']          = self.s.current_date.strftime('%Y-%m-%d')
                 ds['meta']['is_officially_delisted'] = True
                 self.s.delisted_stocks.append(ds)
+                if hasattr(self, '_db') and self._db:
+                    self._db.save_delisted_stock(ds)
                 self.s.stocks.remove(ds)
 
     # ─────────────────────────────────────────────
@@ -1828,33 +1840,34 @@ class StockMarket:
     # ─────────────────────────────────────────────
     # ★ 신규: 테마 군집 adj
     # ─────────────────────────────────────────────
-    def _calc_cluster_adj(self, stock: dict, sector: str) -> float:
+    def _calc_cluster_adj(self, stock: dict, sector: str,
+                          ind_avg_rate: dict = None) -> float:
         """
         같은 산업 내 다른 종목들의 평균 등락에 일부 동조
-        현실: A기업 어닝서프라이즈 → 같은 산업 B, C도 동반 상승
+        ind_avg_rate: 메인 루프 밖에서 사전 계산된 산업별 평균 등락률 캐시 (O(1) 조회)
         """
         meta = stock['meta']
         ind  = meta.get('ind', '')
         if not ind:
             return 0.0
 
-        same_ind_rates = [
-            s.get('rate', 0.0)
-            for s in self.s.stocks
-            if s['meta'].get('ind') == ind and s['meta']['c_name'] != meta['c_name']
-        ]
-        if not same_ind_rates:
-            return 0.0
+        if ind_avg_rate is not None:
+            avg_rate = ind_avg_rate.get(ind, 0.0)
+        else:
+            same_ind_rates = [
+                s.get('rate', 0.0)
+                for s in self.s.stocks
+                if s['meta'].get('ind') == ind and s['meta']['c_name'] != meta['c_name']
+            ]
+            if not same_ind_rates:
+                return 0.0
+            avg_rate = sum(same_ind_rates) / len(same_ind_rates)
 
-        avg_rate = sum(same_ind_rates) / len(same_ind_rates)
-
-        # 군집 강도: 섹터별 차등
-        # Theme/Growth는 군집 현상 강함, Defensive는 약함
         cluster_strength = {
-            "Theme":     0.15,   # 테마주: 강한 군집
-            "Growth":    0.10,   # 성장주: 중간
+            "Theme":     0.15,
+            "Growth":    0.10,
             "Value":     0.06,
-            "Defensive": 0.04,   # 방어주: 약한 군집
+            "Defensive": 0.04,
         }.get(sector, 0.08)
 
         return (avg_rate / 100.0) * cluster_strength

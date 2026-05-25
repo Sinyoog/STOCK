@@ -64,33 +64,47 @@ class EventDispatcher:
             # 6월/12월 티어 심사 D-7 예고 + D-Day 실행
             self._check_tier_exam(silent)
 
-            # DB 저장
+            # DB 저장 (모든 INSERT를 모은 뒤 flush_daily_db로 commit 1회)
             date_str   = self.s.current_date.strftime('%Y-%m-%d')
-            # GRI 일별 저장
+            # GRI 일별 저장 (commit 없음)
             self.db.insert_gri_record(
                 date_str,
                 self.s.gri,
                 getattr(self.s, 'bubble_index', 0.0)
             )
-            db_records = []
+            db_records    = []
+            vol_records   = []
             for stock in self.s.stocks:
                 # ★ 거시경제 섹터 민감도 적용 (유가/환율/금리 → 섹터별 주가)
                 rate = stock.get('rate', 0.0)
                 adjusted_rate = self.eco.apply_macro_sector_sensitivity(stock, rate)
                 if adjusted_rate != rate:
-                    # 섹터 조정분을 주가에 반영
                     adj_delta = (adjusted_rate - rate) / 100.0
                     stock['price'] = max(10, int(stock['price'] * (1 + adj_delta)))
                     stock['market_cap'] = stock['price'] * stock['shares']
                 self.mkt.apply_stock_event(stock, silent)
-                db_records.append((date_str, stock['meta']['c_name'],
+                name = stock['meta']['c_name']
+                db_records.append((date_str, name,
                                    int(stock['price']), int(stock['market_cap'])))
+                # 투자자 거래량 배치 수집 — state.daily_volume 마지막 항목에서 읽기
+                _vol_today = self.s.daily_volume.get(name, [])
+                _vt = _vol_today[-1] if _vol_today else {}
+                vol_records.append((
+                    date_str, name,
+                    int(_vt.get('foreign', 0)),
+                    int(_vt.get('inst',    0)),
+                    int(_vt.get('retail',  0)),
+                ))
 
             # 분할/병합 발생 시 과거 주가 DB 보정
             for name, ratio in self.s.daily_splits.items():
                 self.db.update_adjusted_price(name, ratio)
 
+            # 주가·거래량 일괄 INSERT (commit 없음)
             self.db.insert_stock_records(db_records)
+            self.db.insert_investor_volume_batch(vol_records)
+            # ★ 하루치 전체를 commit 1회로 마무리
+            self.db.flush_daily_db()
             self.mkt.check_delisting()
 
             # 지수 업데이트

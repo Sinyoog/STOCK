@@ -35,7 +35,7 @@ def create_app():
     persistence  = SaveManager(state)
     company_mgr  = CompanyManager(state)
     economy      = MacroEngine(state)
-    market       = StockMarket(state, economy, company_mgr)
+    market       = StockMarket(state, economy, company_mgr, db=persistence)
     earnings     = EarningsManager(state)
 
     # 3. 이벤트 디스패처 (next_day 순서 제어)

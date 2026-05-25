@@ -144,7 +144,7 @@ class NewsWindow(QDialog):
             self.all_events = self.all_events[:1000]
 
         is_sub     = self._is_subscribed()
-        will_renew = self.gs.s.has_paid_news_access
+        will_renew = self.gs.s.has_paid_news_access  # 이건 유지 (갱신 의사 표시용)
 
         if is_sub:
             expiry     = self.gs.s.next_billing_date
@@ -288,6 +288,8 @@ class NewsWindow(QDialog):
             except: return False
         elif hasattr(b_date, 'date'):
             b_date = b_date.date()
+        # 만료일이 지나지 않았으면 has_paid_news_access 관계없이 구독 중으로 판단
+        # (구독 해제는 갱신 안 함을 의미, 만료 전까지는 프리미엄 유지)
         return self.gs.s.current_date.date() <= b_date
 
     # ─────────────────────────────────────────────

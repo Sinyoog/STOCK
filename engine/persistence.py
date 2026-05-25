@@ -14,7 +14,49 @@ class SaveManager:
     def __init__(self, state):
         self.s    = state
         self.conn = sqlite3.connect("stock_data.db", check_same_thread=False)
+        # WAL 모드: commit 속도 대폭 개선 + 읽기/쓰기 동시성
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
         self._create_db()
+
+    def _slim_earnings_history(self) -> dict:
+        """earnings_history 최근 8분기(2년)만 유지 — JSON 경량화"""
+        slim = {}
+        for name, yearly in self.s.earnings_history.items():
+            recent_years = sorted(yearly.keys())[-2:]
+            slim[name] = {y: yearly[y] for y in recent_years}
+        return slim
+
+    def _slim_delisted_stocks(self) -> list:
+        """delisted_stocks 무거운 필드 제거 + datetime 직렬화 — JSON 경량화"""
+        _EXCLUDE = {
+            'pending_split', '_earnings_shock', '_earnings_just_released',
+            'momentum', 'cap_exceed_days', 'cap_below_days',
+            'split_cooldown_days', 'will_to_split',
+        }
+        result = []
+        for st in self.s.delisted_stocks:
+            slim_meta = {}
+            for k, v in st['meta'].items():
+                if k in _EXCLUDE:
+                    continue
+                slim_meta[k] = v.strftime("%Y-%m-%d %H:%M:%S") if isinstance(v, datetime) else v
+            result.append({
+                'price':      st.get('price', 0),
+                'shares':     st.get('shares', 0),
+                'market_cap': st.get('market_cap', 0),
+                'rate':       st.get('rate', 0.0),
+                'meta':       slim_meta,
+            })
+        return result
+
+    def close(self):
+        """게임 종료 시 명시적 DB 닫기 — 종료 딜레이 방지"""
+        try:
+            self.conn.commit()
+            self.conn.close()
+        except Exception:
+            pass
 
     # ─────────────────────────────────────────────
     # DB 초기화
@@ -57,22 +99,67 @@ class SaveManager:
                 CREATE INDEX IF NOT EXISTS idx_investor_volume_name_date
                 ON investor_volume (company_name, date DESC)
             """)
+            # ★ stock_history 인덱스 — company_name 풀스캔 방지
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stock_history_name
+                ON stock_history (company_name)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stock_history_name_date
+                ON stock_history (company_name, date DESC)
+            """)
+            # ★ delisted_stocks 테이블 — JSON 대신 SQLite 관리
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS delisted_stocks (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    c_name        TEXT NOT NULL,
+                    listed_date   TEXT,
+                    delisted_date TEXT,
+                    tier          TEXT,
+                    ind           TEXT,
+                    sub           TEXT,
+                    grp           TEXT,
+                    price         REAL,
+                    shares        INTEGER,
+                    market_cap    REAL,
+                    rate          REAL,
+                    meta_json     TEXT
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_delisted_name
+                ON delisted_stocks (c_name)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_delisted_date
+                ON delisted_stocks (delisted_date DESC)
+            """)
             self.conn.commit()
         except Exception as e:
             print(f"❌ DB 테이블 생성 실패: {e}")
 
     def insert_investor_volume(self, date_str: str, name: str,
                                foreign_vol: int, inst_vol: int, retail_vol: int):
-        """일별 투자자별 거래량 저장"""
+        """단건 거래량 저장 (commit 없음 — flush_daily_db 에서 일괄 커밋)"""
         try:
-            cur = self.conn.cursor()
-            cur.execute(
+            self.conn.execute(
                 "INSERT OR REPLACE INTO investor_volume VALUES (?, ?, ?, ?, ?)",
                 (date_str, name, int(foreign_vol), int(inst_vol), int(retail_vol))
             )
-            self.conn.commit()
         except Exception as e:
             print(f"❌ 거래량 DB 저장 오류: {e}")
+
+    def insert_investor_volume_batch(self, records: list):
+        """[(date_str, name, f, i, r), ...] 일괄 INSERT (commit 없음 — flush_daily_db 에서 일괄 커밋)"""
+        if not records:
+            return
+        try:
+            safe = [(d, n, int(f), int(i), int(r)) for d, n, f, i, r in records]
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO investor_volume VALUES (?, ?, ?, ?, ?)", safe
+            )
+        except Exception as e:
+            print(f"❌ 거래량 DB 배치 저장 오류: {e}")
 
     def get_investor_volume(self, name: str, days: int = 1260,
                             since_date: str = None) -> list:
@@ -109,16 +196,103 @@ class SaveManager:
             return []
 
     def insert_gri_record(self, date_str: str, gri: float, bubble_index: float = 0.0):
-        """GRI 일별 데이터 저장"""
+        """GRI 일별 데이터 저장 (commit 없음 — flush_daily_db 에서 일괄 커밋)"""
         try:
-            cur = self.conn.cursor()
-            cur.execute(
+            self.conn.execute(
                 "INSERT OR REPLACE INTO gri_history VALUES (?, ?, ?)",
                 (date_str, round(gri, 2), round(bubble_index, 2))
             )
-            self.conn.commit()
         except Exception as e:
             print(f"❌ GRI DB 저장 오류: {e}")
+
+    def save_delisted_stock(self, stock: dict):
+        """상폐 종목 1개를 SQLite에 저장 — 상폐 발생 시 즉시 호출"""
+        import json as _json
+        meta = stock.get('meta', {})
+        _EXCLUDE = {
+            'pending_split', '_earnings_shock', '_earnings_just_released',
+            'momentum', 'cap_exceed_days', 'cap_below_days',
+            'split_cooldown_days', 'will_to_split',
+        }
+        from datetime import datetime as _dt
+        slim_meta = {}
+        for k, v in meta.items():
+            if k in _EXCLUDE: continue
+            slim_meta[k] = v.strftime("%Y-%m-%d") if isinstance(v, _dt) else v
+        try:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO delisted_stocks
+                   (c_name, listed_date, delisted_date, tier, ind, sub, grp,
+                    price, shares, market_cap, rate, meta_json)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    meta.get('c_name', ''),
+                    meta.get('listed_date', ''),
+                    meta.get('delisted_date', ''),
+                    meta.get('tier', '소형주'),
+                    meta.get('ind', ''),
+                    meta.get('sub', ''),
+                    meta.get('group', ''),
+                    float(stock.get('price', 0)),
+                    int(stock.get('shares', 0)),
+                    float(stock.get('market_cap', 0)),
+                    float(stock.get('rate', 0.0)),
+                    _json.dumps(slim_meta, ensure_ascii=False),
+                )
+            )
+            self.conn.commit()
+        except Exception as e:
+            print(f"❌ delisted_stocks DB 저장 오류: {e}")
+
+    def get_delisted_stocks(self) -> list:
+        """SQLite에서 상폐 종목 전체 조회 — 역사관 표시용"""
+        import json as _json
+        try:
+            cur = self.conn.cursor()
+            cur.execute("""
+                SELECT c_name, listed_date, delisted_date, tier, ind, sub,
+                       grp, price, shares, market_cap, rate, meta_json
+                FROM delisted_stocks ORDER BY id ASC
+            """)
+            result = []
+            for row in cur.fetchall():
+                meta = _json.loads(row[11]) if row[11] else {}
+                meta.update({
+                    'c_name': row[0], 'listed_date': row[1],
+                    'delisted_date': row[2], 'tier': row[3],
+                    'ind': row[4], 'sub': row[5], 'group': row[6],
+                })
+                result.append({
+                    'price': row[7], 'shares': row[8],
+                    'market_cap': row[9], 'rate': row[10],
+                    'meta': meta,
+                })
+            return result
+        except Exception as e:
+            print(f"❌ delisted_stocks DB 조회 오류: {e}")
+            return []
+
+    def migrate_delisted_to_db(self, delisted_list: list):
+        """기존 JSON의 delisted_stocks를 SQLite로 일괄 이관 (최초 1회)"""
+        if not delisted_list:
+            return
+        try:
+            cur = self.conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM delisted_stocks")
+            if cur.fetchone()[0] > 0:
+                return  # 이미 이관됨
+            for stock in delisted_list:
+                self.save_delisted_stock(stock)
+            print(f"✅ delisted_stocks {len(delisted_list)}개 SQLite 이관 완료")
+        except Exception as e:
+            print(f"❌ delisted_stocks 이관 오류: {e}")
+
+    def flush_daily_db(self):
+        """하루치 INSERT를 모두 모은 뒤 한 번만 커밋 — next_day 끝에 1회 호출"""
+        try:
+            self.conn.commit()
+        except Exception as e:
+            print(f"❌ DB flush 오류: {e}")
 
     def get_gri_history(self, days: int = 0) -> list:
         """GRI 히스토리 조회. days=0이면 전체"""
@@ -209,12 +383,17 @@ class SaveManager:
             print(f"❌ DB 수정 주가 반영 실패: {e}")
 
     def clear_all_history(self):
+        """DB 전체 초기화 — DELETE 대신 DROP+재생성으로 속도 개선"""
         try:
             cur = self.conn.cursor()
-            cur.execute("DELETE FROM stock_history")
-            cur.execute("DELETE FROM gri_history")
-            cur.execute("DELETE FROM investor_volume")
+            # DROP TABLE이 DELETE보다 수십배 빠름 (수천만 행 삭제 시 렉 방지)
+            cur.execute("DROP TABLE IF EXISTS stock_history")
+            cur.execute("DROP TABLE IF EXISTS gri_history")
+            cur.execute("DROP TABLE IF EXISTS investor_volume")
+            cur.execute("DROP TABLE IF EXISTS delisted_stocks")
             self.conn.commit()
+            # 테이블 재생성
+            self._create_db()
         except Exception as e:
             print(f"❌ DB 초기화 중 오류: {e}")
 
@@ -224,14 +403,14 @@ class SaveManager:
     def save_game(self, my_cash: float, my_portfolio: dict, filename: str = "save_game.json"):
         try:
             stocks_to_save   = copy.deepcopy(self.s.stocks)
-            delisted_to_save = copy.deepcopy(self.s.delisted_stocks)
+            # delisted_stocks: 슬림화 + datetime 직렬화
+            delisted_to_save = self._slim_delisted_stocks()
 
-            for s_list in [stocks_to_save, delisted_to_save]:
-                for st in s_list:
-                    if 'meta' in st:
-                        for key, value in st['meta'].items():
-                            if isinstance(value, datetime):
-                                st['meta'][key] = value.strftime("%Y-%m-%d %H:%M:%S")
+            for st in stocks_to_save:
+                if 'meta' in st:
+                    for key, value in st['meta'].items():
+                        if isinstance(value, datetime):
+                            st['meta'][key] = value.strftime("%Y-%m-%d %H:%M:%S")
 
             save_data = {
                 "engine": {
@@ -253,7 +432,7 @@ class SaveManager:
                     "bubble_index":          getattr(self.s, 'bubble_index', 0.0),
                     "avg_earnings_growth":   getattr(self.s, 'avg_earnings_growth', 0.05),
                     "max_tech_reached":      self.s.max_tech_reached,
-                    "delisted_stocks":       delisted_to_save,
+                    "delisted_stocks":       [],  # SQLite delisted_stocks 테이블로 이관
                     "current_scenario":      self.s.current_scenario,
                     "world_line":            self.s.world_line,
                     "reserved_scenario":     self.s.reserved_scenario,
@@ -271,7 +450,7 @@ class SaveManager:
                     "tech_upgrade_year":     getattr(self.s, '_tech_upgrade_year', 1999),
                     "depression_warning_lv": getattr(self.s, '_depression_warning_sent_lv', 0),
                     "prev_macro_snapshot":   getattr(self.s, '_prev_macro_snapshot', {}),
-                    "earnings_history":      self.s.earnings_history,
+                    "earnings_history":      self._slim_earnings_history(),  # 최근 8분기만
                     "pending_delist":        {
                         k: {"date": v["date"].strftime("%Y-%m-%d") if hasattr(v.get("date"), "strftime") else str(v.get("date", "")), "reason": v.get("reason", "")}
                         if isinstance(v, dict) else str(v)
@@ -287,7 +466,7 @@ class SaveManager:
                     "margin_balance":        getattr(self.s, 'margin_balance', {}),
                     "earnings_consensus":    getattr(self.s, 'earnings_consensus', {}),
                     "major_holder_action":   getattr(self.s, 'major_holder_action', {}),
-                    "daily_volume":          getattr(self.s, 'daily_volume', {}),
+                    # daily_volume: SQLite investor_volume으로 관리 — JSON 제외
                     "pending_delist":        {
                         k: {"date": v["date"].strftime("%Y-%m-%d") if hasattr(v.get("date"), "strftime") else str(v.get("date", "")), "reason": v.get("reason", "")}
                         if isinstance(v, dict) else str(v)
@@ -334,7 +513,10 @@ class SaveManager:
             self.s.bubble_index          = eng.get("bubble_index", 0.0)
             self.s.avg_earnings_growth   = eng.get("avg_earnings_growth", 0.05)
             self.s.max_tech_reached      = eng["max_tech_reached"]
-            self.s.delisted_stocks       = eng["delisted_stocks"]
+            # delisted_stocks: JSON → SQLite 이관 (최초 1회)
+            json_delisted = eng.get("delisted_stocks", [])
+            self.migrate_delisted_to_db(json_delisted)
+            self.s.delisted_stocks = self.get_delisted_stocks()
             self.s.current_scenario      = eng["current_scenario"]
             self.s.world_line            = eng["world_line"]
             self.s.reserved_scenario     = eng.get("reserved_scenario", "")
@@ -399,44 +581,6 @@ class SaveManager:
                     if first_price > 10:
                         meta['initial_price'] = first_price
 
-            # 신규 필드 복원
-            self.s.gdp                = eng.get("gdp", 600_000_000_000_000.0)
-
-            # ★ initial_price 복원 (DB에서 첫 주가 조회)
-            # 기존 세이브 파일에 initial_price 없는 종목에 대해 DB에서 복원
-            for stock in self.s.stocks:
-                meta = stock['meta']
-                if not meta.get('initial_price') or meta.get('initial_price', 0) <= 10:
-                    name = meta.get('c_name', '')
-                    first_price = self.get_first_price(name)
-                    if first_price > 10:
-                        meta['initial_price'] = first_price
-
-            # delisted_stocks도 동일하게 복원
-            for stock in self.s.delisted_stocks:
-                meta = stock['meta']
-                if not meta.get('initial_price') or meta.get('initial_price', 0) <= 10:
-                    name = meta.get('c_name', '')
-                    first_price = self.get_first_price(name)
-                    if first_price > 10:
-                        meta['initial_price'] = first_price
-            self.s.buffett_index      = eng.get("buffett_index", 0.0)
-            self.s.foreign_flow_index = eng.get("foreign_flow_index", 0.0)
-
-            # pending_events delist 복원
-            pending_delist = eng.get("pending_delist", {})
-            self.s.pending_events["delist"] = {}
-            for k, v in pending_delist.items():
-                if isinstance(v, dict):
-                    date_str = v.get("date", "")
-                    try:
-                        from datetime import datetime as _dt
-                        self.s.pending_events["delist"][k] = {
-                            "date":   _dt.strptime(date_str, "%Y-%m-%d"),
-                            "reason": v.get("reason", "재무 파탄")
-                        }
-                    except Exception:
-                        pass
             self.s.has_paid_news_access  = eng.get("has_paid_news_access", False)
 
             billing_str = eng.get("next_billing_date")

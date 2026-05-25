@@ -278,7 +278,10 @@ class GameService:
         }
 
     def get_investor_volume(self, name: str, days: int = 252) -> list:
-        """호가창용 — DB 없이 state에서 직접 조회"""
+        """호가창용 — SQLite investor_volume 테이블에서 조회"""
+        if hasattr(self.db, 'get_investor_volume'):
+            return self.db.get_investor_volume(name, days)
+        # 폴백: state.daily_volume (구버전 호환)
         vol_list = self.s.daily_volume.get(name, [])
         return vol_list[-days:] if len(vol_list) > days else vol_list
 
@@ -290,6 +293,12 @@ class GameService:
             if s['meta']['c_name'] == name:
                 return s
         return None
+
+    def get_delisted_stocks(self) -> list:
+        """상폐 종목 전체 조회 — SQLite 우선, 폴백은 state"""
+        if hasattr(self.db, 'get_delisted_stocks'):
+            return self.db.get_delisted_stocks()
+        return self.s.delisted_stocks
 
     def get_delisted_stock_history(self, name: str) -> list:
         return self.db.get_chart_data(name, 999_999)
