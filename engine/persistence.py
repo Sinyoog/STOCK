@@ -383,16 +383,25 @@ class SaveManager:
             print(f"❌ DB 수정 주가 반영 실패: {e}")
 
     def clear_all_history(self):
-        """DB 전체 초기화 — DELETE 대신 DROP+재생성으로 속도 개선"""
+        """DB 전체 초기화 — DB 파일 자체 삭제 후 재생성 (가장 빠르고 완전한 초기화)"""
+        import os
+        db_file = "stock_data.db"
         try:
-            cur = self.conn.cursor()
-            # DROP TABLE이 DELETE보다 수십배 빠름 (수천만 행 삭제 시 렉 방지)
-            cur.execute("DROP TABLE IF EXISTS stock_history")
-            cur.execute("DROP TABLE IF EXISTS gri_history")
-            cur.execute("DROP TABLE IF EXISTS investor_volume")
-            cur.execute("DROP TABLE IF EXISTS delisted_stocks")
-            self.conn.commit()
-            # 테이블 재생성
+            # 연결 먼저 닫기
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+            # DB 파일 + WAL 부산물 삭제
+            for ext in ["", "-shm", "-wal"]:
+                path = db_file + ext
+                if os.path.exists(path):
+                    os.remove(path)
+            # 새 연결 + 재생성
+            import sqlite3
+            self.conn = sqlite3.connect(db_file, check_same_thread=False)
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
             self._create_db()
         except Exception as e:
             print(f"❌ DB 초기화 중 오류: {e}")
