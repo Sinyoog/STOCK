@@ -551,13 +551,101 @@ class MacroEngine:
                 annual_adj += delta  # 연간 % 기준
                 break
 
-        # ── 재건 섹터 조건부 강세 ─────────────────
-        if "재건" in ind:
+        # ────────────────────────────────────────────────────────
+        # ★ 3가지 필터: CPI 수준 / 금리 인상 속도 / 전쟁 단계
+        # ────────────────────────────────────────────────────────
+
+        cpi       = macro.get('cpi', 2.0)
+        prev_rate = self.s._prev_macro_snapshot.get('interest_rate', interest_rate)
+        rate_speed = interest_rate - prev_rate  # 양수=인상, 음수=인하
+
+        # ── 필터 1: CPI 수준 ─────────────────────
+        # 인플레 높으면 에너지/소재 수혜, 소비재 마진 압박
+        if cpi > 4.0:
+            if ind in ('에너지', '소재'):
+                annual_adj += (cpi - 4.0) * 0.012    # CPI 1%p당 +1.2%
+            if ind in ('필수소비재', '자유소비재'):
+                annual_adj -= (cpi - 4.0) * 0.008    # 원가 압박
+            if sector == 'Growth':
+                annual_adj -= (cpi - 4.0) * 0.005    # 실질금리 상승 타격
+        elif cpi < 2.0:
+            # 저물가 → 소비재/IT 유리
+            if ind in ('IT', '자유소비재'):
+                annual_adj += (2.0 - cpi) * 0.005
+
+        # ── 필터 2: 금리 인상 속도 ───────────────
+        # 급격한 인상(월 0.05%p 이상) → 성장주 충격
+        if rate_speed > 0.05:
+            if sector == 'Growth' or ind in ('IT', '건강관리', '커뮤니케이션'):
+                annual_adj -= rate_speed * 0.8    # 인상 속도 비례 타격
+            if ind == '금융':
+                annual_adj += rate_speed * 0.4    # 금융 수혜
+        elif rate_speed < -0.05:
+            # 급격한 인하(QE) → IT/금융 저평가 반등 주도
+            if sector == 'Growth' or ind in ('IT',):
+                annual_adj += abs(rate_speed) * 0.6
+            if ind == '금융':
+                annual_adj += abs(rate_speed) * 0.3
+
+        # ── 필터 3: 전쟁 단계별 섹터 영향 ───────
+        war = getattr(self.s, 'war_event', {})
+        war_phase = war.get('phase', '')
+        if war_phase == '진행중':
+            war_timer = war.get('timer', 0)
+            # war_duration은 초기 설정값을 저장해야 하므로 scenario_timer 활용
+            war_total = max(war_timer, 1)
+            # timer가 클수록 초기, 작을수록 종전 직전
+            # 단순히 timer 절대값으로 단계 구분
+            is_early  = war_timer > 365   # 1년 이상 남음 = 초기
+            is_late   = war_timer < 126   # 6개월 미만 남음 = 종전 직전
+
+            # 에너지: 초기 급등 → 후기 수요파괴로 하락
+            if '에너지' in ind:
+                if is_early:
+                    annual_adj += 0.08   # 초기 급등
+                elif is_late:
+                    annual_adj -= 0.04   # 수요파괴 시작
+                else:
+                    annual_adj += 0.02   # 중기 유지
+
+            # 소재: 초기 급등 유지
+            if '소재' in ind and is_early:
+                annual_adj += 0.05
+
+            # 재건: 종전 직전 선반영 급등
+            if '재건' in ind:
+                if is_late:
+                    annual_adj += 0.15   # 종전 선반영
+                elif is_early:
+                    annual_adj += 0.05   # 초기엔 소폭만
+                else:
+                    annual_adj += 0.08
+
+            # IT/성장주: 전쟁 중 불확실성 타격
+            if sector == 'Growth' and not is_late:
+                annual_adj -= 0.03
+
+        elif war_phase == '종전':
+            # 종전 후: 재건 피크 → 이후 점진 하락
+            recon_timer = war.get('recon_timer', 0)
+            if '재건' in ind:
+                if recon_timer > 400:    # 재건 초기 (피크)
+                    annual_adj += 0.25
+                elif recon_timer > 150:  # 재건 중기
+                    annual_adj += 0.12
+                else:                    # 재건 말기 (정상화)
+                    annual_adj += 0.03
+            # 종전 후 IT/성장주 회복
+            if sector == 'Growth':
+                annual_adj += 0.04
+
+        # ── 재건 섹터 조건부 강세 (기존 로직 유지) ───
+        if "재건" in ind and war_phase not in ('진행중', '종전'):
             is_depression = "대공황" in scenario and "극복" not in scenario
             timer = getattr(self.s, 'scenario_timer', 0)
             if is_depression or cycle == "수축":
                 if interest_rate < 5.0 and timer > 252 * 3:
-                    annual_adj += 0.15
+                    annual_adj += 0.10   # 0.15 → 0.10 하향
                 elif interest_rate > 8.0 or timer < 252:
                     annual_adj -= 0.10
 
@@ -566,20 +654,77 @@ class MacroEngine:
         sent_mult = 1.5 if tier == "소형주" else 0.8
         annual_adj += sent_diff * 0.03 * sent_mult
 
-        # ── 팬데믹 효과 ───────────────────────────
+        # ── 필터 4: 팬데믹 단계별 효과 ─────────
         pandemic = getattr(self.s, 'pandemic_event', {})
         if pandemic.get('phase') == '진행중':
-            if sector in ('Growth', 'Defensive') or ind in ('IT', '건강관리', '필수소비재'):
-                annual_adj += 0.15   # 비대면/IT/건강 수혜
-            elif sector == 'Theme' or ind in ('자유소비재', '부동산', '여행'):
-                annual_adj -= 0.20   # 오프라인 타격
+            pan_timer = pandemic.get('timer', 0)
+            is_pan_early = pan_timer > 300    # 팬데믹 초기
+            is_pan_late  = pan_timer < 100    # 팬데믹 말기/회복기
 
-        # ── 전쟁 재건 효과 ────────────────────────
-        war = getattr(self.s, 'war_event', {})
-        if war.get('phase') == '종전' and '재건' in ind:
-            annual_adj += 0.25   # 재건 섹터 강세
-        elif war.get('phase') == '진행중' and '재건' in ind:
-            annual_adj += 0.10   # 전쟁 중에도 재건 수혜 시작
+            if is_pan_early:
+                # 초기: 비대면/바이오 강세
+                if ind in ('IT', '건강관리', '필수소비재'):
+                    annual_adj += 0.15
+                if ind in ('자유소비재', '부동산'):
+                    annual_adj -= 0.20
+
+            elif is_pan_late:
+                # 말기: 금리 인상 반영 → IT 조정, 방어주 강세
+                if ind in ('IT', '커뮤니케이션') and interest_rate > 3.0:
+                    annual_adj -= 0.08   # 금리 인상 시 IT 조정
+                if sector == 'Defensive':
+                    annual_adj += 0.06
+                # 회복 선반영: 저평가 IT/금융 반등
+                if ind in ('IT', '금융') and interest_rate < 3.0:
+                    annual_adj += 0.10
+
+            else:
+                # 중기: 방어주 유지, IT 혼조
+                if sector == 'Defensive':
+                    annual_adj += 0.04
+                if ind == 'IT' and rate_speed > 0.03:
+                    annual_adj -= 0.06   # 금리 인상 속도 빠르면 IT 타격
+
+        # ── 필터 5: 기술 도약기 세부 사이클 ────
+        lv = self.s.max_tech_reached
+        tech_year = getattr(self.s, '_tech_upgrade_year', 2000)
+        years_since_tech = self.s.current_date.year - tech_year
+
+        if years_since_tech <= 3:   # 기술 전환 직후 3년
+            if lv == 2:
+                # Lv1→2: 소프트웨어/플랫폼 강세
+                if '소프트웨어' in ind or '플랫폼' in ind or '커뮤니케이션' in ind:
+                    annual_adj += 0.06
+            elif lv == 3:
+                # Lv2→3: 반도체/하드웨어 강세
+                if '반도체' in ind or 'IT' in ind:
+                    annual_adj += 0.06
+                if '유틸리티' in ind:
+                    annual_adj += 0.03  # 전력 인프라 동반
+            elif lv == 4:
+                # Lv3→4: AI/인프라 동반 강세
+                if 'IT' in ind:
+                    annual_adj += 0.05
+                if '유틸리티' in ind or '소재' in ind:
+                    annual_adj += 0.04  # AI 인프라 수요
+
+        # ── 필터 6: 금융위기 QE 반등 ────────────
+        if '금융위기' in scenario or '침체' in scenario:
+            timer = getattr(self.s, 'scenario_timer', 0)
+            is_crisis_late = timer < 180   # 위기 후반
+
+            if is_crisis_late:
+                # QE 시작 → IT/금융 저평가 반등 주도
+                if ind in ('IT', '금융') and interest_rate < 3.0:
+                    annual_adj += 0.08
+                elif sector == 'Defensive':
+                    annual_adj -= 0.03   # 방어주 이탈
+            else:
+                # 위기 초기: 방어주/필수소비재 강세
+                if sector == 'Defensive' or ind == '필수소비재':
+                    annual_adj += 0.05
+                if sector == 'Growth':
+                    annual_adj -= 0.04
 
         # 연간 조정값을 일별로 변환해서 perf에 추가
         perf += annual_adj / 252

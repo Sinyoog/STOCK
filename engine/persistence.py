@@ -32,7 +32,7 @@ class SaveManager:
         _EXCLUDE = {
             'pending_split', '_earnings_shock', '_earnings_just_released',
             'momentum', 'cap_exceed_days', 'cap_below_days',
-            'split_cooldown_days', 'will_to_split',
+            'split_cooldown_days', 'will_to_split', 'par_value',
         }
         result = []
         for st in self.s.delisted_stocks:
@@ -298,7 +298,7 @@ class SaveManager:
         _EXCLUDE = {
             'pending_split', '_earnings_shock', '_earnings_just_released',
             'momentum', 'cap_exceed_days', 'cap_below_days',
-            'split_cooldown_days', 'will_to_split',
+            'split_cooldown_days', 'will_to_split', 'par_value',
         }
         from datetime import datetime as _dt
         slim_meta = {}

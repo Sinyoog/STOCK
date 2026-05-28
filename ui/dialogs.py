@@ -1226,9 +1226,26 @@ class InvestorVolumeDialog(QDialog):
             color = "#FF4444" if v > 0 else ("#4444FF" if v < 0 else "#888888")
             return f"<span style='color:{color};font-weight:bold;'>{sign}{v:,}</span>"
 
+        # ★ 액면가 + tick_size 가져오기
+        stock_obj = next((s for s in self.gs.s.stocks
+                         if s['meta'].get('c_name') == self.stock_name), None)
+        par_val  = stock_obj['meta'].get('par_value', 500) if stock_obj else 500
+        cur_price = int(stock_obj['price']) if stock_obj else 0
+        tick = 1
+        if cur_price >= 500_000:   tick = 1_000
+        elif cur_price >= 200_000: tick = 500
+        elif cur_price >= 50_000:  tick = 100
+        elif cur_price >= 20_000:  tick = 50
+        elif cur_price >= 5_000:   tick = 10
+        elif cur_price >= 2_000:   tick = 5
+
         self.summary_label.setText(
             f"1년 합산 &nbsp;|&nbsp; "
             f"외국인: {fmt(total_f)} &nbsp; "
             f"기관: {fmt(total_i)} &nbsp; "
-            f"개인: {fmt(total_r)}"
+            f"개인: {fmt(total_r)} "
+            f"&nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"<span style='color:#FFD700;'>액면가: {par_val:,}원</span> "
+            f"&nbsp; "
+            f"<span style='color:#AAAAAA;'>호가단위: {tick:,}원</span>"
         )

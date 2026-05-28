@@ -79,13 +79,16 @@ class CompanyManager:
         actual_lv    = self.state.max_tech_reached
         sector       = SECTOR_MAP.get(ind, "Value")
 
-        # 1. 황제주 성향
-        dice_split   = random.random()
-        will_to_split = {
-            "대":  dice_split > 0.25,
-            "대1": dice_split > 0.25,
-            "중":  dice_split > 0.05,
-        }.get(tier, True)
+        # 1. 분할 의지 — 섹터별 현실 반영
+        dice_split = random.random()
+        # Growth: 90%, Value: 40%, Defensive: 20%, Theme: 70%
+        split_prob = {
+            "Growth":    0.10,   # 90% 분할 의지
+            "Value":     0.60,   # 40%
+            "Defensive": 0.80,   # 20%
+            "Theme":     0.30,   # 70%
+        }.get(sector, 0.40)
+        will_to_split = dice_split > split_prob
 
         # 2. 자사주
         sector_ts_range = {
@@ -194,6 +197,7 @@ class CompanyManager:
             "meta": {
                 "c_name":               full_name,
                 "will_to_split":        will_to_split,
+                "par_value":            500,   # ★ 액면가 500원 (한국 표준)
                 "listed_date_dt":       current_date,
                 "listed_date":          current_date.strftime('%Y-%m-%d'),
                 "group_id":             group_id,

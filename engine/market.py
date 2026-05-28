@@ -1655,63 +1655,146 @@ class StockMarket:
             meta['char'] = "Normal"
 
     # ─────────────────────────────────────────────
-    # ★ 액면분할 (정상화)
+    # ★ 액면분할 — 섹터별 트리거/비율/쿨다운/횟수 차별화
     # ─────────────────────────────────────────────
+    @staticmethod
+    def get_tick_size(price: int) -> int:
+        """현실 한국 주식 호가 단위"""
+        if price < 2_000:        return 1
+        elif price < 5_000:      return 5
+        elif price < 20_000:     return 10
+        elif price < 50_000:     return 50
+        elif price < 200_000:    return 100
+        elif price < 500_000:    return 500
+        else:                    return 1_000
+
     def _handle_stock_split(self, stock: dict, silent: bool = False):
         meta    = stock['meta']
-        price   = stock['price']
+        price   = int(stock['price'])
         shares  = stock['shares']
         tier    = meta['tier']
-        sector  = SECTOR_MAP.get(meta['ind'], "Value")
+        ind     = meta.get('ind', '')
+        sector  = SECTOR_MAP.get(ind, "Value")
         self.s.daily_splits = getattr(self.s, 'daily_splits', {})
 
         # ★ 소형주는 분할 없음
         if "소형" in tier:
             return
 
-        # ★ will_to_split=False면 거의 분할 안 함
-        if not meta.get('will_to_split', True):
-            if price < 100_000_000:   # 1억원 미만이면 절대 안 함
-                return
-            if random.random() > 0.002:
-                return
+        # ★ 섹터별 설정
+        SPLIT_CFG = {
+            #            트리거      하한가    쿨다운  최대횟수  의지확률
+            "Growth":    (3_000_000,  300_000,  180,   99,   0.95),
+            "Value":     (5_000_000, 1_000_000, 540,    5,   0.60),
+            "Defensive": (3_000_000,  500_000,  360,    3,   0.35),
+            "Theme":     (1_500_000,  150_000,   90,    2,   0.80),
+        }
+        cfg = SPLIT_CFG.get(sector, SPLIT_CFG["Value"])
+        trigger, price_floor, cooldown_days, max_count, will_prob = cfg
 
-        # ★ 생애 최대 3회 제한 (기존 5회 → 3회, 주식수 폭발 방지)
-        split_count = meta.get('split_count', 0)
-        if split_count >= 3:
+        # ★ will_to_split: 최초 1회만 결정 (섹터별 의지확률 반영)
+        if 'will_to_split' not in meta:
+            meta['will_to_split'] = (random.random() < will_prob)
+
+        if not meta['will_to_split']:
+            # 주가 구간별 매일 재평가 — 높을수록 확률 증가 (한국 시장 기준)
+            # 500~700만:  0.8%/일 → 90일 51%
+            # 700~900만:  1.2%/일 → 90일 66%
+            # 900~1200만: 1.8%/일 → 90일 80%
+            # 1200~1600만:2.5%/일 → 90일 90%
+            # 1600만+:    4.0%/일 → 90일 98%
+            over = price - trigger
+            if over > 0:
+                if   price < trigger + 2_000_000: daily_p = 0.008
+                elif price < trigger + 4_000_000: daily_p = 0.012
+                elif price < trigger + 7_000_000: daily_p = 0.018
+                elif price < trigger +11_000_000: daily_p = 0.025
+                else:                             daily_p = 0.040
+                if random.random() < daily_p:
+                    meta['will_to_split'] = True
             return
 
-        # ★ 쿨다운: 1260 거래일(5년) 이상 경과해야 분할 가능 (기존 3년 → 5년)
+        # ★ 최대 횟수
+        split_count = meta.get('split_count', 0)
+        if split_count >= max_count:
+            return
+
+        # ★ 쿨다운
         cooldown = meta.get('split_cooldown_days', 0)
         if cooldown > 0:
             meta['split_cooldown_days'] = cooldown - 1
             return
 
-        # ★ 트리거 조건 상향 (주식수 폭발 방지)
+        # ── 유통주식수 (거래량 트리거 판단용) ──────────────────────────────
+        fixed_ratio  = meta.get('treasury_share', 0.0) + meta.get('owner_share', 0.0)
+        float_shares = max(1, int(shares * (1.0 - fixed_ratio)))
+        avg_vol      = meta.get('avg_daily_volume', float_shares * 0.003)
+
+        # ★ 트리거 체크
         split_ratio = 0
-        if "대형" in tier:
-            trigger = 50_000_000    # 5000만원 (기존 500만원 → 10배)
-        else:  # 중형주
-            trigger = 20_000_000    # 2000만원 (기존 200만원 → 10배)
 
-        if price >= trigger:
-            # ★ 분할 비율 최대 5:1 (50:1 삭제)
-            if price >= trigger * 5:   # 5배 이상
-                split_ratio = 5
-            elif price >= trigger * 2: # 2~5배
-                split_ratio = 3
-            else:                      # 1~2배
-                split_ratio = 2
-
-            # ★ 일일 확률 1%로 낮춤 (기존 5% → 1%)
-            if random.random() > 0.01:
+        if sector == "Theme":
+            # 테마주: 주가 + 1개월 급등 동시 충족
+            rate_1m = meta.get('rate_1m', stock.get('rate', 0.0))
+            if price < trigger or rate_1m < 30.0:
                 return
+            if random.random() > 0.03:
+                return
+            split_ratio = 10 if rate_1m >= 100.0 else 5
+        elif sector == "Defensive":
+            # 방어주: 유동성 트리거 우선, 가격 트리거 보조
+            liquidity_starved = (avg_vol < float_shares * 0.0003) and (price >= 1_000_000)
+            price_hit         = (price >= trigger)
+            if not (liquidity_starved or price_hit):
+                return
+            pass_prob = 0.015 if liquidity_starved else 0.010
+            if random.random() > pass_prob:
+                return
+            split_ratio = 2
+        elif sector == "Value":
+            # 가치주: 고가 트리거, 거래량 충분하면 억제
+            if price < trigger:
+                return
+            if avg_vol >= float_shares * 0.0005:
+                if random.random() > 0.10:
+                    return
+            if random.random() > 0.012:
+                return
+            # ★ 주가 구간별 분할 비율 (하한가 50만원 기준)
+            # 현실: 삼성전자 270만→50배, 한국 가치주 분할 후 50~200만원대
+            max_ratio = min(10, price // 500_000)  # 하한가 50만원
+            if   price >= trigger * 6: split_ratio = min(10, max_ratio)  # 3000만+
+            elif price >= trigger * 4: split_ratio = min(8,  max_ratio)  # 2000만+
+            elif price >= trigger * 2: split_ratio = min(5,  max_ratio)  # 1000만+
+            elif price >= trigger * 1.4: split_ratio = min(3, max_ratio) # 700만+
+            else:                      split_ratio = 2                   # 500~700만
+            split_ratio = max(2, split_ratio)
+        else:  # Growth
+            if price < trigger:
+                return
+            if random.random() > 0.015:
+                return
+            # 분할 후 하한가(price_floor) 유지하는 최대 비율
+            max_ratio = min(10, price // price_floor)
+            if   price >= trigger * 10: split_ratio = min(10, max_ratio)
+            elif price >= trigger * 5:  split_ratio = min(5,  max_ratio)
+            elif price >= trigger * 2:  split_ratio = min(3,  max_ratio)
+            else:                       split_ratio = 2
 
-        if split_ratio == 0:
-            # 병합 조건 (주가 1000원 미만)
+        if split_ratio < 2:
             if price < 1000:
                 self._handle_stock_merge(stock, silent)
             return
+
+        # ★ 액면가 하한 체크 (100원 미만 동전주 방지)
+        par_value = meta.get('par_value', 500)
+        new_par   = par_value / split_ratio
+        if new_par < 100:
+            # 최대 가능 비율로 조정
+            split_ratio = max(2, int(par_value // 100))
+            new_par = par_value / split_ratio
+            if new_par < 100 or split_ratio < 2:
+                return  # 이미 최소 액면가 → 분할 불가
 
         # ★ D-7 예약
         if not meta.get('pending_split'):
@@ -1722,7 +1805,8 @@ class StockMarket:
             }
             if self.s.has_paid_news_access:
                 self.s.daily_news.append(
-                    f"💎 [분할예고] {meta['c_name']} 7일 후 1:{split_ratio} 액면분할 예정 (프리미엄 전용)"
+                    f"💎 [분할예고] {meta['c_name']} 7일 후 1:{split_ratio} 액면분할 예정 "
+                    f"(액면가 {par_value}원 → {int(new_par)}원) (프리미엄 전용)"
                 )
             return
 
@@ -1735,18 +1819,28 @@ class StockMarket:
             meta.pop('pending_split', None)
 
             old_name = meta['c_name']
-            stock['price']  //= split_ratio
-            stock['shares']  *= split_ratio
+            new_price = int(stock['price']) // split_ratio
+            stock['price']      = new_price
+            stock['shares']    *= split_ratio
             stock['market_cap'] = stock['price'] * stock['shares']
             meta['split_count'] = split_count + 1
+            meta['par_value']   = int(par_value / split_ratio)  # ★ 액면가 갱신
+            meta['split_cooldown_days'] = cooldown_days
 
-            # ★ 쿨다운 초기화 (252 거래일 = 1년으로 단축)
-            meta['split_cooldown_days'] = 252
+            # ★ 주가 tick_size 정합성 맞추기
+            tick = self.get_tick_size(new_price)
+            stock['price'] = (new_price // tick) * tick
 
             self.s.daily_splits[old_name] = 1.0 / float(split_ratio)
             if not silent:
-                self.s.daily_news.append(f"✂️ [액면분할] {meta['c_name']}이 {split_ratio}:1 분할을 실시합니다.")
-                self.s.daily_news.append(f"  └ 현재가: {stock['price']:,}원 | 발행주식수: {stock['shares'] / 1e8:.1f}억 주")
+                self.s.daily_news.append(
+                    f"✂️ [액면분할] {meta['c_name']} {split_ratio}:1 분할 "
+                    f"(액면가 {par_value}원 → {meta['par_value']}원)"
+                )
+                self.s.daily_news.append(
+                    f"  └ 분할가: {stock['price']:,}원 | "
+                    f"발행주식수: {stock['shares']/1_000_000:.0f}백만주"
+                )
 
     # ─────────────────────────────────────────────
     # 주식 병합 (별도 분리)

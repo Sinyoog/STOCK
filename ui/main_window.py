@@ -29,6 +29,17 @@ from .news_view  import NewsWindow
 from engine.constants import SECTOR_MAP
 
 
+def _get_tick(price: int) -> int:
+    """현실 한국 주식 호가단위"""
+    if price >= 500_000:   return 1_000
+    elif price >= 200_000: return 500
+    elif price >= 50_000:  return 100
+    elif price >= 20_000:  return 50
+    elif price >= 5_000:   return 10
+    elif price >= 2_000:   return 5
+    else:                  return 1
+
+
 def _build_commodity_html(macro: dict) -> str:
     """원자재 현실 가격 HTML — 값이 있을 때만 표시"""
     lines = []
@@ -1841,7 +1852,8 @@ class StockHTS(QMainWindow):
             <p style='font-size:13px;'><b>[발행 정보]</b><br/>
             주식수: {stock['shares']:,} 주<br/>
             <span style='color:{shield_color};'>방어막 {shield_str} [{shield_label}]</span><br/>
-            시총: {mc:,} 원 <span style='color:#FFD700;font-weight:bold;'>({mc_str})</span></p>
+            시총: {mc:,} 원 <span style='color:#FFD700;font-weight:bold;'>({mc_str})</span><br/>
+            <span style='color:#AAAAAA;'>호가단위: {_get_tick(int(stock["price"])):,}원 &nbsp;|&nbsp; 액면가: {m.get("par_value", 500):,}원 &nbsp;|&nbsp; 분할: {m.get("split_count", 0)}회</span></p>
             <hr style='border: 0.5px solid #333;'/>
             <p style='font-size:13px;'><b>[지배구조]</b><br/>
             자사주: {ts:.2f}% | 대주주: {os:.2f}%<br/>
