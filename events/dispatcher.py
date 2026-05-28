@@ -36,6 +36,26 @@ class EventDispatcher:
         self.s.daily_delist_count = 0
         self.s.daily_splits      = {}
         self.s.silent_mode       = silent
+        # ★ 시나리오 변경 감지 — dispatcher 자체 변수로 관리 (state 리셋에 영향 안 받음)
+        if not hasattr(self, '_logged_scenario'):
+            self._logged_scenario = None
+        _prev_scenario = self._logged_scenario
+
+        # ★ 최초 실행 시 초기 상태 강제 기록
+        if _prev_scenario is None and hasattr(self.db, 'log_scenario_change'):
+            date_str = self.s.current_date.strftime('%Y-%m-%d')
+            self.db.log_scenario_change(
+                date_str     = date_str,
+                scenario     = self.s.current_scenario,
+                gri          = self.s.gri,
+                bubble       = getattr(self.s, 'bubble_index', 0.0),
+                macro        = self.s.macro,
+                war_event    = getattr(self.s, 'war_event', {}),
+                note         = "게임 시작",
+                market_stats = self._collect_market_stats(),
+            )
+            self._logged_scenario = self.s.current_scenario
+            _prev_scenario = self.s.current_scenario
 
         if self.s.scenario_timer > 0:
             self.s.scenario_timer -= 1
@@ -61,6 +81,10 @@ class EventDispatcher:
             self.eco.apply_supply_chain_penalty()
             # ★ 8순위: 외부 충격 이벤트 체크 (매년 1월 1일)
             self._check_external_shock(silent)
+            # ★ 9순위: 전쟁/분쟁 이벤트 체크
+            self._check_war_event(silent)
+            # ★ 10순위: 팬데믹 이벤트 체크
+            self._check_pandemic_event(silent)
             self.mkt.apply_price_change()
             self.mkt.update_company_technology()
             # 경고 진입/해제 7일 선반영 시스템
@@ -124,6 +148,32 @@ class EventDispatcher:
                 self.s.daily_news.append(
                     f"💤 [휴장] {self.s.current_date.strftime('%Y-%m-%d')} 주말입니다."
                 )
+
+        # ★ 매일 고점/저점/지속일수 업데이트
+        if hasattr(self.db, 'update_scenario_log_daily'):
+            self.db.update_scenario_log_daily(self.s.gri)
+
+        # ★ 시나리오 변경 시 DB 로그 기록
+        cur_scenario = self.s.current_scenario
+        if cur_scenario != _prev_scenario and hasattr(self.db, 'log_scenario_change'):
+            date_str = self.s.current_date.strftime('%Y-%m-%d')
+            war      = getattr(self.s, 'war_event', {})
+            note     = f"{_prev_scenario} → {cur_scenario}" if _prev_scenario else ""
+
+            # market_stats 수집 (PER/섹터/산업)
+            market_stats = self._collect_market_stats()
+
+            self.db.log_scenario_change(
+                date_str     = date_str,
+                scenario     = cur_scenario,
+                gri          = self.s.gri,
+                bubble       = getattr(self.s, 'bubble_index', 0.0),
+                macro        = self.s.macro,
+                war_event    = war,
+                note         = note,
+                market_stats = market_stats,
+            )
+            self._logged_scenario = cur_scenario
 
         return True
 
@@ -251,10 +301,17 @@ class EventDispatcher:
 
         # D-0: 극복 확정 — 주말 포함 무조건 뉴스 발송
         if self.s.current_date.date() >= target_date.date():
-            self.s.current_scenario = pending.get("scenario", "✨ 대공황V (고난과 부활)")
+            # ★ 전쟁/팬데믹 진행 중이면 시나리오 덮어쓰기 방지
+            war      = getattr(self.s, 'war_event', {})
+            pandemic = getattr(self.s, 'pandemic_event', {})
+            is_war_active      = war.get('phase') == '진행중'
+            is_pandemic_active = pandemic.get('phase') == '진행중'
+
+            if not is_war_active and not is_pandemic_active:
+                self.s.current_scenario = pending.get("scenario", "✨ 대공황V (고난과 부활)")
+
             self.s.daily_news.append(
-                f"🌅 [대공황 극복] {cy}년, 마침내 대공황을 극복했습니다! "
-                f"경제 재건이 시작됩니다."
+                f"🌅 [외부충격 극복] {cy}년, 경제가 회복 국면에 접어들었습니다!"
             )
             self.s.pending_events.pop("recovery", None)
 
@@ -594,18 +651,29 @@ class EventDispatcher:
             return
 
         # ── 충격 유형별 확률 ──────────────────────
-        # 3~5년 주기로 발생 가능 (확률 기반)
-        years_since_shock = cur.year - last_shock_year if last_shock_year > 0 else 5
-        base_prob = min(0.25, years_since_shock * 0.04)   # 최대 25%
+        # 현실 기준:
+        #   금융위기:   100년에 2~3회 → 연 2~3%
+        #   글로벌 침체: 100년에 4~5회 → 연 4~5%
+        #   일시적 패닉: 100년에 6~8회 → 연 6~8%
+        # 직전 충격 후 최소 3년 쿨다운 적용
+        years_since_shock = cur.year - last_shock_year if last_shock_year > 0 else 10
+
+        # 3년 미만이면 발생 안 함
+        if years_since_shock < 3:
+            return
+
+        # 경과 연수에 따라 확률 증가 (최대 15%)
+        base_prob = min(0.15, years_since_shock * 0.02)  # 최대 15%
 
         roll = _rnd.random()
         if roll > base_prob:
-            return   # 이번 해는 외부 충격 없음
+            return
 
         # 충격 유형 결정
+        # 금융위기 < 침체 < 패닉 순으로 빈도
         shock_type = _rnd.choices(
             ["글로벌 금융위기", "글로벌 침체 동조", "일시적 패닉"],
-            weights=[0.20, 0.35, 0.45]
+            weights=[0.15, 0.35, 0.50]
         )[0]
 
         self.s._last_external_shock_year = cur.year
@@ -659,3 +727,297 @@ class EventDispatcher:
                 f"  └ 예상 지속 기간: 약 {duration_days//252}년 {(duration_days%252)//21}개월 "
                 f"| 회복 예정: {recovery_date.strftime('%Y-%m-%d')}"
             )
+    # ─────────────────────────────────────────────
+    # ★ 전쟁/분쟁 이벤트
+    # ─────────────────────────────────────────────
+    def _check_war_event(self, silent: bool):
+        """
+        랜덤 전쟁/분쟁 이벤트.
+        - 지역분쟁: 연 8% 확률, 6개월~2년 지속
+        - 대규모전쟁: 연 3% 확률, 2~5년 지속
+        - 대공황 중 / 이미 전쟁 중이면 발생 안 함
+        - 지역별 원자재 충격 차별화
+        - 재건 섹터 연동
+        """
+        cur = self.s.current_date
+
+        # ★ 전쟁 진행 중이면 매일 timer 차감 (월 체크 전에 먼저 처리)
+        war = getattr(self.s, 'war_event', {})
+        if war.get('phase') == '진행중':
+            timer = war.get('timer', 0)
+            if timer <= 0:
+                self.s.war_event['phase'] = '종전'
+                self._on_war_end(silent)
+            else:
+                self.s.war_event['timer'] = timer - 1
+            return  # 전쟁 중엔 새 전쟁 발생 안 함
+
+        # 종전 후 재건 중이면 timer 차감
+        if war.get('phase') == '종전':
+            recon_timer = war.get('recon_timer', 0)
+            if recon_timer <= 0:
+                self.s.war_event = {}  # 완전 종료
+                if not silent:
+                    self.s.daily_news.append("✅ [재건 완료] 전후 재건이 마무리되었습니다.")
+            else:
+                self.s.war_event['recon_timer'] = recon_timer - 1
+            return
+
+        # ★ 새 전쟁 발생 체크 — 매년 랜덤 월에만
+        if cur.month != random.randint(1, 7) or cur.day > 7:
+            return
+
+        # 대공황 중엔 전쟁 없음
+        if '대공황' in self.s.current_scenario and '극복' not in self.s.current_scenario:
+            return
+
+        # 시장 형성 전엔 없음
+        if not getattr(self.s, '_market_fully_formed', False):
+            return
+
+        # 발생 확률 체크
+        roll = random.random()
+        if roll < 0.03:
+            war_type = '대규모전쟁'
+            duration = random.randint(504, 1260)  # 2~5년
+        elif roll < 0.11:  # 0.03 + 0.08
+            war_type = '지역분쟁'
+            duration = random.randint(126, 504)   # 6개월~2년
+        else:
+            return
+
+        # 지역 결정
+        region = random.choice(['중동', '동유럽', '동남아', '아프리카'])
+
+        # 원자재 충격 즉시 적용
+        COMMODITY_SHOCK = {
+            '중동':    {'oil_price':   1.8},
+            '동유럽':  {'grain_price': 1.6, 'metal_price': 1.3},
+            '동남아':  {'semi_index':  0.65, 'metal_price': 1.4},
+            '아프리카': {'metal_price': 1.5},
+        }
+        shocks = COMMODITY_SHOCK.get(region, {})
+        for key, mult in shocks.items():
+            if key in self.s.macro:
+                self.s.macro[key] *= mult
+
+        # GRI 즉시 충격
+        gri_impact = {'지역분쟁': 0.10, '대규모전쟁': 0.25}[war_type]
+        self.s.gri = max(100.0, self.s.gri * (1.0 - gri_impact))
+
+        # 전쟁 상태 저장
+        self.s.war_event = {
+            'type':    war_type,
+            'region':  region,
+            'timer':   duration,
+            'phase':   '진행중',
+            'notified': False,
+        }
+
+        # 시나리오 반영
+        scenario_map = {
+            ('지역분쟁',   '중동'):    '🔫 중동 분쟁 (유가 충격)',
+            ('지역분쟁',   '동유럽'):  '🔫 동유럽 분쟁 (곡물/금속 충격)',
+            ('지역분쟁',   '동남아'):  '🔫 동남아 분쟁 (반도체 공급 차질)',
+            ('지역분쟁',   '아프리카'):'🔫 아프리카 분쟁 (금속 공급 차질)',
+            ('대규모전쟁', '중동'):    '💣 중동 전쟁 (유가 폭등)',
+            ('대규모전쟁', '동유럽'):  '💣 동유럽 전쟁 (곡물/금속 폭등)',
+            ('대규모전쟁', '동남아'):  '💣 동남아 전쟁 (반도체 위기)',
+            ('대규모전쟁', '아프리카'):'💣 아프리카 전쟁 (자원 전쟁)',
+        }
+        self.s.current_scenario = scenario_map.get((war_type, region), f'🔫 {region} {war_type}')
+        self.s.scenario_timer   = duration
+
+        if not silent:
+            commodity_str = ', '.join(f"{k} x{v:.1f}" for k, v in shocks.items())
+            self.s.daily_news.append(
+                f"⚔️ [{war_type} 발생] {cur.year}년 {region} {war_type} 발발! "
+                f"원자재 충격: {commodity_str} | GRI -{gri_impact*100:.0f}%"
+            )
+            self.s.daily_news.append(
+                f"  └ 예상 지속: 약 {duration//252}년 {(duration%252)//21}개월 "
+                f"| 재건 섹터 주목"
+            )
+
+    def _on_war_end(self, silent: bool):
+        """종전 처리 — 재건 섹터 강세 시작"""
+        war = getattr(self.s, 'war_event', {})
+        region   = war.get('region', '')
+        war_type = war.get('type', '')
+
+        recon_days = random.randint(252, 756)  # 1~3년 재건
+
+        # 재건 상태로 전환
+        self.s.war_event['phase']       = '종전'
+        self.s.war_event['recon_timer'] = recon_days
+
+        # 재건 시나리오로 전환
+        self.s.current_scenario = f'🏗️ {region} 전후 재건 (재건 섹터 강세)'
+        self.s.scenario_timer   = recon_days
+
+        if not silent:
+            self.s.daily_news.append(
+                f"🕊️ [종전] {region} {war_type} 종료! "
+                f"재건 국면 돌입 — 재건/산업재/소재 섹터 수혜 예상"
+            )
+
+    # ─────────────────────────────────────────────
+    # ★ 팬데믹 이벤트
+    # ─────────────────────────────────────────────
+    def _check_pandemic_event(self, silent: bool):
+        """
+        랜덤 팬데믹 이벤트.
+        - 연 2% 확률 발생
+        - 비대면/IT/건강관리 수혜
+        - 여행/오프라인/자유소비재 타격
+        - GRI -20~35% 후 V자 반등
+        - 전쟁 중 / 대공황 중엔 발생 안 함
+        """
+        cur = self.s.current_date
+
+        # 매년 랜덤 월 체크
+        if cur.day > 7:
+            return
+
+        # ★ 팬데믹 진행 중이면 매일 timer 차감 (월 체크 전에 먼저 처리)
+        pandemic = getattr(self.s, 'pandemic_event', {})
+        if pandemic.get('phase') == '진행중':
+            timer = pandemic.get('timer', 0)
+            if timer <= 0:
+                self.s.pandemic_event = {'phase': '종료'}
+                from datetime import timedelta
+                rec_date = cur + timedelta(days=random.randint(126, 252))
+                self.s.pending_events['recovery'] = {
+                    'date':     rec_date,
+                    'scenario': '✨ 팬데믹 극복 (V자 반등)',
+                    'notified': False,
+                }
+                if not silent:
+                    self.s.daily_news.append(
+                        f"💊 [팬데믹 종식] 위기가 진정됩니다. V자 반등 기대."
+                    )
+            else:
+                self.s.pandemic_event['timer'] = timer - 1
+            return  # 팬데믹 중엔 새 팬데믹 없음
+
+        # 전쟁 중 / 대공황 중엔 팬데믹 없음
+        war = getattr(self.s, 'war_event', {})
+        if war.get('phase') == '진행중':
+            return
+        if '대공황' in self.s.current_scenario and '극복' not in self.s.current_scenario:
+            return
+        if not getattr(self.s, '_market_fully_formed', False):
+            return
+
+        # 발생 확률 체크 — 매년 1월 1~7일에만 (연 1회 체크)
+        # 팬데믹: 연 1.5% → 100년간 약 1.5회 (현실: 스페인독감/코로나 = 100년에 2번)
+        if cur.month != 1 or cur.day > 7:
+            return
+
+        if random.random() > 0.015:
+            return
+
+        # 강도 결정
+        intensity = random.uniform(0.20, 0.35)
+        duration  = random.randint(365, 730)  # 1~2년 (현실 반영)
+
+        # GRI 즉시 충격
+        self.s.gri = max(100.0, self.s.gri * (1.0 - intensity))
+
+        # 팬데믹 상태 저장
+        if not hasattr(self.s, 'pandemic_event'):
+            self.s.pandemic_event = {}
+        self.s.pandemic_event = {
+            'phase': '진행중',
+            'timer': duration,
+            'intensity': intensity,
+        }
+
+        # 시나리오 전환
+        self.s.current_scenario = '🦠 글로벌 팬데믹 (비대면 전환)'
+        self.s.scenario_timer   = duration
+
+        # 원자재 충격 (공급망 차질)
+        self.s.macro['semi_index'] = self.s.macro.get('semi_index', 1000.0) * 0.75
+        self.s.macro['metal_price']   = self.s.macro.get('metal_price', 100.0) * 0.85
+
+        if not silent:
+            self.s.daily_news.append(
+                f"🦠 [팬데믹 발생] {cur.year}년 글로벌 팬데믹 발발! "
+                f"GRI -{intensity*100:.0f}% 충격 | 비대면/IT/건강관리 수혜 예상"
+            )
+            self.s.daily_news.append(
+                f"  └ 여행/오프라인/자유소비재 타격 | 예상 지속: "
+                f"약 {duration//252}년 {(duration%252)//21}개월"
+            )
+
+    # ─────────────────────────────────────────────
+    # ★ 시장 통계 수집 (시나리오 로그용)
+    # ─────────────────────────────────────────────
+    def _collect_market_stats(self) -> dict:
+        """PER/섹터별/산업별 등락률 수집 — O(n) 단일 패스"""
+        from engine.constants import SECTOR_MAP
+        stocks = self.s.stocks
+        if not stocks:
+            return {}
+
+        # 단일 루프로 전부 수집
+        per_sum  = {'대형주': 0.0, '중형주': 0.0, '소형주': 0.0}
+        per_cnt  = {'대형주': 0,   '중형주': 0,   '소형주': 0}
+        sec_sum  = {}; sec_cnt = {}
+        ind_sum  = {}; ind_cnt = {}
+
+        eh = self.s.earnings_history  # 참조만
+
+        for s in stocks:
+            meta   = s['meta']
+            name   = meta.get('c_name', '')
+            tier   = meta.get('tier', '소형주')
+            ind    = meta.get('ind', '')
+            sector = SECTOR_MAP.get(ind, 'Value')
+            rate   = s.get('rate', 0.0)
+
+            # 섹터/산업 등락
+            sec_sum[sector] = sec_sum.get(sector, 0.0) + rate
+            sec_cnt[sector] = sec_cnt.get(sector, 0) + 1
+            if ind:
+                ind_sum[ind] = ind_sum.get(ind, 0.0) + rate
+                ind_cnt[ind] = ind_cnt.get(ind, 0) + 1
+
+            # PER — 최근 1년치만 빠르게 합산
+            hist = eh.get(name)
+            if hist:
+                recent_yr = sorted(hist.keys())[-1]
+                annual_ni = sum(
+                    q.get('net_income', 0)
+                    for q in hist[recent_yr].values()
+                ) * 4
+                mc = s.get('market_cap', 0)
+                if annual_ni > 0 and mc > 0:
+                    per = mc / annual_ni
+                    if per < 500 and tier in per_sum:
+                        per_sum[tier] += per
+                        per_cnt[tier] += 1
+
+        def wavg(s, c): return s/c if c > 0 else 0
+
+        def wi(k): return wavg(ind_sum.get(k, 0), ind_cnt.get(k, 0))
+        return {
+            'per_large':      wavg(per_sum['대형주'], per_cnt['대형주']),
+            'per_mid':        wavg(per_sum['중형주'], per_cnt['중형주']),
+            'per_small':      wavg(per_sum['소형주'], per_cnt['소형주']),
+            'sector_growth':  wavg(sec_sum.get('Growth',    0), sec_cnt.get('Growth',    0)),
+            'sector_value':   wavg(sec_sum.get('Value',     0), sec_cnt.get('Value',     0)),
+            'ind_it':         wi('IT'),
+            'ind_health':     wi('건강관리'),
+            'ind_energy':     wi('에너지'),
+            'ind_finance':    wi('금융'),
+            'ind_industry':   wi('산업재'),
+            'ind_material':   wi('소재'),
+            'ind_realestate': wi('부동산'),
+            'ind_rebuild':    wi('재건'),
+            'ind_util':       wi('유틸리티'),
+            'ind_consumer':   wi('자유소비재'),
+            'ind_staple':     wi('필수소비재'),
+            'ind_comm':       wi('커뮤니케이션'),
+        }

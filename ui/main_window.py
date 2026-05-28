@@ -29,6 +29,56 @@ from .news_view  import NewsWindow
 from engine.constants import SECTOR_MAP
 
 
+def _build_commodity_html(macro: dict) -> str:
+    """원자재 현실 가격 HTML — 값이 있을 때만 표시"""
+    lines = []
+    if macro.get('grain_price') is not None:
+        lines.append(f"🌾 밀($/부셸): ${macro['grain_price']:.0f}")
+    if macro.get('metal_price') is not None:
+        lines.append(f"⚙️ 구리($/톤): ${macro['metal_price']:,.0f}")
+    if macro.get('semi_index') is not None:
+        lines.append(f"💾 SOX 지수: {macro['semi_index']:,.0f}")
+    if not lines:
+        return ""
+    return "<br/>" + "<br/>".join(lines)
+
+
+def _build_event_html(s) -> str:
+    """진행 중인 이벤트 HTML — 전쟁/팬데믹/QE/QT"""
+    events = []
+
+    # 전쟁/분쟁
+    war = getattr(s, 'war_event', {})
+    if war.get('phase') == '진행중':
+        w_type  = war.get('type', '')
+        region  = war.get('region', '')
+        timer   = war.get('timer', 0)
+        elapsed = s.scenario_timer - timer if s.scenario_timer > timer else 0
+        icon = '💣' if w_type == '대규모전쟁' else '🔫'
+        events.append(f"{icon} {region} {w_type} 진행중 (잔여 {timer//252}년 {(timer%252)//21}개월)")
+    elif war.get('phase') == '종전':
+        events.append(f"🏗️ {war.get('region','')} 전후 재건 중")
+
+    # 팬데믹
+    pandemic = getattr(s, 'pandemic_event', {})
+    if pandemic.get('phase') == '진행중':
+        timer = pandemic.get('timer', 0)
+        events.append(f"🦠 팬데믹 진행중 (잔여 {timer//21}주)")
+
+    # QE/QT
+    if getattr(s, 'qe_active', False):
+        events.append("🏛️ QE 진행중")
+    if getattr(s, 'qt_active', False):
+        events.append("🏛️ QT 진행중")
+
+    if not events:
+        return ""
+
+    items = "".join(f"<br/>{e}" for e in events)
+    return f"<p><b style='color:#FF6B6B;'>⚠️ 진행중 이벤트</b>{items}</p><hr style='border:0.5px solid #333;'/>"
+
+
+
 class DateAxisItem(pg.AxisItem):
     def __init__(self, dates, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -116,6 +166,16 @@ class StockHTS(QMainWindow):
         self.asset_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.asset_label.setStyleSheet("color: white; font-family: 'Malgun Gothic'; border: none;")
 
+        # ★ 시나리오 로그 버튼
+        self.btn_scenario_log = QPushButton("📊 시나리오 로그")
+        self.btn_scenario_log.setFixedSize(140, 35)
+        self.btn_scenario_log.setStyleSheet("""
+            QPushButton { background: #1a1a2e; color: #00BFFF; border: 1px solid #00BFFF;
+                padding: 4px 12px; font-weight: bold; border-radius: 3px; font-size: 12px; }
+            QPushButton:hover { background: #003355; }
+        """)
+        self.btn_scenario_log.clicked.connect(self._open_scenario_log)
+
         self.btn_system = QPushButton("✕")
         self.btn_system.setFixedSize(35, 35)
         self.btn_system.setStyleSheet(f"""
@@ -125,19 +185,38 @@ class StockHTS(QMainWindow):
         """)
         self.btn_system.clicked.connect(self.open_system_menu)
         top_right.addWidget(self.asset_label)
+        top_right.addWidget(self.btn_scenario_log)
         top_right.addWidget(self.btn_system)
 
         row1.addWidget(self.date_label)
-        row1.addWidget(self.index_label, stretch=1)
+        row1.addWidget(self.index_label)
+        row1.addStretch(1)
         row1.addLayout(top_right)
         dash_lay.addLayout(row1)
 
-        self.macro_label     = QLabel()
-        self.macro_label.setStyleSheet("font-size: 14px; color: #00BFFF;")
+        # 라인1: 좌측(금리/유가/물가/환율) + 우측(PER+섹터)
+        macro_row = QHBoxLayout()
+        self.macro_label = QLabel()
+        self.macro_label.setStyleSheet("font-size: 13px; color: #00BFFF;")
+        self.market_stats_label = QLabel()
+        self.market_stats_label.setStyleSheet("font-size: 13px;")
+        self.market_stats_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        macro_row.addWidget(self.macro_label)
+        macro_row.addStretch()
+        macro_row.addWidget(self.market_stats_label)
+        dash_lay.addLayout(macro_row)
+
+        # 라인2: 좌측(물가체감) + 우측(산업 12개)
+        industry_row = QHBoxLayout()
         self.inflation_label = QLabel()
-        self.inflation_label.setStyleSheet("font-size: 14px; color: #FFA500; font-weight: bold;")
-        dash_lay.addWidget(self.macro_label)
-        dash_lay.addWidget(self.inflation_label)
+        self.inflation_label.setStyleSheet("font-size: 13px; color: #FFA500; font-weight: bold;")
+        self.industry_label = QLabel()
+        self.industry_label.setStyleSheet("font-size: 12px;")
+        self.industry_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        industry_row.addWidget(self.inflation_label)
+        industry_row.addStretch()
+        industry_row.addWidget(self.industry_label)
+        dash_lay.addLayout(industry_row)
 
         # 최근 검색 종목 (최대 5개)
         recent_lay = QHBoxLayout()
@@ -516,6 +595,12 @@ class StockHTS(QMainWindow):
 
     def _post_reset_ui(self):
         """reset 완료 후 메인 스레드에서 UI 갱신"""
+        # 시장 통계 캐시 초기화 — 새 게임 데이터로 갱신되도록
+        self._market_stats   = None
+        self._prev_stats_txt = None
+        self._prev_ind_txt   = None
+        self.market_stats_label.setText("")
+        self.industry_label.setText("")
         self.sync_ui_with_engine()
         self.report_panel.clear()
         # 차트 명시적 초기화 — 빈 데이터로 0~1 축 뜨는 문제 방지
@@ -577,6 +662,264 @@ class StockHTS(QMainWindow):
     # ─────────────────────────────────────────────
     # UI 동기화
     # ─────────────────────────────────────────────
+
+
+    # ─────────────────────────────────────────────
+    # 시장 통계 계산 — stocks 단일 순회 O(n), 결과 캐시
+    # 장 열린 날 next_day 이후 1회만 호출
+    # ─────────────────────────────────────────────
+    def _calc_market_stats(self):
+        s             = self.game_service.s
+        earnings_hist = s.earnings_history
+
+        # 누산기: [합계, 카운트]
+        tier_per = {
+            "대형주": [0.0, 0],
+            "중형주": [0.0, 0],
+            "소형주": [0.0, 0],
+        }
+        sector_rate = {
+            "Growth":    [0.0, 0],
+            "Value":     [0.0, 0],
+            "Defensive": [0.0, 0],
+            "Theme":     [0.0, 0],
+        }
+        # 산업별 수익률 — MAIN_INDUSTRIES 12개 키로 초기화
+        from engine.constants import MAIN_INDUSTRIES
+        industry_rate = {ind: [0.0, 0] for ind in MAIN_INDUSTRIES}
+        deficit_count = 0
+
+        for stock in s.stocks:
+            meta    = stock["meta"]           # dict 1회 접근
+            tier    = meta["tier"]
+            ind     = meta.get("ind", "")
+            mc      = stock["market_cap"]
+
+            # 누적 수익률: (현재가 / 상장 초기가 - 1) * 100
+            price   = stock.get("price", 0)
+            initial = meta.get("initial_price", 0)
+            cumul   = ((price / initial) - 1) * 100 if initial > 0 else 0.0
+
+            # 섹터 누적 수익률 누산
+            sector = SECTOR_MAP.get(ind, "Value")
+            sr = sector_rate.get(sector)
+            if sr:
+                sr[0] += cumul
+                sr[1] += 1
+
+            # 산업별 누적 수익률 누산 (같은 루프, 추가 비용 최소)
+            ir = industry_rate.get(ind)
+            if ir:
+                ir[0] += cumul
+                ir[1] += 1
+
+            # PER: 실적 없으면 즉시 스킵 (조기 탈출)
+            c_name = meta.get("c_name", "")
+            hist   = earnings_hist.get(c_name)
+            if not hist:
+                continue
+
+            # 최근 4분기 net_income — 리스트 생성 없이 최소 연산
+            ni_vals = []
+            for yd in hist.values():
+                for qd in yd.values():
+                    ni = qd.get("net_income", 0)
+                    if ni != 0:
+                        ni_vals.append(ni)
+            if not ni_vals:
+                continue
+
+            recent    = ni_vals[-4:]
+            annual_ni = sum(recent) * (4.0 / len(recent))  # 연환산
+
+            if annual_ni <= 0:
+                deficit_count += 1
+                continue   # 적자는 PER 집계 제외 (평균 왜곡 방지)
+
+            per_val = mc / annual_ni
+            if per_val > 9999:   # 비정상 수치 제외
+                continue
+
+            tp = tier_per.get(tier)
+            if tp:
+                tp[0] += per_val
+                tp[1] += 1
+
+        def _avg(d, k):
+            s, c = d[k]
+            return s / c if c > 0 else 0.0
+
+        total = max(1, len(s.stocks))
+        self._market_stats = {
+            "per_large":   _avg(tier_per,    "대형주"),
+            "per_mid":     _avg(tier_per,    "중형주"),
+            "per_small":   _avg(tier_per,    "소형주"),
+            "rate_growth": _avg(sector_rate, "Growth"),
+            "rate_value":  _avg(sector_rate, "Value"),
+            "rate_def":    _avg(sector_rate, "Defensive"),
+            "rate_theme":  _avg(sector_rate, "Theme"),
+            "deficit_pct": deficit_count / total * 100,
+            # 산업별 평균 수익률 — 약어 키로 저장
+            "ind": {k: _avg(industry_rate, k) for k in industry_rate},
+        }
+
+
+    # ─────────────────────────────────────────────
+    # ★ 시나리오 로그 뷰어
+    # ─────────────────────────────────────────────
+    def _open_scenario_log(self):
+        """시나리오 로그 다이얼로그 열기"""
+        import os
+        from PyQt6.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QTableWidget,
+            QTableWidgetItem, QHeaderView, QPushButton, QLabel, QFileDialog
+        )
+        from PyQt6.QtGui import QColor
+
+        db = self.game_service.db   # GameService.db = persistence
+        rows = db.get_scenario_log() if hasattr(db, 'get_scenario_log') else []
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("📊 시나리오 변경 로그")
+        dlg.setStyleSheet(self.styleSheet())
+        # ★ 최대화/최소화 버튼 + 일반 창 플래그
+        dlg.setWindowFlags(
+            Qt.WindowType.Window |
+            Qt.WindowType.WindowMaximizeButtonHint |
+            Qt.WindowType.WindowMinimizeButtonHint |
+            Qt.WindowType.WindowCloseButtonHint
+        )
+
+        layout = QVBoxLayout(dlg)
+
+        # 상단 안내
+        header = QLabel(f"총 {len(rows)}개 시나리오 변경 기록  |  시나리오 변경 시점의 경제 지표 스냅샷")
+        header.setStyleSheet("color: #00FF00; font-weight: bold; font-size: 13px; padding: 5px;")
+        layout.addWidget(header)
+
+        # 테이블
+        cols = [
+            "날짜", "시작GRI", "고점", "저점", "종료GRI", "일수",
+            "버블", "금리", "유가", "환율", "CPI",
+            "밀($/bu)", "구리($/t)", "SOX",
+            "PER대", "PER중", "PER소",
+            "성장섹", "가치섹",
+            "IT", "건강", "에너지", "금융",
+            "산업재", "소재", "부동산", "재건",
+            "유틸", "자유소비", "필수소비", "커뮤",
+            "시나리오", "전쟁/이벤트"
+        ]
+        tbl = QTableWidget(len(rows), len(cols))
+        tbl.setHorizontalHeaderLabels(cols)
+        tbl.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        tbl.setStyleSheet("""
+            QTableWidget { background:#000; color:#ddd; gridline-color:#222; }
+            QHeaderView::section { background:#1a1a1a; color:#00FF00; padding:6px; border:1px solid #333; }
+        """)
+
+        for i, r in enumerate(rows):
+            gri     = r.get('gri', 0)
+            gri_end = r.get('gri_end', gri)
+            chg     = f"({(gri_end/gri-1)*100:+.1f}%)" if gri > 0 else ""
+            vals = [
+                r['date'],
+                f"{gri:,.0f}",
+                f"{r.get('gri_high', gri):,.0f}",
+                f"{r.get('gri_low',  gri):,.0f}",
+                f"{gri_end:,.0f}{chg}",
+                f"{r.get('duration_days', 0)}일",
+                f"{r['bubble']:.1f}",
+                f"{r['interest_rate']:.2f}%",
+                f"${r['oil_price']:.1f}",
+                f"₩{r['exchange_rate']:,.0f}",
+                f"{r['cpi']:.2f}%",
+                f"${r.get('grain_price', 0):.0f}",
+                f"${r.get('metal_price', 0):,.0f}",
+                f"{r.get('semi_index', 0):,.0f}",
+                f"{r.get('per_large', 0):.1f}x",
+                f"{r.get('per_mid', 0):.1f}x",
+                f"{r.get('per_small', 0):.1f}x",
+                f"{r.get('sector_growth', 0):+.2f}%",
+                f"{r.get('sector_value', 0):+.2f}%",
+                f"{r.get('ind_it', 0):+.2f}%",
+                f"{r.get('ind_health', 0):+.2f}%",
+                f"{r.get('ind_energy', 0):+.2f}%",
+                f"{r.get('ind_finance', 0):+.2f}%",
+                f"{r.get('ind_industry', 0):+.2f}%",
+                f"{r.get('ind_material', 0):+.2f}%",
+                f"{r.get('ind_realestate', 0):+.2f}%",
+                f"{r.get('ind_rebuild', 0):+.2f}%",
+                f"{r.get('ind_util', 0):+.2f}%",
+                f"{r.get('ind_consumer', 0):+.2f}%",
+                f"{r.get('ind_staple', 0):+.2f}%",
+                f"{r.get('ind_comm', 0):+.2f}%",
+                r['scenario'],
+                r.get('war_event') or "",
+            ]
+            sc = r['scenario']
+            for j, v in enumerate(vals):
+                it = QTableWidgetItem(str(v))
+                it.setTextAlignment(0x0004 | 0x0080)
+                if '대공황' in sc:               it.setForeground(QColor("#FF4444"))
+                elif '전쟁' in sc or '분쟁' in sc: it.setForeground(QColor("#FF8800"))
+                elif '팬데믹' in sc:              it.setForeground(QColor("#FF44FF"))
+                elif '극복' in sc or '재건' in sc: it.setForeground(QColor("#00FF00"))
+                elif '침체' in sc:               it.setForeground(QColor("#FFCC00"))
+                else:                            it.setForeground(QColor("#AAAAAA"))
+                tbl.setItem(i, j, it)
+
+        hdr = tbl.horizontalHeader()
+        for c in range(len(cols)):
+            hdr.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+        hdr.setSectionResizeMode(32, QHeaderView.ResizeMode.Stretch)  # 시나리오 열
+        layout.addWidget(tbl)
+
+        # 하단 버튼
+        btn_row = QHBoxLayout()
+        btn_dl = QPushButton("💾 TXT로 다운로드")
+        btn_dl.setStyleSheet("""
+            QPushButton { background:#003300; color:#00FF00; border:1px solid #00FF00;
+                padding:8px 20px; font-weight:bold; border-radius:3px; }
+            QPushButton:hover { background:#005500; }
+        """)
+
+        def _download():
+            import os
+            # 기본 저장 경로를 게임 폴더로
+            default_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "..", "scenario_log.txt"
+            )
+            path, _ = QFileDialog.getSaveFileName(
+                dlg, "시나리오 로그 저장",
+                os.path.abspath(default_path),
+                "Text Files (*.txt)"
+            )
+            if path:
+                saved = db.export_scenario_log_txt(path)
+                from PyQt6.QtWidgets import QMessageBox
+                if saved:
+                    QMessageBox.information(dlg, "저장 완료", f"저장되었습니다:\n{saved}")
+                else:
+                    QMessageBox.warning(dlg, "저장 실패", "저장할 데이터가 없거나 오류가 발생했습니다.")
+
+        btn_dl.clicked.connect(_download)
+        btn_close = QPushButton("닫기")
+        btn_close.setStyleSheet("""
+            QPushButton { background:#1a1a1a; color:#aaa; border:1px solid #444;
+                padding:8px 20px; border-radius:3px; }
+            QPushButton:hover { background:#333; }
+        """)
+        btn_close.clicked.connect(dlg.close)
+        btn_row.addWidget(btn_dl)
+        btn_row.addStretch()
+        btn_row.addWidget(btn_close)
+        layout.addLayout(btn_row)
+
+        dlg.show()
+        dlg.showMaximized()
+        dlg.exec()
+
     def sync_ui_with_engine(self):
         s = self.game_service.s
         is_open = s.is_market_open
@@ -621,8 +964,88 @@ class StockHTS(QMainWindow):
         elif bubble >= 50:  b_str = f"🟢 버블 {bubble:.0f}"
         else:               b_str = f"버블 {bubble:.0f}"
         self.index_label.setText(f"📊 GRI: {s.gri:,.0f} | {b_str} | LV.{s.max_tech_reached}")
-        self.macro_label.setText(f"🌍 금리: {m['interest_rate']:.2f}% | 유가: ${m['oil_price']:.2f} | 물가: {m['cpi']:.2f}% | 환율: ₩{m['exchange_rate']:,.1f}")
+        # ★ 원자재 (현실 단위)
+        grain = m.get('grain_price')
+        metal = m.get('metal_price')
+        semi  = m.get('semi_index')
+        extra = ""
+        if grain is not None: extra += f" | 🌾 밀: ${grain:.0f}"
+        if metal is not None: extra += f" | ⚙️ 구리: ${metal:,.0f}"
+        if semi  is not None: extra += f" | 💾 SOX: {semi:,.0f}"
+        self.macro_label.setText(f"🌍 금리: {m['interest_rate']:.2f}% | 유가: ${m['oil_price']:.2f} | 물가: {m['cpi']:.2f}% | 환율: ₩{m['exchange_rate']:,.1f}{extra}")
         self.inflation_label.setText(f"🛍️ 물가체감: 2000년 ₩1,000 → 현재 ₩{s.base_item_price:,.0f}")
+
+        # ── 시장 통계: 장 열린 날만 갱신, 캐시 활용 ──────────────
+        if s.is_market_open:
+            self._calc_market_stats()
+        ms = getattr(self, "_market_stats", None)
+        if ms:
+            def _pc(v):
+                if v <= 0:  return "#888888"
+                if v <= 25: return "#00FF00"
+                if v <= 50: return "#FFD700"
+                return "#FF6600"
+            def _rc(v):
+                # 숫자 색상: 양수=빨강, 음수=파랑, 0=회색
+                return "#FF4444" if v > 0 else ("#4488FF" if v < 0 else "#888888")
+
+            # 변동성 강조: abs(값) 상위 N개 → 형광 글자색
+            # 글자(레이블명)만 형광, 숫자는 _rc 그대로
+            def _highlight_top(values: dict, top_n: int = 2) -> set:
+                """abs 기준 상위 top_n 키 반환"""
+                sorted_keys = sorted(values, key=lambda k: abs(values[k]), reverse=True)
+                return set(sorted_keys[:top_n])
+
+            pl, pm, ps = ms["per_large"], ms["per_mid"], ms["per_small"]
+            sec_vals = {
+                "성장": ms["rate_growth"], "가치": ms["rate_value"],
+                "방어": ms["rate_def"],    "테마": ms["rate_theme"],
+            }
+            sec_hot = _highlight_top(sec_vals, 2)
+            sep = "<span style='color:#444;'> | </span>"
+
+            # 라인1 우측: PER + 섹터 (누적 수익률)
+            def _sec_span(label, val):
+                lbl_color = "#39FF14" if label in sec_hot else "#666666"  # 형광연두 or 회색
+                return (
+                    f"<span style='color:{lbl_color};'>{label} </span>"
+                    f"<span style='color:{_rc(val)};'>{val:+.1f}%</span>"
+                )
+            stats_txt = (
+                f"<span style='color:#666;'>PER </span>"
+                f"<span style='color:{_pc(pl)};'>대 {pl:.0f}배</span>{sep}"
+                f"<span style='color:{_pc(pm)};'>중 {pm:.0f}배</span>{sep}"
+                f"<span style='color:{_pc(ps)};'>소 {ps:.0f}배</span>"
+                f"&nbsp;&nbsp;&nbsp;"
+                f"<span style='color:#666;'>섹터 </span>"
+                + sep.join(_sec_span(k, v) for k, v in sec_vals.items())
+            )
+            if getattr(self, "_prev_stats_txt", None) != stats_txt:
+                self.market_stats_label.setText(stats_txt)
+                self._prev_stats_txt = stats_txt
+
+            # 라인2 우측: 산업 12개 (누적 수익률)
+            IND_SHORT = {
+                "IT": "IT", "에너지": "에너지", "건강관리": "건강",
+                "산업재": "산업재", "소재": "소재", "자유소비재": "자유소비",
+                "커뮤니케이션": "커뮤", "금융": "금융", "필수소비재": "필수소비",
+                "유틸리티": "유틸", "부동산": "부동산", "재건": "재건",
+            }
+            ind_map  = ms.get("ind", {})
+            ind_vals = {short: ind_map.get(full, 0.0) for full, short in IND_SHORT.items()}
+            ind_hot  = _highlight_top(ind_vals, 3)  # 산업은 12개라 상위 3개 강조
+
+            parts = []
+            for short, v in ind_vals.items():
+                lbl_color = "#39FF14" if short in ind_hot else "#666666"
+                parts.append(
+                    f"<span style='color:{lbl_color};'>{short} </span>"
+                    f"<span style='color:{_rc(v)};'>{v:+.1f}%</span>"
+                )
+            ind_txt = f"<span style='color:#666;'>산업 </span>" + sep.join(parts)
+            if getattr(self, "_prev_ind_txt", None) != ind_txt:
+                self.industry_label.setText(ind_txt)
+                self._prev_ind_txt = ind_txt
 
         self.filter_stocks()
         self.refresh_chart()
@@ -883,7 +1306,10 @@ class StockHTS(QMainWindow):
             금리: {s.macro['interest_rate']:.2f}%<br/>
             유가: ${s.macro['oil_price']:.1f}<br/>
             환율: ₩{s.macro['exchange_rate']:,.0f}<br/>
-            CPI: {s.macro['cpi']:.2f}%</p>
+            CPI: {s.macro['cpi']:.2f}%
+            {_build_commodity_html(s.macro)}
+            </p>
+            {_build_event_html(s)}
             <hr style='border:0.5px solid #333;'/>
             <p style='color:#555; font-size:11px;'>* GRI 차트를 보려면 좌측 기간 버튼을 클릭하세요.</p>
         </div>
@@ -942,6 +1368,7 @@ class StockHTS(QMainWindow):
 
         # ── 1일 버튼: 전일GRI → 현재GRI 단순 2포인트 표시 ──────
         if lim == 1:
+            self.chart_widget.getAxis('bottom').setTicks(None)  # ticks 충돌 방지
             gri_now  = s.gri
             gri_prev = getattr(s, 'prev_gri', gri_now)
             disp = [gri_prev, gri_now]
@@ -1396,6 +1823,9 @@ class StockHTS(QMainWindow):
         buffett_str  = f"{buffett:.1f}%"
         buffett_icon = "🟢 저평가" if buffett < 80 else ("🟡 적정" if buffett < 100 else ("🟠 고평가" if buffett < 130 else "🔴 버블"))
 
+        # 스크롤 위치 저장 — setHtml은 Qt가 맨 위로 리셋하므로 복원 필요 O(1)
+        _sb = self.report_panel.verticalScrollBar()
+        _prev_scroll = _sb.value()
         self.report_panel.setHtml(f"""
         <div style='font-family: Malgun Gothic;'>
             <h2 style='color:#00FF00;margin-bottom:0px;'>
@@ -1438,6 +1868,7 @@ class StockHTS(QMainWindow):
             52주 신저가: {int(low_52w):,}원{low_badge}<br/>
             버핏 지수&nbsp;&nbsp;: {buffett_str} {buffett_icon}</p>
         </div>""")
+        _sb.setValue(_prev_scroll)  # 스크롤 위치 복원 O(1)
 
     # ─────────────────────────────────────────────
     # 헬퍼

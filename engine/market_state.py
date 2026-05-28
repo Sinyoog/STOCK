@@ -35,7 +35,16 @@ class MarketState:
             "interest_rate": 4.0,
             "cpi":           2.0,
             "fear_index":    10.0,
+            # ★ 신규 원자재 (현실 2000년 초 기준값)
+            "grain_price":   250.0,  # 곡물 밀 $/부셸 (2000년 $250 → 현재 $550)
+            "metal_price":   1800.0, # 구리 $/톤 (2000년 $1,800 → 현재 $9,000)
+            "semi_index":    1000.0, # 반도체 SOX 지수 (2000년 1,000 → 현재 5,000)
         }
+
+        # ★ 신규: 전쟁/분쟁 상태
+        # {"type": "지역분쟁"/"대규모전쟁", "region": "중동"/"동유럽"/"동남아"/"아프리카",
+        #  "timer": int, "phase": "진행중"/"종전", "notified": bool}
+        self.war_event: dict = {}
         self.base_item_price: float = 1000.0
         self.cumulative_inflation: float = 1.0
 

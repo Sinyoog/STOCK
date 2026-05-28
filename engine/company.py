@@ -138,15 +138,15 @@ class CompanyManager:
         elif tier == "대":
             # 일반 대기업: 1조~20조
             p       = random.randint(20_000, 80_000)
-            s_count = random.randint(50, 250) * 1_000_000
+            s_count = random.randint(100, 500) * 1_000_000  # 50~250M → 100~500M
         elif tier == "중":
             # 중견: 1000억~2조
             p       = random.randint(5_000, 30_000)
-            s_count = random.randint(5, 67) * 1_000_000
+            s_count = random.randint(20, 150) * 1_000_000  # 5~67M → 20~150M
         else:
             # 중소: 100억~1500억
             p       = random.randint(1_000, 10_000)
-            s_count = random.randint(1, 15) * 1_000_000
+            s_count = random.randint(5, 50) * 1_000_000   # 1~15M → 5~50M
 
         # 5. 이름
         is_group  = (group_id is not None)
@@ -222,12 +222,15 @@ class CompanyManager:
                 "debt_ratio":           init_debt_ratio, # ★ 신규: 부채비율
                 "target_debt_ratio":    init_debt_ratio, # ★ 신규: 기업별 목표 부채비율 (하한선)
                 "credit_grade":         init_credit,     # ★ 신규: 신용등급
+                # ★ efficiency 상향 — PER 정상화 핵심
+                # 목표: 대형 PER 15~25배, 중형 20~35배, 소형 30~50배
+                # 시뮬레이션으로 검증된 범위
                 "efficiency":           {
-                    "대1": random.uniform(0.08, 0.15),  # 최상위: 고효율
-                    "대":  random.uniform(0.05, 0.12),  # 대기업: 안정적
-                    "중":  random.uniform(0.03, 0.10),  # 중견: 일부 위험
-                    "소":  random.uniform(0.02, 0.09),  # 소형: 구조적 적자 가능
-                }.get(tier, random.uniform(0.02, 0.09)),
+                    "대1": random.uniform(0.15, 0.25),  # 최상위: 고효율
+                    "대":  random.uniform(0.12, 0.20),  # 대기업: 안정적
+                    "중":  random.uniform(0.08, 0.15),  # 중견: 일부 위험
+                    "소":  random.uniform(0.04, 0.10),  # 소형: 구조적 적자 가능
+                }.get(tier, random.uniform(0.04, 0.10)),
                 "momentum":             0.0,
                 "continuous_loss_count": 0,
                 "risk_sensitivity":     {"대": 0.1, "대1": 0.1, "중": 0.5, "소": 1.2}.get(tier, 1.0),

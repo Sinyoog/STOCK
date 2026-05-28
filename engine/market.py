@@ -20,10 +20,10 @@ from .constants import SECTOR_MAP, MAIN_INDUSTRIES, INDUSTRY_LEVELS
 
 # ★ 섹터별 PER 허용 상한
 _PER_LIMIT = {
-    "Growth":    50.0,
-    "Value":     20.0,
-    "Defensive": 30.0,
-    "Theme":     40.0,
+    "Growth":    30.0,   # 50 → 30
+    "Value":     13.0,   # 20 → 13
+    "Defensive": 18.0,   # 30 → 18
+    "Theme":     25.0,   # 40 → 25
 }
 
 # ★ 신용등급별 이자비용 가중치
@@ -73,9 +73,11 @@ class StockMarket:
                 "저점": +0.00010,
             }.get(cycle, +0.00035)
 
-        # ★ 확장기 초반(2000~2005) 성장 모멘텀 보너스
-        if cur_date.year <= 2005 and cycle == "확장":
-            market_drift += 0.00020
+        # ★ 초반 성장률 억제 (IT버블 붕괴 구간 반영)
+        if cur_date.year <= 2002:
+            market_drift = min(market_drift, 0.00020)   # 연 ~5% 상한 (완화)
+        elif cur_date.year <= 2005:
+            market_drift = min(market_drift, 0.00030)   # 연 ~7.5% 상한 (완화)
 
         prev_rate  = getattr(self.s, '_prev_macro_snapshot', {}).get('interest_rate', interest_rate)
         rate_delta = interest_rate - prev_rate
@@ -165,39 +167,39 @@ class StockMarket:
             # 섹터/테크 조정
             sector_adj = 0.0
             if lv >= 2 and sector == "Growth":
-                sector_adj += 0.08 / 252   # Lv2+: 성장주 강화
+                sector_adj += 0.03 / 252   # 0.08 → 0.03: 성장주 보너스 축소
             elif lv >= 2 and sector == "Theme":
-                sector_adj += 0.05 / 252   # Lv2+: 테마주도 상승
+                sector_adj += 0.02 / 252   # 0.05 → 0.02: 테마주 보너스 축소
             elif lv >= 3 and sector == "Value":
-                sector_adj -= 0.03 / 252   # Lv3+: 가치주 약화
+                sector_adj -= 0.02 / 252   # 0.03 → 0.02: 가치주 패널티 완화
 
             years_since_lv_up = cur_date.year - tech_upgrade_year
             if 0 <= years_since_lv_up <= 3:
-                if   sector == "Growth":    sector_adj += 0.08 / 252  # 기술 전환 직후 성장주 급등
-                elif sector == "Theme":     sector_adj += 0.06 / 252  # 테마주도 함께 급등
+                if   sector == "Growth":    sector_adj += 0.04 / 252  # 0.08 → 0.04
+                elif sector == "Theme":     sector_adj += 0.03 / 252  # 0.06 → 0.03
                 elif sector == "Defensive": sector_adj += 0.01 / 252
 
             cycle_sector = {
-                # ★ 확장기: 성장주 1등, 테마주 2등, 가치주 3등
-                ("확장", "Growth"):    +0.20 / 252,   # 성장주 강화
-                ("확장", "Value"):     +0.08 / 252,
-                ("확장", "Defensive"): -0.04 / 252,
-                ("확장", "Theme"):     +0.10 / 252,   # 테마주 약화 (Growth < Theme 역전 방지)
-                # ★ 정점기: 방어주 선호, 성장주/테마주 피크아웃
+                # ★ 확장기
+                ("확장", "Growth"):    +0.10 / 252,   # 0.20 → 0.10
+                ("확장", "Value"):     +0.06 / 252,   # 0.08 → 0.06
+                ("확장", "Defensive"): -0.03 / 252,
+                ("확장", "Theme"):     +0.07 / 252,   # 0.10 → 0.07
+                # ★ 정점기
                 ("정점", "Defensive"): +0.05 / 252,
                 ("정점", "Growth"):    -0.03 / 252,
-                ("정점", "Theme"):     -0.05 / 252,   # 테마주 정점서 먼저 빠짐
+                ("정점", "Theme"):     -0.05 / 252,
                 ("정점", "Value"):     +0.02 / 252,
-                # ★ 수축기: 방어주 강세, 성장주/테마주 급락
+                # ★ 수축기
                 ("수축", "Defensive"): +0.10 / 252,
                 ("수축", "Growth"):    -0.08 / 252,
                 ("수축", "Value"):     -0.03 / 252,
-                ("수축", "Theme"):     -0.12 / 252,   # 테마주 수축기 가장 큰 하락
-                # ★ 저점기: 가치주 반등, 성장주 바닥 다지기
+                ("수축", "Theme"):     -0.12 / 252,
+                # ★ 저점기
                 ("저점", "Value"):     +0.10 / 252,
                 ("저점", "Growth"):    +0.05 / 252,
                 ("저점", "Defensive"): +0.04 / 252,
-                ("저점", "Theme"):     +0.03 / 252,   # 테마주 저점서 느리게 회복
+                ("저점", "Theme"):     +0.03 / 252,
             }.get((cycle, sector), 0.0)
             sector_adj += cycle_sector
 
@@ -248,8 +250,8 @@ class StockMarket:
                 meta['inst_share']    = max(0.0, meta.get('inst_share', 0.0)    - 0.004)
 
             # HP 15% 미만: efficiency 점진 하락 → 다음 분기 실적 악화
-            if hp_ratio < 0.15:
-                meta['efficiency'] = meta.get('efficiency', 0.05) * 0.97
+            if hp_ratio < 0.10:   # 0.15 → 0.10으로 강화 (정상 기업 efficiency 보호)
+                meta['efficiency'] = meta.get('efficiency', 0.05) * 0.98  # 0.97 → 0.98
 
             # HP 5% 미만: 워크아웃 이벤트 → 단기 급등 가능 (좀비주 현상)
             if hp_ratio < 0.05 and random.random() < 0.02:
@@ -318,20 +320,20 @@ class StockMarket:
                 # ★ 섹터별 PER 허용 범위 차등
                 # 성장주/테마주는 현실에서 PER 100배도 정당화됨
                 per_tolerance = {
-                    "Growth":    2.5,   # Growth: per_limit의 2.5배까지 허용
-                    "Theme":     2.0,   # Theme: 2배까지 허용
-                    "Value":     1.5,   # Value: 1.5배
-                    "Defensive": 1.3,   # Defensive: 1.3배
-                }.get(sector, 1.5)
+                    "Growth":    1.5,   # 2.5 → 1.5 (실제 압력: 30×1.5=45배부터)
+                    "Theme":     1.4,   # 2.0 → 1.4
+                    "Value":     1.2,   # 1.5 → 1.2
+                    "Defensive": 1.1,   # 1.3 → 1.1
+                }.get(sector, 1.2)
 
                 if per > per_limit * per_tolerance * 1.5:
-                    val_penalty = -min(0.005, (per - per_limit * per_tolerance) / per_limit * 0.002)
+                    val_penalty = -min(0.008, (per - per_limit * per_tolerance) / per_limit * 0.003)
                     daily_return += val_penalty
                 elif per > per_limit * per_tolerance:
-                    val_penalty = -min(0.002, (per - per_limit * per_tolerance) / per_limit * 0.001)
+                    val_penalty = -min(0.004, (per - per_limit * per_tolerance) / per_limit * 0.002)
                     daily_return += val_penalty
                 elif per < per_limit * 0.5:
-                    daily_return += 0.0003   # 저평가 반등 강화
+                    daily_return += 0.0004   # 저평가 반등
             elif annual_ni < 0:
                 hist_ni_count = len([x for yv in hist.values() for x in yv.values()])
                 if hist_ni_count >= 4:
@@ -450,6 +452,14 @@ class StockMarket:
                 min(init_assets * 100, new_assets)  # 상한선: 초기값의 100배
             )
 
+            # ★ efficiency 자연 회복 (정상 기업은 서서히 회복)
+            # 현실: 기업은 학습효과/규모의 경제로 효율이 개선됨
+            if hp_ratio > 0.50 and annual_ni > 0:
+                eff_now = meta.get('efficiency', 0.05)
+                tier_eff_cap = {"대형주": 0.25, "중형주": 0.18, "소형주": 0.12}.get(tier, 0.12)
+                if eff_now < tier_eff_cap:
+                    meta['efficiency'] = min(tier_eff_cap, eff_now * 1.0003)  # 연 ~7.5% 회복
+
             # ★ 부채 갱신 (금리 연동 이자비용)
             self._update_debt(stock, interest_rate)
 
@@ -532,19 +542,20 @@ class StockMarket:
         gdp_factor    = (gdp_ratio ** 0.7)   # 0.7승: GDP 변화를 70% 반영
 
         lv_base = {
-            1: 1000 * (1.08 ** years_elapsed),
-            2: 1000 * (1.08 ** 15) * (1.10 ** max(0, years_elapsed - 15)),
-            3: 1000 * (1.08 ** 15) * (1.10 ** 20) * (1.09 ** max(0, years_elapsed - 35)),
-            4: 1000 * (1.08 ** 15) * (1.10 ** 20) * (1.09 ** 25) * (1.13 ** max(0, years_elapsed - 60)),
+            1: 1000 * (1.07 ** years_elapsed),
+            2: 1000 * (1.07 ** 15) * (1.07 ** max(0, years_elapsed - 15)),
+            3: 1000 * (1.07 ** 15) * (1.07 ** 20) * (1.055 ** max(0, years_elapsed - 35)),
+            4: 1000 * (1.07 ** 15) * (1.07 ** 20) * (1.055 ** 25) * (1.04 ** max(0, years_elapsed - 60)),
         }.get(lv, 1000.0)
-        lv_target = lv_base * gdp_factor   # GDP 역성장 시 lv_target도 낮아짐
+        lv_target = lv_base * gdp_factor
 
         anchor = self.s.gri / max(1.0, lv_target)
-        # anchor 브레이크: 오버슈팅 방지 (단계적 강화)
-        if   anchor > 5.0: weighted_avg_rate -= 0.0050
-        elif anchor > 3.0: weighted_avg_rate -= 0.0025
-        elif anchor > 2.0: weighted_avg_rate -= 0.0012
-        elif anchor > 1.5: weighted_avg_rate -= 0.0005
+        # anchor 브레이크: 극단적 버블만 억제, 일반적 상황은 자유롭게
+        if   anchor > 8.0: weighted_avg_rate -= 0.0040  # 극단 버블만 강하게
+        elif anchor > 5.0: weighted_avg_rate -= 0.0020
+        elif anchor > 3.0: weighted_avg_rate -= 0.0008
+        elif anchor > 2.0: weighted_avg_rate -= 0.0003  # 약한 중력
+        elif anchor > 1.5: weighted_avg_rate -= 0.0001  # 거의 안 당김
         elif anchor < 0.3: weighted_avg_rate += 0.0020
         elif anchor < 0.5: weighted_avg_rate += 0.0012
         elif anchor < 0.7: weighted_avg_rate += 0.0006
@@ -562,8 +573,8 @@ class StockMarket:
 
         # ★ GDP 연간 성장 (매년 1월 1일) — 경기 사이클 연동
         if cur_date.month == 1 and cur_date.day == 1:
-            # 기술 레벨별 기본 성장률
-            lv_base_growth = {1: 0.05, 2: 0.07, 3: 0.06, 4: 0.09}.get(lv, 0.05)
+            # 기술 레벨별 기본 성장률 (선진국일수록 낮아짐)
+            lv_base_growth = {1: 0.05, 2: 0.06, 3: 0.04, 4: 0.025}.get(lv, 0.05)
 
             # 경기 사이클별 보정 (현실 반영)
             cycle_gdp_mult = {
@@ -1461,19 +1472,19 @@ class StockMarket:
         # 200개 이하: 6~8개 (긴급)
         if cur_count >= 400:
             ipo_min, ipo_max = 1, 3
-            mid_ratio = 0.0   # 중형주 비율
+            mid_ratio = 0.20  # ★ 항상 20% 중형주 유지 (현실 신규상장 비율 반영)
         elif cur_count >= 300:
             ipo_min, ipo_max = 2, 4
-            mid_ratio = 0.0
+            mid_ratio = 0.25
         elif cur_count >= 250:
             ipo_min, ipo_max = 3, 5
-            mid_ratio = 0.0
+            mid_ratio = 0.25
         elif cur_count >= 200:
             ipo_min, ipo_max = 4, 6
-            mid_ratio = 0.0
+            mid_ratio = 0.30
         else:
             ipo_min, ipo_max = 6, 8
-            mid_ratio = 0.3   # 긴급 시 중형주 30% 섞기
+            mid_ratio = 0.35  # 긴급 시 중형주 35%
 
         # 버블/수축기 보정 (단, 종목 수 긴급 구간이면 무시)
         if cur_count >= 250:
@@ -1658,46 +1669,42 @@ class StockMarket:
         if "소형" in tier:
             return
 
-        # ★ will_to_split=False면 매우 드물게만 분할
+        # ★ will_to_split=False면 거의 분할 안 함
         if not meta.get('will_to_split', True):
-            if price < 25_000_000:
+            if price < 100_000_000:   # 1억원 미만이면 절대 안 함
                 return
-            if random.random() > 0.005:
+            if random.random() > 0.002:
                 return
 
-        # ★ 생애 최대 5회 제한
+        # ★ 생애 최대 3회 제한 (기존 5회 → 3회, 주식수 폭발 방지)
         split_count = meta.get('split_count', 0)
-        if split_count >= 5:
+        if split_count >= 3:
             return
 
-        # ★ 쿨다운: 756 거래일(3년) 이상 경과해야 분할 가능
+        # ★ 쿨다운: 1260 거래일(5년) 이상 경과해야 분할 가능 (기존 3년 → 5년)
         cooldown = meta.get('split_cooldown_days', 0)
         if cooldown > 0:
             meta['split_cooldown_days'] = cooldown - 1
             return
 
-        # ★ 트리거 조건 (체급별 차등)
+        # ★ 트리거 조건 상향 (주식수 폭발 방지)
         split_ratio = 0
         if "대형" in tier:
-            trigger = 5_000_000   # 500만원
+            trigger = 50_000_000    # 5000만원 (기존 500만원 → 10배)
         else:  # 중형주
-            trigger = 2_000_000   # 200만원
+            trigger = 20_000_000    # 2000만원 (기존 200만원 → 10배)
 
         if price >= trigger:
-            # ★ 분할 비율 (주가 구간별)
-            if price >= trigger * 10:      # 10배 이상
-                split_ratio = 10
-            elif price >= trigger * 2:     # 2~10배
+            # ★ 분할 비율 최대 5:1 (50:1 삭제)
+            if price >= trigger * 5:   # 5배 이상
                 split_ratio = 5
-            else:                          # 1~2배
+            elif price >= trigger * 2: # 2~5배
+                split_ratio = 3
+            else:                      # 1~2배
                 split_ratio = 2
 
-            # ★ will_to_split=True + 주가 2500만원 이상이면 50:1 가능
-            if meta.get('will_to_split', True) and price >= 25_000_000:
-                split_ratio = 50
-
-            # ★ 매일 5% 확률로 트리거 (0.5% → 5%, 주가 너무 높아지는 거 방지)
-            if random.random() > 0.05:
+            # ★ 일일 확률 1%로 낮춤 (기존 5% → 1%)
+            if random.random() > 0.01:
                 return
 
         if split_ratio == 0:

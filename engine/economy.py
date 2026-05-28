@@ -9,6 +9,25 @@ from .constants import SECTOR_MAP
 
 
 class MacroEngine:
+    # ★ 섹터 기본 베이스 수익 — 클래스 상수 (매 호출마다 생성 방지)
+    # ★ 섹터 기본 베이스 수익 — 현실적 수준으로 조정
+    # 배당+안정수익 반영, 너무 크면 가치섹터 폭등 유발
+    _SECTOR_BASE_ADJ = {
+        # ★ 전 섹터 기본 수익률 — 인플레 반영, 장기 마이너스 방지
+        "에너지":       +0.025,
+        "금융":         +0.030,
+        "부동산":       +0.030,
+        "소재":         +0.025,
+        "유틸리티":     +0.020,
+        "산업재":       +0.025,
+        "필수소비재":   +0.020,
+        # ★ 기존에 없던 섹터 추가
+        "IT":           +0.020,
+        "건강관리":     +0.025,
+        "커뮤니케이션": +0.015,
+        "자유소비재":   +0.020,
+    }
+
     def __init__(self, state):
         self.s = state
 
@@ -422,7 +441,7 @@ class MacroEngine:
     # 동적 목표 지수
     # ─────────────────────────────────────────────
     def get_dynamic_target(self) -> float:
-        base_growth_rates = {1: 0.08, 2: 0.12, 3: 0.10, 4: 0.15}
+        base_growth_rates = {1: 0.07, 2: 0.08, 3: 0.065, 4: 0.04}  # Tech4: 0.15 → 0.04
         annual_rate = base_growth_rates.get(self.s.max_tech_reached, 0.08)
 
         if "💀 대공황" in self.s.current_scenario:
@@ -501,22 +520,29 @@ class MacroEngine:
                     annual_adj += extra * 0.3
 
         # ── 섹터 로테이션 (경기 사이클) ──────────
+        # ★ Value/Defensive 섹터 기본 베이스 수익 (클래스 상수 참조 — 매 호출 생성 방지)
+        base = self._SECTOR_BASE_ADJ.get(ind) or self._SECTOR_BASE_ADJ.get(sector, 0.0)
+        annual_adj += base
+
         ROTATION = {
             "확장": {
                 "IT": +0.10, "자유소비재": +0.08, "산업재": +0.08,
-                "금융": +0.05, "필수소비재": -0.03, "유틸리티": -0.03,
+                "금융": +0.06, "에너지": +0.04, "소재": +0.04,
+                "필수소비재": -0.02, "유틸리티": -0.02,
             },
             "정점": {
                 "에너지": +0.10, "소재": +0.08, "IT": +0.03,
-                "건강관리": -0.02, "금융": -0.03,
+                "금융": +0.04, "부동산": +0.03,
+                "건강관리": -0.02,
             },
             "수축": {
                 "필수소비재": +0.08, "유틸리티": +0.08, "건강관리": +0.06,
-                "IT": -0.08, "자유소비재": -0.08, "산업재": -0.06,
+                "부동산": +0.04, "금융": +0.02,
+                "IT": -0.06, "자유소비재": -0.06, "산업재": -0.04,
             },
             "저점": {
-                "금융": +0.08, "부동산": +0.06, "산업재": +0.04,
-                "에너지": -0.03, "소재": -0.03,
+                "금융": +0.08, "부동산": +0.06, "산업재": +0.05,
+                "에너지": +0.03, "소재": +0.02,
             },
         }
         rot = ROTATION.get(cycle, {})
@@ -539,6 +565,21 @@ class MacroEngine:
         sent_diff = (sentiment - 50.0) / 50.0
         sent_mult = 1.5 if tier == "소형주" else 0.8
         annual_adj += sent_diff * 0.03 * sent_mult
+
+        # ── 팬데믹 효과 ───────────────────────────
+        pandemic = getattr(self.s, 'pandemic_event', {})
+        if pandemic.get('phase') == '진행중':
+            if sector in ('Growth', 'Defensive') or ind in ('IT', '건강관리', '필수소비재'):
+                annual_adj += 0.15   # 비대면/IT/건강 수혜
+            elif sector == 'Theme' or ind in ('자유소비재', '부동산', '여행'):
+                annual_adj -= 0.20   # 오프라인 타격
+
+        # ── 전쟁 재건 효과 ────────────────────────
+        war = getattr(self.s, 'war_event', {})
+        if war.get('phase') == '종전' and '재건' in ind:
+            annual_adj += 0.25   # 재건 섹터 강세
+        elif war.get('phase') == '진행중' and '재건' in ind:
+            annual_adj += 0.10   # 전쟁 중에도 재건 수혜 시작
 
         # 연간 조정값을 일별로 변환해서 perf에 추가
         perf += annual_adj / 252
@@ -624,3 +665,107 @@ class MacroEngine:
                         f"{dep_names} 침체로 {ind} 마진 압박 "
                         f"({dep_names} 공급 차질 → {ind} efficiency 하락)"
                     )
+    # ─────────────────────────────────────────────
+    # ★ 원자재 지수 업데이트
+    # ─────────────────────────────────────────────
+    def _update_commodity_prices(self):
+        """
+        곡물/금속/반도체 현실 가격 기준 업데이트
+        - 곡물: $/부셸 (밀 기준, 2000년 $250)
+        - 금속: $/톤   (구리 기준, 2000년 $1,800)
+        - 반도체: SOX 지수 (2000년 1,000)
+        """
+        macro = self.s.macro
+        cycle = getattr(self.s, 'cycle_stage', '확장')
+        war   = getattr(self.s, 'war_event', {})
+        lv    = self.s.max_tech_reached
+
+        # ── 곡물 (grain_price, $/부셸) ──────────
+        # 현실: 2000년 $250 → 2008년 $400 → 2012년 $350 → 2022년 $550
+        # 테크/경기 기반 장기 트렌드 + 사이클 등락
+        grain = macro.get('grain_price', 250.0)
+        # 장기 목표가 (테크 레벨에 따라 점진 상승)
+        grain_long = {1: 300.0, 2: 380.0, 3: 480.0, 4: 400.0}.get(lv, 300.0)
+        grain_target = grain_long * {
+            '확장': 1.05, '정점': 1.15,
+            '수축': 0.92, '저점': 0.85,
+        }.get(cycle, 1.0)
+        # 동유럽 전쟁 시 곡물 급등
+        if war.get('region') == '동유럽' and war.get('phase') == '진행중':
+            grain_target *= 1.6
+        grain_step = (grain_target - grain) * 0.008 + random.uniform(-3.0, 3.0)
+        macro['grain_price'] = max(100.0, min(900.0, grain + grain_step))
+
+        # ── 금속 (metal_price, $/톤 구리) ────────
+        # 현실: 2000년 $1,800 → 2011년 $10,000 → 2016년 $4,500 → 2024년 $9,000
+        metal = macro.get('metal_price', 1800.0)
+        metal_long = {1: 3000.0, 2: 6000.0, 3: 8000.0, 4: 7000.0}.get(lv, 3000.0)
+        metal_target = metal_long * {
+            '확장': 1.10, '정점': 1.20,
+            '수축': 0.85, '저점': 0.75,
+        }.get(cycle, 1.0)
+        # 아프리카/동남아 분쟁 시 금속 급등
+        if war.get('region') in ('아프리카', '동남아') and war.get('phase') == '진행중':
+            metal_target *= 1.5
+        metal_step = (metal_target - metal) * 0.006 + random.uniform(-50.0, 50.0)
+        macro['metal_price'] = max(500.0, min(20000.0, metal + metal_step))
+
+        # ── 반도체 SOX 지수 ──────────────────────
+        # 현실: 2000년 1,000 → 2002년 200 (닷컴버블) → 2024년 5,000
+        semi = macro.get('semi_index', 1000.0)
+        semi_long = {1: 500.0, 2: 1500.0, 3: 3500.0, 4: 6000.0}.get(lv, 1000.0)
+        semi_target = semi_long * {
+            '확장': 1.15, '정점': 1.05,
+            '수축': 0.80, '저점': 0.70,
+        }.get(cycle, 1.0)
+        # 동남아 분쟁 시 공급 차질 → 지수 하락
+        if war.get('region') == '동남아' and war.get('phase') == '진행중':
+            semi_target *= 0.65
+        semi_step = (semi_target - semi) * 0.008 + random.uniform(-20.0, 20.0)
+        macro['semi_index'] = max(100.0, min(15000.0, semi + semi_step))
+
+    # ─────────────────────────────────────────────
+    # ★ 원자재 → 섹터 민감도 (apply_macro_sector_sensitivity에서 호출)
+    # ─────────────────────────────────────────────
+    def get_commodity_adj(self, stock: dict) -> float:
+        """원자재 지수 변화에 따른 섹터별 주가 조정값 (연간 기준)"""
+        meta   = stock['meta']
+        sector = SECTOR_MAP.get(meta.get('ind', ''), 'Value')
+        ind    = meta.get('ind', '')
+        macro  = self.s.macro
+
+        grain = macro.get('grain_price', 250.0)
+        metal = macro.get('metal_price', 1800.0)
+        semi  = macro.get('semi_index',  1000.0)
+
+        # 기준값 대비 변화율
+        grain_diff = (grain - 250.0) / 250.0
+        metal_diff_raw = (metal - 1800.0) / 1800.0
+        semi_diff_raw  = (semi  - 1000.0) / 1000.0
+
+        annual_adj = 0.0
+
+        # 곡물가 영향
+        grain_diff = grain_diff  # 재사용
+        if sector == 'Defensive' or '필수소비재' in ind or '식품' in ind:
+            annual_adj -= grain_diff * 0.04   # 원가 상승 → 마진 압박
+        elif '농업' in ind or '비료' in ind:
+            annual_adj += grain_diff * 0.06   # 수혜
+
+        # 금속가 영향
+        metal_diff = metal_diff_raw
+        if '소재' in sector or '금속' in ind or '철강' in ind:
+            annual_adj += metal_diff * 0.06
+        elif '자동차' in ind or '건설' in ind or '조선' in ind:
+            annual_adj -= metal_diff * 0.03
+        elif sector == 'Value' and '산업재' in ind:
+            annual_adj -= metal_diff * 0.02
+
+        # 반도체 지수 영향
+        semi_diff = semi_diff_raw
+        if 'IT' in sector or 'IT' in ind or '반도체' in ind:
+            annual_adj += semi_diff * 0.05   # SOX 오를수록 IT 수혜
+        elif '전자' in ind or '통신장비' in ind:
+            annual_adj += semi_diff * 0.03
+
+        return annual_adj / 252  # 일별 변환

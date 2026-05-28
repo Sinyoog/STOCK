@@ -363,7 +363,10 @@ class EarningsDialog(QDialog):
         y = self.year_in.text().strip()
         h = self.gs.get_earnings_history(self.name)
         if y in h:
+            _sb = self.report.verticalScrollBar()
+            _pos = _sb.value()
             self.report.setHtml(self._make_table_html(y, h[y]))
+            _sb.setValue(_pos)
 
     def load_cur(self):
         y = str(self.gs.s.current_date.year)
@@ -373,7 +376,10 @@ class EarningsDialog(QDialog):
     def load_all(self):
         h   = self.gs.get_earnings_history(self.name)
         html = "".join(self._make_table_html(y, h[y]) for y in sorted(h.keys()))
+        _sb = self.report.verticalScrollBar()
+        _pos = _sb.value()
         self.report.setHtml(html)
+        _sb.setValue(_pos)
 
 
 # ─────────────────────────────────────────────

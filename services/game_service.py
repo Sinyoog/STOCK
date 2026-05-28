@@ -260,6 +260,10 @@ class GameService:
         self.cm.current_generation = 1
         self.cm.name_pool          = [n for n in NAME_DB if n not in GROUP_BASE_NAMES]
         random.shuffle(self.cm.name_pool)
+        # ★ dispatcher의 시나리오 로그 추적 변수 초기화
+        self.dp._logged_scenario = None
+        self.dp._scenario_log_cache = None  # persistence 캐시도 함께
+        self.db._scenario_log_cache = None
         self.initialize_market()
 
     # ─────────────────────────────────────────────

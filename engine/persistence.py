@@ -134,9 +134,95 @@ class SaveManager:
                 CREATE INDEX IF NOT EXISTS idx_delisted_date
                 ON delisted_stocks (delisted_date DESC)
             """)
+            # ★ 시나리오 로그 테이블
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS scenario_log (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date          TEXT NOT NULL,
+                    scenario      TEXT NOT NULL,
+                    gri           REAL,
+                    gri_high      REAL,
+                    gri_low       REAL,
+                    gri_end       REAL,
+                    duration_days INTEGER,
+                    bubble_index  REAL,
+                    interest_rate REAL,
+                    oil_price     REAL,
+                    exchange_rate REAL,
+                    cpi           REAL,
+                    grain_price   REAL,
+                    metal_price   REAL,
+                    semi_index    REAL,
+                    per_large     REAL,
+                    per_mid       REAL,
+                    per_small     REAL,
+                    sector_growth REAL,
+                    sector_value  REAL,
+                    ind_it        REAL,
+                    ind_health    REAL,
+                    ind_energy    REAL,
+                    ind_finance   REAL,
+                    ind_industry  REAL,
+                    ind_material  REAL,
+                    ind_realestate REAL,
+                    ind_rebuild   REAL,
+                    ind_util      REAL,
+                    ind_consumer  REAL,
+                    ind_staple    REAL,
+                    ind_comm      REAL,
+                    war_event     TEXT,
+                    note          TEXT
+                )
+            """)
             self.conn.commit()
+
+            # ★ scenario_log 컬럼 마이그레이션 (구버전 DB 호환)
+            self._migrate_scenario_log()
+
         except Exception as e:
             print(f"❌ DB 테이블 생성 실패: {e}")
+
+
+    def _migrate_scenario_log(self):
+        """scenario_log 테이블에 누락된 컬럼 자동 추가 (구버전 DB 호환)"""
+        new_cols = [
+            ("gri_high",       "REAL",    "0"),
+            ("gri_low",        "REAL",    "0"),
+            ("gri_end",        "REAL",    "0"),
+            ("duration_days",  "INTEGER", "0"),
+            ("grain_price",    "REAL",    "0"),
+            ("metal_price",    "REAL",    "0"),
+            ("semi_index",     "REAL",    "0"),
+            ("per_large",      "REAL",    "0"),
+            ("per_mid",        "REAL",    "0"),
+            ("per_small",      "REAL",    "0"),
+            ("sector_growth",  "REAL",    "0"),
+            ("sector_value",   "REAL",    "0"),
+            ("ind_it",         "REAL",    "0"),
+            ("ind_health",     "REAL",    "0"),
+            ("ind_energy",     "REAL",    "0"),
+            ("ind_finance",    "REAL",    "0"),
+            ("ind_industry",   "REAL",    "0"),
+            ("ind_material",   "REAL",    "0"),
+            ("ind_realestate", "REAL",    "0"),
+            ("ind_rebuild",    "REAL",    "0"),
+            ("ind_util",       "REAL",    "0"),
+            ("ind_consumer",   "REAL",    "0"),
+            ("ind_staple",     "REAL",    "0"),
+            ("ind_comm",       "REAL",    "0"),
+        ]
+        try:
+            cur = self.conn.cursor()
+            cur.execute("PRAGMA table_info(scenario_log)")
+            existing = {row[1] for row in cur.fetchall()}
+            for col_name, col_type, default in new_cols:
+                if col_name not in existing:
+                    cur.execute(
+                        f"ALTER TABLE scenario_log ADD COLUMN {col_name} {col_type} DEFAULT {default}"
+                    )
+            self.conn.commit()
+        except Exception as e:
+            print(f"❌ scenario_log 마이그레이션 오류: {e}")
 
     def insert_investor_volume(self, date_str: str, name: str,
                                foreign_vol: int, inst_vol: int, retail_vol: int):
@@ -403,6 +489,8 @@ class SaveManager:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=NORMAL")
             self._create_db()
+            # ★ 캐시 초기화 (초기화 후 새 게임 시작 시 중복 방지)
+            self._scenario_log_cache = None
         except Exception as e:
             print(f"❌ DB 초기화 중 오류: {e}")
 
@@ -475,6 +563,11 @@ class SaveManager:
                     "margin_balance":        getattr(self.s, 'margin_balance', {}),
                     "earnings_consensus":    getattr(self.s, 'earnings_consensus', {}),
                     "major_holder_action":   getattr(self.s, 'major_holder_action', {}),
+                    # ★ 신규 이벤트 상태
+                    "war_event":             getattr(self.s, 'war_event', {}),
+                    "pandemic_event":        getattr(self.s, 'pandemic_event', {}),
+                    "market_fully_formed":   getattr(self.s, '_market_fully_formed', False),
+                    "last_external_shock_year": getattr(self.s, '_last_external_shock_year', 0),
                     # daily_volume: SQLite investor_volume으로 관리 — JSON 제외
                     "pending_delist":        {
                         k: {"date": v["date"].strftime("%Y-%m-%d") if hasattr(v.get("date"), "strftime") else str(v.get("date", "")), "reason": v.get("reason", "")}
@@ -566,6 +659,18 @@ class SaveManager:
             self.s.buffett_index      = eng.get("buffett_index", 0.0)
             self.s.foreign_flow_index = eng.get("foreign_flow_index", 0.0)
 
+            # ★ 신규 이벤트 상태 복원
+            self.s.war_event              = eng.get("war_event", {})
+            self.s.pandemic_event         = eng.get("pandemic_event", {})
+            self.s._market_fully_formed   = eng.get("market_fully_formed", False)
+            self.s._last_external_shock_year = eng.get("last_external_shock_year", 0)
+
+            # ★ macro 신규 원자재 필드 — 구버전 세이브 호환
+            macro = self.s.macro
+            if 'grain_price'  not in macro: macro['grain_price']  = 250.0
+            if 'metal_price'  not in macro: macro['metal_price']  = 1800.0
+            if 'semi_index'   not in macro: macro['semi_index']   = 1000.0
+
             # pending_events delist 복원
             pending_delist = eng.get("pending_delist", {})
             self.s.pending_events["delist"] = {}
@@ -600,6 +705,260 @@ class SaveManager:
         except Exception as e:
             print(f"❌ 불러오기 중 오류: {e}")
             return None
+
+
+    # ─────────────────────────────────────────────
+    # ★ 시나리오 로그
+    # ─────────────────────────────────────────────
+    def log_scenario_change(self, date_str: str, scenario: str,
+                             gri: float, bubble: float,
+                             macro: dict, war_event: dict = None,
+                             note: str = "",
+                             market_stats: dict = None):
+        """시나리오 변경 시 DB에 기록 + 이전 시나리오 종료 업데이트"""
+        try:
+            war_str = ""
+            if war_event and war_event.get('phase'):
+                war_str = f"{war_event.get('region','')} {war_event.get('type','')} ({war_event.get('phase','')})"
+
+            ms = market_stats or {}
+
+            self.conn.execute("""
+                INSERT INTO scenario_log
+                (date, scenario, gri, gri_high, gri_low, gri_end, duration_days,
+                 bubble_index, interest_rate, oil_price, exchange_rate, cpi,
+                 grain_price, metal_price, semi_index,
+                 per_large, per_mid, per_small,
+                 sector_growth, sector_value,
+                 ind_it, ind_health, ind_energy, ind_finance,
+                 ind_industry, ind_material,
+                 ind_realestate, ind_rebuild, ind_util,
+                 ind_consumer, ind_staple, ind_comm,
+                 war_event, note)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                date_str, scenario,
+                round(gri, 2),
+                round(gri, 2),   # gri_high 초기값 = 시작 GRI
+                round(gri, 2),   # gri_low  초기값 = 시작 GRI
+                round(gri, 2),   # gri_end  초기값
+                0,               # duration_days 초기값
+                round(bubble, 2),
+                round(macro.get('interest_rate', 0), 2),
+                round(macro.get('oil_price', 0), 2),
+                round(macro.get('exchange_rate', 0), 2),
+                round(macro.get('cpi', 0), 2),
+                round(macro.get('grain_price', 250), 2),
+                round(macro.get('metal_price', 1800), 2),
+                round(macro.get('semi_index', 1000), 2),
+                round(ms.get('per_large', 0), 1),
+                round(ms.get('per_mid', 0), 1),
+                round(ms.get('per_small', 0), 1),
+                round(ms.get('sector_growth', 0), 1),
+                round(ms.get('sector_value', 0), 1),
+                round(ms.get('ind_it', 0), 1),
+                round(ms.get('ind_health', 0), 1),
+                round(ms.get('ind_energy', 0), 1),
+                round(ms.get('ind_finance', 0), 1),
+                round(ms.get('ind_industry', 0), 1),
+                round(ms.get('ind_material', 0), 1),
+                round(ms.get('ind_realestate', 0), 1),
+                round(ms.get('ind_rebuild', 0), 1),
+                round(ms.get('ind_util', 0), 1),
+                round(ms.get('ind_consumer', 0), 1),
+                round(ms.get('ind_staple', 0), 1),
+                round(ms.get('ind_comm', 0), 1),
+                war_str, note
+            ))
+            self.conn.commit()
+            # ★ 캐시 리셋 (새 시나리오 ID로)
+            cur2 = self.conn.cursor()
+            cur2.execute("SELECT last_insert_rowid()")
+            new_id = cur2.fetchone()[0]
+            self._reset_scenario_log_cache(new_id, gri)
+        except Exception as e:
+            print(f"❌ 시나리오 로그 저장 오류: {e}")
+
+    def update_scenario_log_daily(self, gri: float):
+        """매일 최신 시나리오 행의 고점/저점/종료GRI/지속일수 업데이트
+        ★ commit 없음 — flush_daily_db()에서 일괄 처리"""
+        try:
+            # ★ 메모리 캐시로 SELECT 최소화
+            # _scenario_log_cache: (id, gri_high, gri_low) 유지
+            cache = getattr(self, '_scenario_log_cache', None)
+            if cache is None:
+                # 최초 1회만 DB 조회
+                cur = self.conn.cursor()
+                cur.execute("SELECT id, gri_high, gri_low FROM scenario_log ORDER BY id DESC LIMIT 1")
+                row = cur.fetchone()
+                if not row:
+                    return
+                cache = {'id': row[0], 'high': row[1], 'low': row[2], 'days': 0}
+                self._scenario_log_cache = cache
+
+            cache['high']  = max(cache['high'], gri)
+            cache['low']   = min(cache['low'],  gri)
+            cache['days'] += 1
+            cache['end']   = gri
+
+            # ★ commit 없이 execute만 (flush_daily_db에서 일괄 commit)
+            self.conn.execute("""
+                UPDATE scenario_log
+                SET gri_high = ?, gri_low = ?, gri_end = ?,
+                    duration_days = duration_days + 1
+                WHERE id = ?
+            """, (round(cache['high'], 2), round(cache['low'], 2),
+                  round(gri, 2), cache['id']))
+        except Exception as e:
+            print(f"❌ 시나리오 로그 일별 업데이트 오류: {e}")
+
+    def _reset_scenario_log_cache(self, new_id: int, gri: float):
+        """시나리오 변경 시 캐시 리셋"""
+        self._scenario_log_cache = {
+            'id': new_id, 'high': gri, 'low': gri, 'end': gri, 'days': 0
+        }
+
+    def get_scenario_log(self) -> list:
+        """시나리오 로그 전체 조회"""
+        try:
+            cur = self.conn.cursor()
+            cur.execute("""
+                SELECT date, scenario, gri, gri_high, gri_low, gri_end, duration_days,
+                       bubble_index, interest_rate, oil_price, exchange_rate, cpi,
+                       grain_price, metal_price, semi_index,
+                       per_large, per_mid, per_small,
+                       sector_growth, sector_value,
+                       ind_it, ind_health, ind_energy, ind_finance,
+                       ind_industry, ind_material,
+                       ind_realestate, ind_rebuild, ind_util,
+                       ind_consumer, ind_staple, ind_comm,
+                       war_event, note
+                FROM scenario_log ORDER BY id ASC
+            """)
+            rows = cur.fetchall()
+            return [
+                {
+                    "date":          r[0],
+                    "scenario":      r[1],
+                    "gri":           r[2],
+                    "gri_high":      r[3],
+                    "gri_low":       r[4],
+                    "gri_end":       r[5],
+                    "duration_days": r[6],
+                    "bubble":        r[7],
+                    "interest_rate": r[8],
+                    "oil_price":     r[9],
+                    "exchange_rate": r[10],
+                    "cpi":           r[11],
+                    "grain_price":   r[12],
+                    "metal_price":   r[13],
+                    "semi_index":    r[14],
+                    "per_large":     r[15],
+                    "per_mid":       r[16],
+                    "per_small":     r[17],
+                    "sector_growth": r[18],
+                    "sector_value":  r[19],
+                    "ind_it":        r[20],
+                    "ind_health":    r[21],
+                    "ind_energy":    r[22],
+                    "ind_finance":   r[23],
+                    "ind_industry":  r[24],
+                    "ind_material":   r[25],
+                    "ind_realestate": r[26],
+                    "ind_rebuild":    r[27],
+                    "ind_util":       r[28],
+                    "ind_consumer":   r[29],
+                    "ind_staple":     r[30],
+                    "ind_comm":       r[31],
+                    "war_event":      r[32],
+                    "note":           r[33],
+                }
+                for r in rows
+            ]
+        except Exception as e:
+            print(f"❌ 시나리오 로그 조회 오류: {e}")
+            return []
+
+    def export_scenario_log_txt(self, filepath: str = "scenario_log.txt") -> str:
+        """시나리오 로그를 TXT 파일로 내보내기"""
+        rows = self.get_scenario_log()
+        if not rows:
+            return ""
+        lines = []
+        lines.append("=" * 130)
+        lines.append("G.PY Economic System — 시나리오 변경 로그")
+        lines.append("=" * 130)
+
+        # 헤더
+        lines.append(
+            f"{'날짜':<12} {'시작GRI':>8} {'고점':>8} {'저점':>8} {'종료GRI':>8} {'일수':>5} "
+            f"{'버블':>6} {'금리':>6} {'유가':>6} {'환율':>7} {'CPI':>5} "
+            f"{'밀':>5} {'구리':>7} {'SOX':>6} "
+            f"{'PER대':>6} {'PER중':>6} {'PER소':>6} "
+            f"{'성장':>5} {'가치':>5} "
+            f"{'IT':>5} {'건강':>5} {'에너지':>5} {'금융':>5} "
+            f"{'산업재':>5} {'소재':>5} {'부동산':>5} {'재건':>5} "
+            f"{'유틸':>5} {'자유소비':>6} {'필수소비':>6} {'커뮤':>5}  "
+            f"{'시나리오':<30} {'전쟁/이벤트'}"
+        )
+        lines.append("-" * 180)
+
+        for r in rows:
+            war = r.get('war_event') or ""
+            gri = r.get('gri', 0)
+            gri_end = r.get('gri_end', gri)
+            chg = f"({(gri_end/gri-1)*100:+.1f}%)" if gri > 0 else ""
+
+            lines.append(
+                f"{r['date']:<12} "
+                f"{gri:>8,.0f} "
+                f"{r.get('gri_high', gri):>8,.0f} "
+                f"{r.get('gri_low',  gri):>8,.0f} "
+                f"{gri_end:>8,.0f}{chg:>8} "
+                f"{r.get('duration_days', 0):>5}일 "
+                f"{r['bubble']:>6.1f} "
+                f"{r['interest_rate']:>5.2f}% "
+                f"${r['oil_price']:>5.1f} "
+                f"₩{r['exchange_rate']:>6.0f} "
+                f"{r['cpi']:>4.2f}% "
+                f"${r.get('grain_price', 0):>4.0f} "
+                f"${r.get('metal_price', 0):>6.0f} "
+                f"{r.get('semi_index', 0):>6.0f} "
+                f"{r.get('per_large', 0):>5.1f}x "
+                f"{r.get('per_mid', 0):>5.1f}x "
+                f"{r.get('per_small', 0):>5.1f}x "
+                f"{r.get('sector_growth', 0):>+5.1f}% "
+                f"{r.get('sector_value', 0):>+5.1f}% "
+                f"{r.get('ind_it', 0):>+5.1f}% "
+                f"{r.get('ind_health', 0):>+5.1f}% "
+                f"{r.get('ind_energy', 0):>+5.1f}% "
+                f"{r.get('ind_finance', 0):>+5.1f}% "
+                f"{r.get('ind_industry', 0):>+5.1f}% "
+                f"{r.get('ind_material', 0):>+5.1f}% "
+                f"{r.get('ind_realestate', 0):>+5.1f}% "
+                f"{r.get('ind_rebuild', 0):>+5.1f}% "
+                f"{r.get('ind_util', 0):>+5.1f}% "
+                f"{r.get('ind_consumer', 0):>+6.1f}% "
+                f"{r.get('ind_staple', 0):>+6.1f}% "
+                f"{r.get('ind_comm', 0):>+5.1f}%  "
+                f"{r['scenario']:<30} "
+                f"{war}"
+            )
+
+        lines.append("=" * 180)
+        lines.append(f"총 {len(rows)}개 시나리오 기록")
+
+        txt = "\n".join(lines)
+        try:
+            import os
+            filepath = os.path.abspath(filepath)
+            with open(filepath, 'w', encoding='utf-8-sig') as f:  # utf-8-sig: 메모장 호환
+                f.write(txt)
+            print(f"✅ 시나리오 로그 저장: {filepath}")
+        except Exception as e:
+            print(f"❌ TXT 내보내기 오류: {e}")
+            return ""
+        return filepath
 
     def clear_save_file(self, filename: str = "save_game.json"):
         if os.path.exists(filename):

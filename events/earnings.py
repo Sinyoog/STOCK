@@ -164,6 +164,19 @@ class EarningsManager:
         op_income  = earning_data['op_income']
         net_income = earning_data['net_income']
 
+        # ★ efficiency 점진적 수렴 (PER 정상화 핵심)
+        # 기존 종목들이 낮은 efficiency를 가진 채 생성됐으므로
+        # 분기 실적 확정 시마다 목표값으로 서서히 수렴
+        _tier      = meta.get('tier', '소형주')
+        _eff_now   = meta.get('efficiency', 0.05)
+        _eff_target = {
+            '대형주': random.uniform(0.12, 0.20),
+            '중형주': random.uniform(0.08, 0.15),
+            '소형주': random.uniform(0.04, 0.10),
+        }.get(_tier, random.uniform(0.04, 0.10))
+        # 10% 속도로 목표값에 수렴 (너무 급격한 변화 방지)
+        meta['efficiency'] = _eff_now + (_eff_target - _eff_now) * 0.10
+
         # ── HP / Shield 반영 ──────────────────────────────────────
         assets      = max(1, meta['assets'])
         sensitivity = meta.get('risk_sensitivity', 1.0)
@@ -319,13 +332,18 @@ class EarningsManager:
         }
 
         # assets는 적자/흑자 각 블록에서 처리됨 (위에서 처리)
-        # 흑자 시 assets 증가
+        # ★ 흑자 시 assets 증가 — 재투자 비율 제한 + 상한 강화
         if net_income > 0:
             init_assets_v = meta.get('initial_assets', meta['assets'])
-            meta['assets'] = min(
-                init_assets_v * 100,  # 상한선: 초기값의 100배
-                meta['assets'] + net_income
-            )
+            # 티어별 재투자율 (나머지는 배당/자사주매입으로 유출)
+            # 현실: 대기업은 이익의 30~50%만 재투자
+            _reinvest = {
+                '대형주': 0.30,  # 30% 재투자
+                '중형주': 0.50,  # 50% 재투자
+                '소형주': 0.70,  # 70% 재투자 (성장기)
+            }.get(tier, 0.50)
+            reinvested = net_income * _reinvest
+            meta['assets'] = meta['assets'] + reinvested
 
         # ★ 신용등급 복합 판정 (HP + 부채비율 + 연속적자)
         hp_now     = meta.get('hp', 50.0)
