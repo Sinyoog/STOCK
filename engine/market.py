@@ -88,10 +88,10 @@ class StockMarket:
         # ★ 버블 drift 보정 — 상승 중일 때만 억제 적용
         # 이미 하락 중이면 건드리지 않음 (폭락 방지)
         if market_drift > 0:
-            if   bubble_index >= 280: market_drift *= -0.3
-            elif bubble_index >= 250: market_drift *= -0.1
-            elif bubble_index >= 200: market_drift *=  0.3
-            elif bubble_index >= 150: market_drift *=  0.7
+            if   bubble_index >= 280: market_drift *= -0.1   # -0.3 → -0.1 (급반전 완화)
+            elif bubble_index >= 250: market_drift *=  0.25  # -0.1 → 0.25 (성장 유지)
+            elif bubble_index >= 200: market_drift *=  0.55  # 0.3  → 0.55
+            elif bubble_index >= 150: market_drift *=  0.80  # 0.7  → 0.80
 
         peak_gri    = getattr(self.s, 'peak_gri', self.s.gri)
         if self.s.gri > peak_gri: self.s.peak_gri = peak_gri = self.s.gri
@@ -132,7 +132,8 @@ class StockMarket:
             name      = meta['c_name']
             old_price = float(stock['price'])
             tier      = meta.get('tier', '소형주')
-            sector    = SECTOR_MAP.get(meta.get('ind', ''), 'Value')
+            ind       = meta.get('ind', '')
+            sector    = SECTOR_MAP.get(ind, 'Value')
 
             # ★ 수급 구조 기반 변동성 (tier hard cap 제거)
             # 기관·외국인 비중 높을수록 변동성 낮아짐, 개인 비중 높을수록 커짐
@@ -162,10 +163,19 @@ class StockMarket:
                 "저점": 0.75,
             }.get(cycle, 1.0)
             eff  *= cycle_eff_mult
-            alpha = (eff - 0.05) * 0.05
+            alpha = (eff - 0.05) * 0.05 / 252  # ★ /252: 연간 기준 → 일별 변환
 
             # 섹터/테크 조정
-            sector_adj = 0.0
+            # ★ 섹터 기본 베이스 (레벨/사이클 무관 장기 추세)
+            # cycle_sector는 사이클마다 등락하므로 이 베이스가 장기 우상향의 핵심
+            sector_adj = {
+                "Growth":    0.05 / 252,   # +5%/년 기본 (IT/건강관리/커뮤 공통)
+                "Value":     0.05 / 252,   # +5%/년 기본 (금융/부동산/에너지 등)
+                "Defensive": 0.040 / 252,   # +4%/년 기본 (필수소비재/유틸)
+                "Theme":     0.04 / 252,   # +4%/년 기본 (재건/자유소비재)
+            }.get(sector, 0.03 / 252)
+
+            # ★ 레벨별 섹터 보너스
             if lv >= 2 and sector == "Growth":
                 sector_adj += 0.03 / 252   # 0.08 → 0.03: 성장주 보너스 축소
             elif lv >= 2 and sector == "Theme":
@@ -178,6 +188,18 @@ class StockMarket:
                 if   sector == "Growth":    sector_adj += 0.04 / 252  # 0.08 → 0.04
                 elif sector == "Theme":     sector_adj += 0.03 / 252  # 0.06 → 0.03
                 elif sector == "Defensive": sector_adj += 0.01 / 252
+
+            # ★ 산업별 레벨 보정 — market.py 직접 적용
+            # economy.py LV_ADJ는 dispatcher 경로에서 1/100 희석되므로 실효 없음
+            # LV1: 커뮤(포털/방송) 앞서고 IT(PC부품) 억제
+            # LV2: IT(모바일/반도체) 역전, 커뮤 침식
+            _IND_LV_ADJ = {
+                1: {"커뮤니케이션": +0.018/252, "IT": -0.006/252},
+                2: {"IT": +0.030/252, "커뮤니케이션": -0.010/252, "건강관리": +0.010/252},
+                3: {"IT": +0.025/252, "건강관리": +0.018/252, "에너지": +0.010/252},
+                4: {"IT": +0.030/252, "건강관리": +0.025/252, "소재": +0.015/252},
+            }
+            sector_adj += _IND_LV_ADJ.get(lv, {}).get(ind, 0.0)
 
             cycle_sector = {
                 # ★ 확장기
@@ -192,9 +214,9 @@ class StockMarket:
                 ("정점", "Value"):     +0.02 / 252,
                 # ★ 수축기
                 ("수축", "Defensive"): +0.10 / 252,
-                ("수축", "Growth"):    -0.08 / 252,
-                ("수축", "Value"):     -0.03 / 252,
-                ("수축", "Theme"):     -0.12 / 252,
+                ("수축", "Growth"):    -0.04 / 252,   # -0.08 → -0.04
+                ("수축", "Value"):     -0.01 / 252,   # -0.03 → -0.01
+                ("수축", "Theme"):     -0.06 / 252,   # -0.12 → -0.06
                 # ★ 저점기
                 ("저점", "Value"):     +0.10 / 252,
                 ("저점", "Growth"):    +0.05 / 252,
@@ -318,21 +340,29 @@ class StockMarket:
             if annual_ni > 0:
                 per = market_cap / max(1.0, annual_ni)
                 # ★ 섹터별 PER 허용 범위 차등
-                # 성장주/테마주는 현실에서 PER 100배도 정당화됨
+                # tolerance 완화: 압력 시작점을 현실적으로 낮춤
                 per_tolerance = {
-                    "Growth":    1.5,   # 2.5 → 1.5 (실제 압력: 30×1.5=45배부터)
-                    "Theme":     1.4,   # 2.0 → 1.4
-                    "Value":     1.2,   # 1.5 → 1.2
-                    "Defensive": 1.1,   # 1.3 → 1.1
+                    "Growth":    1.2,   # 30×1.2=36배부터 압력
+                    "Theme":     1.1,   # 25×1.1=27.5배부터 압력
+                    "Value":     2.0,   # 13×2.0=26배부터 압력 (에너지/소재 마이너스 방지)
+                    "Defensive": 1.3,   # 18×1.3=23.4배부터 압력
                 }.get(sector, 1.2)
 
-                if per > per_limit * per_tolerance * 1.5:
-                    val_penalty = -min(0.008, (per - per_limit * per_tolerance) / per_limit * 0.003)
-                    daily_return += val_penalty
-                elif per > per_limit * per_tolerance:
-                    val_penalty = -min(0.004, (per - per_limit * per_tolerance) / per_limit * 0.002)
-                    daily_return += val_penalty
-                elif per < per_limit * 0.5:
+                eff_limit = per_limit * per_tolerance  # 실효 PER 한도
+
+                # ★ PER 패널티 — alpha /252 수정 후 균형 재설계
+                # Growth 균형점: ~50배 / Value 균형점: ~22배
+                if per > eff_limit * 2.5:
+                    val_penalty = -min(0.008, (per - eff_limit) / eff_limit * 0.003)
+                elif per > eff_limit * 1.5:
+                    val_penalty = -min(0.004, (per - eff_limit) / eff_limit * 0.002)
+                elif per > eff_limit:
+                    val_penalty = -min(0.002, (per - eff_limit) / eff_limit * 0.001)
+                else:
+                    val_penalty = 0.0
+                daily_return += val_penalty
+
+                if per < per_limit * 0.5:
                     daily_return += 0.0004   # 저평가 반등
             elif annual_ni < 0:
                 hist_ni_count = len([x for yv in hist.values() for x in yv.values()])
@@ -613,16 +643,16 @@ class StockMarket:
         # 버핏 60% 미만 → 버블 0~30 / 100~130% → 버블 80~150 / 160%+ → 버블 250~300
         buffett = getattr(self.s, 'buffett_index', 0.0)
 
-        if buffett < 60:
-            target_bubble = buffett * 0.5                            # 0~30
-        elif buffett < 100:
-            target_bubble = 30 + (buffett - 60) * 1.25              # 30~80
+        if buffett < 80:
+            target_bubble = buffett * 0.4                            # 0~32
         elif buffett < 130:
-            target_bubble = 80 + (buffett - 100) * 2.33             # 80~150
-        elif buffett < 160:
-            target_bubble = 150 + (buffett - 130) * 3.33            # 150~250
+            target_bubble = 32 + (buffett - 80) * 0.96              # 32~80
+        elif buffett < 180:
+            target_bubble = 80 + (buffett - 130) * 1.40             # 80~150
+        elif buffett < 260:         # 230 → 260 (더 여유 있게)
+            target_bubble = 150 + (buffett - 180) * 1.25            # 150~250
         else:
-            target_bubble = min(300.0, 250 + (buffett - 160) * 1.67)  # 250~300
+            target_bubble = min(300.0, 250 + (buffett - 260) * 1.43)  # 260%+부터 극단
 
         # T3 유지 / 대공황 극복 시 버블 억제
         if "T3 유지" in self.s.current_scenario:
@@ -633,8 +663,21 @@ class StockMarket:
         # 실제 버블 지수를 목표값으로 서서히 수렴 (급변 방지)
         bi             = getattr(self.s, 'bubble_index', 0.0)
         bubble_diff    = target_bubble - bi
-        # 하루 최대 변화폭: +2.0 / -3.0 (하락이 더 빠르게)
-        bubble_delta_final = max(-3.0, min(2.0, bubble_diff * 0.05))
+
+        # ★ 자연감소: bi가 높을수록 중력처럼 끌어내림 (mean-reversion)
+        # target이 300이어도 bi가 높으면 자연감소가 상쇄 → 평형점 형성
+        if bi >= 270:
+            natural_decay = -1.5
+        elif bi >= 240:
+            natural_decay = -1.0
+        elif bi >= 200:
+            natural_decay = -0.5
+        elif bi >= 150:
+            natural_decay = -0.15
+        else:
+            natural_decay = 0.0
+
+        bubble_delta_final = max(-4.0, min(2.0, bubble_diff * 0.05 + natural_decay))
         self.s.bubble_index = max(0.0, min(300.0, bi + bubble_delta_final))
 
         # 버블 경고 뉴스 (교육 효과)
@@ -1109,8 +1152,8 @@ class StockMarket:
                 if 0 < days_left <= 7:
                     stock['price'] = int(stock['price'] * 1.007)
                     meta['momentum'] += 0.01
-                elif days_left <= 0:
-                    meta.pop('pending_split', None)
+                # ★ days_left <= 0 시 여기서 삭제하지 않음
+                # → _handle_stock_split() 에서 실제 분할 처리
 
         if self.s.pending_events.get("tech_jump"):
             jump_info = self.s.pending_events["tech_jump"]
@@ -1681,45 +1724,38 @@ class StockMarket:
         if "소형" in tier:
             return
 
-        # ★ 섹터별 설정
+        # ★ 섹터별 설정 — 횟수 제한 제거, 쿨다운으로 대체
+        # 쿨다운: Growth 5년 / Value 10년 / Defensive 7년 / Theme 3년
         SPLIT_CFG = {
-            #            트리거      하한가    쿨다운  최대횟수  의지확률
-            "Growth":    (3_000_000,  300_000,  180,   99,   0.95),
-            "Value":     (5_000_000, 1_000_000, 540,    5,   0.60),
-            "Defensive": (3_000_000,  500_000,  360,    3,   0.35),
-            "Theme":     (1_500_000,  150_000,   90,    2,   0.80),
+            #            트리거      목표주가  쿨다운   의지확률
+            "Growth":    (  500_000,   100_000, 1260,   0.95),  # 50만 트리거, 목표 10만원대
+            "Value":     (5_000_000, 1_000_000, 2520,   0.60),  # 500만 트리거, 목표 100만원대
+            "Defensive": (3_000_000,   300_000, 1764,   0.35),  # 300만 트리거, 목표 30만원대
+            "Theme":     (  800_000,    80_000,  756,   0.80),  # 80만 트리거, 목표 8만원대
         }
         cfg = SPLIT_CFG.get(sector, SPLIT_CFG["Value"])
-        trigger, price_floor, cooldown_days, max_count, will_prob = cfg
+        trigger, target_price, cooldown_days, will_prob = cfg
 
         # ★ will_to_split: 최초 1회만 결정 (섹터별 의지확률 반영)
         if 'will_to_split' not in meta:
             meta['will_to_split'] = (random.random() < will_prob)
 
         if not meta['will_to_split']:
-            # 주가 구간별 매일 재평가 — 높을수록 확률 증가 (한국 시장 기준)
-            # 500~700만:  0.8%/일 → 90일 51%
-            # 700~900만:  1.2%/일 → 90일 66%
-            # 900~1200만: 1.8%/일 → 90일 80%
-            # 1200~1600만:2.5%/일 → 90일 90%
-            # 1600만+:    4.0%/일 → 90일 98%
+            # 주가 구간별 매일 재평가 — 트리거 배율 기준 (섹터별 트리거 차이 흡수)
+            # 트리거의 1~1.5배: 거의 안 함 / 4배+: 높은 확률
             over = price - trigger
             if over > 0:
-                if   price < trigger + 2_000_000: daily_p = 0.008
-                elif price < trigger + 4_000_000: daily_p = 0.012
-                elif price < trigger + 7_000_000: daily_p = 0.018
-                elif price < trigger +11_000_000: daily_p = 0.025
-                else:                             daily_p = 0.040
+                ratio = price / trigger
+                if   ratio >= 10: daily_p = 0.040
+                elif ratio >= 4:  daily_p = 0.025
+                elif ratio >= 2:  daily_p = 0.012
+                elif ratio >= 1.5: daily_p = 0.005
+                else:             daily_p = 0.002  # 트리거 직후: 0.2%/일
                 if random.random() < daily_p:
                     meta['will_to_split'] = True
             return
 
-        # ★ 최대 횟수
-        split_count = meta.get('split_count', 0)
-        if split_count >= max_count:
-            return
-
-        # ★ 쿨다운
+        # ★ 쿨다운 체크 (횟수 제한 없음 — 쿨다운으로만 제어)
         cooldown = meta.get('split_cooldown_days', 0)
         if cooldown > 0:
             meta['split_cooldown_days'] = cooldown - 1
@@ -1733,67 +1769,74 @@ class StockMarket:
         # ★ 트리거 체크
         split_ratio = 0
 
+        # ★ 목표주가 기반 분할 비율 계산 (모든 섹터 공통)
+        # 분할 비율 = price // target_price (목표주가로 나눔)
+        # 단, 섹터별 실행 확률 차등 + Theme는 고가 시 조건 완화
+
         if sector == "Theme":
-            # 테마주: 주가 + 1개월 급등 동시 충족
             rate_1m = meta.get('rate_1m', stock.get('rate', 0.0))
-            if price < trigger or rate_1m < 30.0:
+            overage = price / trigger
+            if price >= trigger * 5:
+                # 400만원+: 가격만으로 분할 (급등 조건 불필요)
+                exec_prob = 0.050 if overage >= 10 else (0.030 if overage >= 5 else 0.015)
+                if random.random() > exec_prob:
+                    return
+            elif price >= trigger and rate_1m >= 30.0:
+                # 80만원+ + 월간 30%+: 기존 급등 분할
+                if random.random() > 0.03:
+                    return
+            else:
                 return
-            if random.random() > 0.03:
-                return
-            split_ratio = 10 if rate_1m >= 100.0 else 5
+
         elif sector == "Defensive":
-            # 방어주: 유동성 트리거 우선, 가격 트리거 보조
             liquidity_starved = (avg_vol < float_shares * 0.0003) and (price >= 1_000_000)
-            price_hit         = (price >= trigger)
+            price_hit = (price >= trigger)
             if not (liquidity_starved or price_hit):
                 return
-            pass_prob = 0.015 if liquidity_starved else 0.010
+            pass_prob = 0.015 if liquidity_starved else 0.008
             if random.random() > pass_prob:
                 return
-            split_ratio = 2
+
         elif sector == "Value":
-            # 가치주: 고가 트리거, 거래량 충분하면 억제
             if price < trigger:
                 return
             if avg_vol >= float_shares * 0.0005:
                 if random.random() > 0.10:
                     return
-            if random.random() > 0.012:
+            if random.random() > 0.010:
                 return
-            # ★ 주가 구간별 분할 비율 (하한가 50만원 기준)
-            # 현실: 삼성전자 270만→50배, 한국 가치주 분할 후 50~200만원대
-            max_ratio = min(10, price // 500_000)  # 하한가 50만원
-            if   price >= trigger * 6: split_ratio = min(10, max_ratio)  # 3000만+
-            elif price >= trigger * 4: split_ratio = min(8,  max_ratio)  # 2000만+
-            elif price >= trigger * 2: split_ratio = min(5,  max_ratio)  # 1000만+
-            elif price >= trigger * 1.4: split_ratio = min(3, max_ratio) # 700만+
-            else:                      split_ratio = 2                   # 500~700만
-            split_ratio = max(2, split_ratio)
+
         else:  # Growth
             if price < trigger:
                 return
-            if random.random() > 0.015:
+            overage = price / trigger
+            if   overage >= 10: exec_prob = 0.050
+            elif overage >= 4:  exec_prob = 0.030
+            elif overage >= 2:  exec_prob = 0.015
+            elif overage >= 1.5: exec_prob = 0.005
+            else:                exec_prob = 0.002
+            if random.random() > exec_prob:
                 return
-            # 분할 후 하한가(price_floor) 유지하는 최대 비율
-            max_ratio = min(10, price // price_floor)
-            if   price >= trigger * 10: split_ratio = min(10, max_ratio)
-            elif price >= trigger * 5:  split_ratio = min(5,  max_ratio)
-            elif price >= trigger * 2:  split_ratio = min(3,  max_ratio)
-            else:                       split_ratio = 2
+
+        # ★ 목표주가 기반 비율 계산
+        # 분할 후 주가가 target_price 수준이 되도록
+        raw_ratio = price // target_price
+        split_ratio = max(2, min(50, raw_ratio))  # 최소 2:1, 최대 50:1
 
         if split_ratio < 2:
             if price < 1000:
                 self._handle_stock_merge(stock, silent)
             return
 
-        # ★ 액면가 하한 체크 (100원 미만 동전주 방지)
+        # ★ 액면가 하한 체크
+        # 전 섹터 100원 하한 (한국 상법 기준)
         par_value = meta.get('par_value', 500)
         new_par   = par_value / split_ratio
-        if new_par < 100:
-            # 최대 가능 비율로 조정
-            split_ratio = max(2, int(par_value // 100))
+        par_floor = 100
+        if new_par < par_floor:
+            split_ratio = max(2, int(par_value // par_floor))
             new_par = par_value / split_ratio
-            if new_par < 100 or split_ratio < 2:
+            if new_par < par_floor or split_ratio < 2:
                 return  # 이미 최소 액면가 → 분할 불가
 
         # ★ D-7 예약
@@ -1823,7 +1866,7 @@ class StockMarket:
             stock['price']      = new_price
             stock['shares']    *= split_ratio
             stock['market_cap'] = stock['price'] * stock['shares']
-            meta['split_count'] = split_count + 1
+            meta['split_count'] = meta.get('split_count', 0) + 1
             meta['par_value']   = int(par_value / split_ratio)  # ★ 액면가 갱신
             meta['split_cooldown_days'] = cooldown_days
 

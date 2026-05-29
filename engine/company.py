@@ -197,7 +197,10 @@ class CompanyManager:
             "meta": {
                 "c_name":               full_name,
                 "will_to_split":        will_to_split,
-                "par_value":            500,   # ★ 액면가 500원 (한국 표준)
+                "par_value":            {
+                    "대1": 5000,
+                    "대":  random.choice([1000, 500]),
+                }.get(tier, 500),   # 중/소형주는 500원 고정
                 "listed_date_dt":       current_date,
                 "listed_date":          current_date.strftime('%Y-%m-%d'),
                 "group_id":             group_id,
