@@ -110,6 +110,10 @@ class GameService:
         self.db.insert_stock_records(db_records)
         print(f"📦 상장일({date_str}) 데이터 {len(db_records)}건이 DB에 저장되었습니다.")
 
+        # ★ 초기 종목 전체 상장 시점 스냅샷 저장
+        for stock in self.s.stocks:
+            self.db.save_listing_snapshot(stock)
+
         self.s.initial_market_total_cap = sum(s['market_cap'] for s in self.s.stocks) or 1.0
 
     # ─────────────────────────────────────────────
@@ -306,6 +310,14 @@ class GameService:
 
     def get_delisted_stock_history(self, name: str) -> list:
         return self.db.get_chart_data(name, 999_999)
+
+    def get_delisted_stock_history_with_dates(self, name: str) -> list:
+        """(date, price) 튜플 리스트 반환 — 상폐 역사관 날짜 X축용"""
+        return self.db.get_chart_data_with_dates(name)
+
+    def get_listing_snapshot(self, name: str) -> dict:
+        """상장 시점 스냅샷 조회"""
+        return self.db.get_listing_snapshot(name)
 
     def get_earnings_history(self, company_name: str) -> dict:
         return self.s.earnings_history.get(company_name, {})

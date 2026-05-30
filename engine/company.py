@@ -7,7 +7,8 @@ engine/company.py
 UI 코드 절대 금지.
 """
 import random
-from .constants import NAME_DB, GROUP_BASE_NAMES, MAIN_INDUSTRIES, SECTOR_MAP, TIER_CONFIG, INDUSTRY_LEVELS
+from .constants import (NAME_DB, GROUP_BASE_NAMES, MAIN_INDUSTRIES, SECTOR_MAP,
+                         TIER_CONFIG, INDUSTRY_LEVELS, TECH_PHASE)
 
 
 class CompanyManager:
@@ -44,9 +45,16 @@ class CompanyManager:
 
         if is_group_member:
             final_name = f"{group_name} {info}"
-            if final_name in self.used_all_time:
+            # ★ 시장 전체에 동일 이름이 있으면 산업명 뒤에 숫자 suffix
+            # 단, 이미 같은 그룹+산업 조합이 존재하면 suffix가 아닌 새 산업으로 가야 함
+            # → handle_group_expansion에서 산업 중복 체크로 1차 방어
+            # → 여기서는 최후 방어선으로 suffix 처리
+            existing_names = {s['meta']['c_name'] for s in self.state.stocks} \
+                if hasattr(self.state, 'stocks') else set()
+            existing_names |= self.used_all_time
+            if final_name in existing_names:
                 suffix = 2
-                while f"{final_name} {suffix}" in self.used_all_time:
+                while f"{final_name} {suffix}" in existing_names:
                     suffix += 1
                 final_name = f"{final_name} {suffix}"
             self.used_all_time.add(final_name)
@@ -72,6 +80,69 @@ class CompanyManager:
             self.sync_to_state()
 
     # ─────────────────────────────────────────────
+    # 현재 페이즈 ID 계산 (economy.py 없이 독립 계산)
+    # ─────────────────────────────────────────────
+    def _get_current_phase(self) -> str:
+        lv = self.state.max_tech_reached
+        upgrade_years = getattr(self.state, '_tech_upgrade_years', {1: 2000})
+        lv_start = upgrade_years.get(lv) or 2000
+        elapsed  = self.state.current_date.year - lv_start
+        for phase in TECH_PHASE.get(lv, []):
+            if phase["offset_start"] <= elapsed < phase["offset_end"]:
+                return phase["id"]
+        phases = TECH_PHASE.get(lv, [])
+        return phases[-1]["id"] if phases else str(lv)
+
+    # ─────────────────────────────────────────────
+    # 페이즈+티어 기반 sub 선택
+    # ─────────────────────────────────────────────
+    def _get_sub_pool(self, ind: str, tier_key: str) -> list:
+        """
+        현재 페이즈와 티어에 맞는 sub 항목 풀 반환.
+        우선순위: 현재페이즈 해당티어 → common 해당티어 → 인접티어 → 전체
+        """
+        phase    = self._get_current_phase()
+        ind_data = INDUSTRY_LEVELS.get(ind, {})
+
+        # 1차: 현재 페이즈 + 해당 티어
+        pool = ind_data.get(phase, {}).get(tier_key, [])
+        if pool:
+            return pool
+
+        # 2차: common + 해당 티어 (항상 존재하는 항목)
+        pool = ind_data.get("common", {}).get(tier_key, [])
+        if pool:
+            return pool
+
+        # 3차: 현재 페이즈에서 인접 티어 fallback
+        phase_data = ind_data.get(phase, {})
+        fallback_order = {
+            "대": ["중", "소"],
+            "중": ["소", "대"],
+            "소": ["중", "대"],
+        }.get(tier_key, ["중", "소"])
+        for fb_tier in fallback_order:
+            pool = phase_data.get(fb_tier, [])
+            if pool:
+                return pool
+
+        # 4차: common 인접 티어
+        common_data = ind_data.get("common", {})
+        for fb_tier in fallback_order:
+            pool = common_data.get(fb_tier, [])
+            if pool:
+                return pool
+
+        # 5차: 전 페이즈 통합
+        all_subs = []
+        for p_key, p_data in ind_data.items():
+            if isinstance(p_data, dict):
+                for t_key, t_list in p_data.items():
+                    if isinstance(t_list, list):
+                        all_subs.extend(t_list)
+        return all_subs if all_subs else [f"{ind} 기본산업"]
+
+    # ─────────────────────────────────────────────
     # 종목 생성
     # ─────────────────────────────────────────────
     def create_stock_data(self, base_name, ind: str, tier: str = "소", group_id=None) -> dict:
@@ -86,7 +157,7 @@ class CompanyManager:
             "Growth":    0.10,   # 90% 분할 의지
             "Value":     0.60,   # 40%
             "Defensive": 0.80,   # 20%
-            "Theme":     0.30,   # 70%
+            "Cyclical":  0.30,   # 70%
         }.get(sector, 0.40)
         will_to_split = dice_split > split_prob
 
@@ -124,32 +195,34 @@ class CompanyManager:
         retail_abs  = retail_r  * rem_p
 
         # 4. 가격 및 주식수 — 시총 목표 역산
-        # 최상위("대1"): 30~50조  / 일반 대기업("대"): 1조~20조
-        # 중견("중"):    1000억~2조 / 중소("소"): 100억~1500억
+        # 코스피 현실 기준 (2000년 초)
+        # 최상위("대1"): 5조~30조 (삼성전자급 → 26년 후 800% = 40조~240조)
+        # 일반 대기업("대"): 5000억~5조
+        # 중견("중"): 1000억~1조
+        # 중소("소"): 100억~3000억
         if tier == "대1":
-            # 케이스 랜덤 선택 (KT형 / 삼성형 / SKT형)
             case = random.randint(1, 3)
             if case == 1:   # 발행주 많고 주가 낮음 (KT형)
-                p       = random.randint(50_000, 100_000)
-                s_count = random.randint(300, 600) * 1_000_000
+                p       = random.randint(20_000, 60_000)
+                s_count = random.randint(500, 1_000) * 1_000_000
             elif case == 2: # 주가/주식수 균형 (삼성전자형)
-                p       = random.randint(200_000, 400_000)
-                s_count = random.randint(100, 200) * 1_000_000
+                p       = random.randint(80_000, 200_000)
+                s_count = random.randint(300, 600) * 1_000_000
             else:           # 주가 높고 발행주 적음 (SKT형)
-                p       = random.randint(2_000_000, 5_000_000)
-                s_count = random.randint(6, 15) * 1_000_000
+                p       = random.randint(500_000, 2_000_000)
+                s_count = random.randint(15, 40) * 1_000_000
         elif tier == "대":
-            # 일반 대기업: 1조~20조
-            p       = random.randint(20_000, 80_000)
-            s_count = random.randint(100, 500) * 1_000_000  # 50~250M → 100~500M
+            # 일반 대기업: 5000억~5조
+            p       = random.randint(15_000, 50_000)
+            s_count = random.randint(200, 700) * 1_000_000
         elif tier == "중":
-            # 중견: 1000억~2조
-            p       = random.randint(5_000, 30_000)
-            s_count = random.randint(20, 150) * 1_000_000  # 5~67M → 20~150M
+            # 중견: 1000억~1조
+            p       = random.randint(5_000, 25_000)
+            s_count = random.randint(30, 200) * 1_000_000
         else:
-            # 중소: 100억~1500억
+            # 중소: 100억~3000억
             p       = random.randint(1_000, 10_000)
-            s_count = random.randint(5, 50) * 1_000_000   # 1~15M → 5~50M
+            s_count = random.randint(10, 80) * 1_000_000
 
         # 5. 이름
         is_group  = (group_id is not None)
@@ -157,7 +230,9 @@ class CompanyManager:
         info_arg  = ind if is_group else base_name
         full_name = self.get_unique_name(is_group, gn_arg, info_arg)
 
-        ind_levels = INDUSTRY_LEVELS.get(ind, {}).get(actual_lv, ["기본 산업"])
+        # ★ 페이즈+티어 기반 sub 풀 (기존 actual_lv 단일 리스트 대체)
+        _tier_key_for_sub = "대" if tier in ("대", "대1") else tier
+        ind_levels = self._get_sub_pool(ind, _tier_key_for_sub)
 
         # 6. HP / Shield
         initial_market_cap = float(p * s_count)
@@ -207,7 +282,12 @@ class CompanyManager:
                 "group":                gn_arg,
                 "tier":                 "대형주" if tier == "대1" else f"{tier}형주",
                 "ind":                  ind,
-                "sub":                  random.choice(ind_levels),
+                "sub":                  random.choice(ind_levels) if ind_levels else f"{ind} 기본산업",
+                # ★ 신규: 사업 목록 (복수 사업 지원)
+                # 초기에는 단일 사업으로 시작, 페이즈 전환 시 추가/교체
+                "sub_list":             [random.choice(ind_levels) if ind_levels else f"{ind} 기본산업"],
+                # ★ 신규: 티어 원본 키 (대1/대/중/소) — TIER_BUSINESS_SPEC 참조용
+                "tier_raw":             tier,
                 "char":                 "Normal",
                 "risk_score":           0.0,
                 # ── HP / Shield ────────────────────
@@ -229,15 +309,15 @@ class CompanyManager:
                 "debt_ratio":           init_debt_ratio, # ★ 신규: 부채비율
                 "target_debt_ratio":    init_debt_ratio, # ★ 신규: 기업별 목표 부채비율 (하한선)
                 "credit_grade":         init_credit,     # ★ 신규: 신용등급
-                # ★ efficiency 상향 — PER 정상화 핵심
-                # 목표: 대형 PER 15~25배, 중형 20~35배, 소형 30~50배
-                # 시뮬레이션으로 검증된 범위
+                # ★ efficiency — 초기값은 흑자 가능한 범위로 설정
+                # PER 정상화는 efficiency 수렴(announce_earnings)에서 페이즈별로 처리
+                # 초기값이 너무 낮으면 전 종목 구조적 적자 → 대량 상폐
                 "efficiency":           {
-                    "대1": random.uniform(0.15, 0.25),  # 최상위: 고효율
-                    "대":  random.uniform(0.12, 0.20),  # 대기업: 안정적
-                    "중":  random.uniform(0.08, 0.15),  # 중견: 일부 위험
-                    "소":  random.uniform(0.04, 0.10),  # 소형: 구조적 적자 가능
-                }.get(tier, random.uniform(0.04, 0.10)),
+                    "대1": random.uniform(0.12, 0.20),
+                    "대":  random.uniform(0.10, 0.18),
+                    "중":  random.uniform(0.06, 0.12),
+                    "소":  random.uniform(0.04, 0.08),
+                }.get(tier, random.uniform(0.04, 0.08)),
                 "momentum":             0.0,
                 "continuous_loss_count": 0,
                 "risk_sensitivity":     {"대": 0.1, "대1": 0.1, "중": 0.5, "소": 1.2}.get(tier, 1.0),
@@ -292,6 +372,10 @@ class CompanyManager:
                 meta['hp_soft_cap']      = new_cap
                 meta['hp']               = round(min(new_cap, hp_ratio * new_cap), 2)
                 meta['risk_sensitivity'] = spec["sensitivity"]
+
+                # ★ tier_raw도 동기화 (TIER_BUSINESS_SPEC 참조용)
+                tier_map = {"대형주": "대", "중형주": "중", "소형주": "소"}
+                meta['tier_raw'] = tier_map.get(meta['tier'], "소")
 
                 cur_shield     = meta.get('shield', 0.0)
                 new_shield_max = s['market_cap'] * spec["shield_ratio"]

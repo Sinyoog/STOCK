@@ -174,6 +174,29 @@ class SaveManager:
                     note          TEXT
                 )
             """)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS listing_snapshots (
+                    c_name        TEXT PRIMARY KEY,
+                    listed_date   TEXT,
+                    tier          TEXT,
+                    ind           TEXT,
+                    sub           TEXT,
+                    grp           TEXT,
+                    price         REAL,
+                    shares        INTEGER,
+                    market_cap    REAL,
+                    efficiency    REAL,
+                    debt_ratio    REAL,
+                    hp            REAL,
+                    hp_soft_cap   REAL,
+                    owner_share   REAL,
+                    foreign_share REAL,
+                    inst_share    REAL,
+                    retail_share  REAL,
+                    treasury_share REAL,
+                    credit_grade  TEXT
+                )
+            """)
             self.conn.commit()
 
             # ★ scenario_log 컬럼 마이그레이션 (구버전 DB 호환)
@@ -455,6 +478,83 @@ class SaveManager:
             return float(row[0]) if row else 0.0
         except Exception:
             return 0.0
+
+    def save_listing_snapshot(self, stock: dict):
+        """종목 상장 시점 스냅샷 저장 — 상장 확정 즉시 1회 호출"""
+        meta = stock.get('meta', {})
+        try:
+            self.conn.execute(
+                """INSERT OR IGNORE INTO listing_snapshots
+                   (c_name, listed_date, tier, ind, sub, grp,
+                    price, shares, market_cap,
+                    efficiency, debt_ratio, hp, hp_soft_cap,
+                    owner_share, foreign_share, inst_share, retail_share,
+                    treasury_share, credit_grade)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    meta.get('c_name', ''),
+                    meta.get('listed_date', ''),
+                    meta.get('tier', '소형주'),
+                    meta.get('ind', ''),
+                    meta.get('sub', ''),
+                    meta.get('group', ''),
+                    float(stock.get('price', 0)),
+                    int(stock.get('shares', 0)),
+                    float(stock.get('market_cap', 0)),
+                    float(meta.get('efficiency', 0)),
+                    float(meta.get('debt_ratio', 0)),
+                    float(meta.get('hp', 0)),
+                    float(meta.get('hp_soft_cap', 60)),
+                    float(meta.get('owner_share', 0)),
+                    float(meta.get('foreign_share', 0)),
+                    float(meta.get('inst_share', 0)),
+                    float(meta.get('retail_share', 0)),
+                    float(meta.get('treasury_share', 0)),
+                    meta.get('credit_grade', 'N/A'),
+                )
+            )
+            self.conn.commit()
+        except Exception as e:
+            print(f"❌ listing_snapshot 저장 오류: {e}")
+
+    def get_listing_snapshot(self, c_name: str) -> dict:
+        """상장 시점 스냅샷 조회 — 없으면 빈 dict 반환"""
+        try:
+            cur = self.conn.cursor()
+            cur.execute(
+                """SELECT c_name, listed_date, tier, ind, sub, grp,
+                          price, shares, market_cap,
+                          efficiency, debt_ratio, hp, hp_soft_cap,
+                          owner_share, foreign_share, inst_share, retail_share,
+                          treasury_share, credit_grade
+                   FROM listing_snapshots WHERE c_name=?""",
+                (c_name,)
+            )
+            row = cur.fetchone()
+            if not row:
+                return {}
+            keys = ['c_name','listed_date','tier','ind','sub','grp',
+                    'price','shares','market_cap',
+                    'efficiency','debt_ratio','hp','hp_soft_cap',
+                    'owner_share','foreign_share','inst_share','retail_share',
+                    'treasury_share','credit_grade']
+            return dict(zip(keys, row))
+        except Exception as e:
+            print(f"❌ listing_snapshot 조회 오류: {e}")
+            return {}
+
+    def get_chart_data_with_dates(self, company_name: str) -> list:
+        """종목의 전체 (date, price) 튜플 리스트 반환 — 상폐 역사관 날짜 X축용"""
+        try:
+            cur = self.conn.cursor()
+            cur.execute(
+                "SELECT date, price FROM stock_history WHERE company_name=? ORDER BY date ASC",
+                (company_name,)
+            )
+            return [(r[0], float(r[1])) for r in cur.fetchall()]
+        except Exception as e:
+            print(f"❌ get_chart_data_with_dates 실패: {e}")
+            return []
 
     def update_adjusted_price(self, company_name: str, ratio: float):
         """분할/병합 시 과거 주가를 ratio 배 조정"""

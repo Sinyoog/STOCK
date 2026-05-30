@@ -550,8 +550,8 @@ class StockFilterDialog(QDialog):
         self.sec_grow      = self._toggle_btn("Growth",   False)
         self.sec_val       = self._toggle_btn("Value",    False)
         self.sec_defensive = self._toggle_btn("Defensive",False)
-        self.sec_theme     = self._toggle_btn("Theme",    False)
-        for b in [self.sec_all, self.sec_grow, self.sec_val, self.sec_defensive, self.sec_theme]:
+        self.sec_cyclical  = self._toggle_btn("Cyclical", False)
+        for b in [self.sec_all, self.sec_grow, self.sec_val, self.sec_defensive, self.sec_cyclical]:
             b.setStyleSheet(btn_style); b.clicked.connect(self._on_filter); sec_lay.addWidget(b)
         layout.addLayout(sec_lay)
 
@@ -589,10 +589,10 @@ class StockFilterDialog(QDialog):
             self.group_all.setChecked(False)
             (self.group_no if sender == self.group_yes else self.group_yes).setChecked(False)
 
-        if sender in [self.sec_grow, self.sec_val, self.sec_defensive, self.sec_theme] and sender.isChecked():
+        if sender in [self.sec_grow, self.sec_val, self.sec_defensive, self.sec_cyclical] and sender.isChecked():
             self.sec_all.setChecked(False)
         elif sender == self.sec_all and self.sec_all.isChecked():
-            for b in [self.sec_grow, self.sec_val, self.sec_defensive, self.sec_theme]:
+            for b in [self.sec_grow, self.sec_val, self.sec_defensive, self.sec_cyclical]:
                 b.setChecked(False)
 
         self.hts.filter_stocks()
@@ -616,7 +616,7 @@ class StockFilterDialog(QDialog):
         for b in self.ind_buttons.values(): b.setChecked(False)
         self.ind_all.setChecked(True)
         self.sec_all.setChecked(True)
-        for b in [self.sec_grow, self.sec_val, self.sec_defensive, self.sec_theme]: b.setChecked(False)
+        for b in [self.sec_grow, self.sec_val, self.sec_defensive, self.sec_cyclical]: b.setChecked(False)
         self.hts.filter_stocks()
 
     def keyPressEvent(self, event):
@@ -827,39 +827,133 @@ class DelistedDetailDialog(QDialog):
         high_52w = m.get('price_52w_high', self.s['price'])
         low_52w  = m.get('price_52w_low',  self.s['price'])
 
+        # ── 상장 시점 스냅샷 조회 ────────────────────────────────
+        snap = self.gs.get_listing_snapshot(self.stock_name)
+
+        def _mc_str(val):
+            if   val >= _경:         return f"{val/_경:.2f}경"
+            elif val >= 100 * _조:   return f"{val//_조:,.0f}조"
+            elif val >= 10  * _조:   return f"{val/_조:.0f}조"
+            elif val >= _조:         return f"{val/_조:.1f}조"
+            elif val >= 100_000_000: return f"{val/100_000_000:.0f}억"
+            else:                    return f"{val:,.0f}원"
+
+        def _cr_color(c): return {'AA':'#00FF00','BB':'#FFA500','CCC':'#FF4444'}.get(c,'#888')
+        def _hp_bar(h, sc):
+            r = h / max(1.0, sc)
+            filled = round(r * 10)
+            col = '#00FF00' if r >= 0.6 else ('#FFA500' if r >= 0.3 else '#FF4444')
+            return f"<span style='color:{col};'>{'■'*filled}{'□'*(10-filled)}</span> {h:.1f}/{sc:.0f}"
+        def _size_label(t): return {'대형주':'[대기업]','중형주':'[중견기업]','소형주':'[중소기업]'}.get(t,'[중소기업]')
+
+        has_snap = bool(snap)
+        s_price    = float(snap.get('price', 0)) if has_snap else 0
+        s_mc       = float(snap.get('market_cap', 0)) if has_snap else 0
+        s_shares   = int(snap.get('shares', 0)) if has_snap else 0
+        s_tier     = snap.get('tier','소형주') if has_snap else '-'
+        s_sub      = snap.get('sub','-') if has_snap else '-'
+        s_grp      = snap.get('grp','단독기업') if has_snap else '-'
+        s_hp       = float(snap.get('hp', 0)) if has_snap else 0
+        s_sc       = float(snap.get('hp_soft_cap', 60)) if has_snap else 60
+        s_debt     = float(snap.get('debt_ratio', 0)) if has_snap else 0
+        s_eff      = float(snap.get('efficiency', 0)) if has_snap else 0
+        s_own      = float(snap.get('owner_share', 0)) * 100 if has_snap else 0
+        s_for      = float(snap.get('foreign_share', 0)) * 100 if has_snap else 0
+        s_ins      = float(snap.get('inst_share', 0)) * 100 if has_snap else 0
+        s_ret      = float(snap.get('retail_share', 0)) * 100 if has_snap else 0
+        s_ts       = float(snap.get('treasury_share', 0)) * 100 if has_snap else 0
+        s_cr       = snap.get('credit_grade','N/A') if has_snap else '-'
+
+        price_chg     = ((float(self.s['price']) - s_price) / s_price * 100) if s_price > 0 else 0
+        price_chg_col = '#FF4444' if price_chg >= 0 else '#4444FF'
+        price_chg_sgn = '▲' if price_chg > 0 else ('▼' if price_chg < 0 else '─')
+        mc_chg        = ((mc - s_mc) / s_mc * 100) if s_mc > 0 else 0
+        mc_chg_col    = '#FF4444' if mc_chg >= 0 else '#4444FF'
+        mc_chg_sgn    = '▲' if mc_chg > 0 else ('▼' if mc_chg < 0 else '─')
+
+        # ── 상장 시점 컬럼 HTML ───────────────────────────────
+        if has_snap:
+            snap_col = f"""
+            <td width='50%' style='padding:4px; vertical-align:top; border-right:1px solid #333;'>
+            <p style='color:#00AAFF;font-size:13px;font-weight:bold;margin:0 0 6px 0;'>📅 상장 시점 ({snap.get('listed_date','-')})</p>
+            <b style='color:#FFD700;'>[기업 정보]</b><br/>
+            그룹: {s_grp}<br/>
+            규모: <b style='color:#FFD700;'>{_size_label(s_tier)}</b><br/>
+            산업: {snap.get('ind','-')} ({s_sub})<br/>
+            <br/>
+            <b style='color:#FFD700;'>[발행 정보]</b><br/>
+            주식수: {s_shares:,}주<br/>
+            주가: <b style='color:#fff;'>{int(s_price):,}원</b><br/>
+            시총: <b style='color:#fff;'>{_mc_str(s_mc)}</b><br/>
+            <br/>
+            <b style='color:#FFD700;'>[지배구조]</b><br/>
+            자사주: {s_ts:.1f}% | 대주주: {s_own:.1f}%<br/>
+            외국인: {s_for:.1f}% | 기관: {s_ins:.1f}%<br/>
+            개인: {s_ret:.1f}%<br/>
+            <br/>
+            <b style='color:#FFD700;'>[재무 체력]</b><br/>
+            {_hp_bar(s_hp, s_sc)}<br/>
+            <br/>
+            <b style='color:#FFD700;'>[재무 지표]</b><br/>
+            효율성: {s_eff*100:.1f}%<br/>
+            부채비율: {s_debt*100:.1f}%<br/>
+            신용등급: <b style='color:{_cr_color(s_cr)};'>{s_cr}</b>
+            </td>"""
+        else:
+            snap_col = """
+            <td width='50%' style='padding:4px; vertical-align:top; border-right:1px solid #333; color:#555;'>
+            <p style='color:#555;font-size:13px;'>📅 상장 시점 데이터 없음<br/>
+            <span style='font-size:11px;'>(이 기능은 업데이트 이후 상장된<br/>종목부터 기록됩니다)</span></p>
+            </td>"""
+
         self.report_panel.setHtml(f"""
-        <div style='font-family: Malgun Gothic;'>
-            <p><b style='color:#FFD700;font-size:14px;'>[기업 정보]</b><br/>
-            그룹: {m.get('group','단독기업')}<br/>규모: <b style='color:#FFD700;'>{size}</b><br/>
-            산업: {m['ind']} ({m['sub']})<br/>상태: <b style='color:#FF4444;'>{m['char']}</b></p>
-            <p><b style='color:#FFD700;font-size:14px;'>[발행 정보]</b><br/>
-            주식수: {self.s['shares']:,} 주<br/>
-            <span style='color:#888888;'>방어막 {shield_str} [{shield_label}]</span><br/>
-            시총: {mc:,} 원 <span style='color:#FFD700;font-weight:bold;'>({mc_str})</span></p>
-            <p><b style='color:#FFD700;font-size:14px;'>[지배구조]</b><br/>
+        <div style='font-family: Malgun Gothic; font-size:13px;'>
+          <table width='100%' style='border-collapse:collapse;'>
+          <tr>
+            {snap_col}
+            <td width='50%' style='padding:4px; vertical-align:top;'>
+            <p style='color:#FF6666;font-size:13px;font-weight:bold;margin:0 0 6px 0;'>💀 폐지 시점 ({m.get('delisted_date','-')})</p>
+            <b style='color:#FFD700;'>[기업 정보]</b><br/>
+            그룹: {m.get('group','단독기업')}<br/>
+            규모: <b style='color:#FFD700;'>{size}</b><br/>
+            산업: {m['ind']} ({m['sub']})<br/>
+            상태: <b style='color:#FF4444;'>{m['char']}</b><br/>
+            <br/>
+            <b style='color:#FFD700;'>[발행 정보]</b><br/>
+            주식수: {self.s['shares']:,}주<br/>
+            주가: <b style='color:#FF4444;'>{int(self.s['price']):,}원</b>
+            {"<b style='color:"+price_chg_col+";'> ("+price_chg_sgn+f"{abs(price_chg):.1f}%)</b>" if has_snap else ""}<br/>
+            시총: <b style='color:#FF4444;'>{mc_str}</b>
+            {"<b style='color:"+mc_chg_col+";'> ("+mc_chg_sgn+f"{abs(mc_chg):.1f}%)</b>" if has_snap else ""}<br/>
+            <span style='color:#888;'>방어막 {shield_str} [{shield_label}]</span><br/>
+            <br/>
+            <b style='color:#FFD700;'>[지배구조]</b><br/>
             자사주: {ts:.1f}% | 대주주: {os:.1f}%<br/>
-            외국인: {fs:.1f}% | 기관 : {ins:.1f}%<br/>개인 : {rs:.1f}%</p>
-            <hr style='border: 0.5px solid #333;'/>
-            <p style='font-size:14px;'><b>[재무 체력]</b></p>
-            <p style='font-size:20px;font-family:monospace;letter-spacing:2px;margin:4px 0;'>
-            <span style='color:{hp_color};'>{hp_bar}</span></p>
-            <p style='font-size:15px;font-weight:bold;margin:4px 0;'>
-            <span style='color:{hp_color};'>HP {hp:.2f} / {soft_cap:.0f}</span>
-            <span style='color:#888;font-size:13px;'> ({hp_ratio*100:.1f}%)</span></p>
-            <hr style='border: 0.5px solid #333;'/>
-            <p style='font-size:13px;'><b>[밸류에이션]</b><br/>
-            PER&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: {per_icon} {per_str}<br/>
-            PBR&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: {pbr_icon} {pbr_str}<br/>
-            ROE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;: {roe_icon} {roe_str}<br/>
+            외국인: {fs:.1f}% | 기관: {ins:.1f}%<br/>
+            개인: {rs:.1f}%<br/>
+            <br/>
+            <b style='color:#FFD700;'>[재무 체력]</b><br/>
+            <span style='font-size:16px;font-family:monospace;'>
+            <span style='color:{hp_color};'>{hp_bar}</span></span><br/>
+            <span style='color:{hp_color};'>HP {hp:.2f}/{soft_cap:.0f}</span>
+            <span style='color:#888;'> ({hp_ratio*100:.1f}%)</span><br/>
+            <br/>
+            <b style='color:#FFD700;'>[밸류에이션]</b><br/>
+            PER: {per_icon} {per_str}<br/>
+            PBR: {pbr_icon} {pbr_str}<br/>
+            ROE: {roe_icon} {roe_str}<br/>
             영업이익률: {op_icon} {op_str}<br/>
-            부채비율&nbsp;&nbsp;: {dr_icon} {dr_str}<br/>
-            신용등급&nbsp;&nbsp;: <b style='color:{credit_color};'>{credit}</b></p>
-            <hr style='border: 0.5px solid #333;'/>
-            <p style='font-size:13px;'><b>[시장 지표]</b><br/>
-            52주 신고가: {int(high_52w):,}원<br/>
-            52주 신저가: {int(low_52w):,}원</p>
-            <hr style='border: 0.5px solid #333;'/>
-            <p style='color: #888; font-size: 11px;'>* 위 수치는 상장폐지 확정 시점의 데이터입니다.</p>
+            부채비율: {dr_icon} {dr_str}<br/>
+            신용등급: <b style='color:{credit_color};'>{credit}</b><br/>
+            <br/>
+            <b style='color:#FFD700;'>[시장 지표]</b><br/>
+            52주 고가: {int(high_52w):,}원<br/>
+            52주 저가: {int(low_52w):,}원
+            </td>
+          </tr>
+          </table>
+          <p style='color:#555;font-size:11px;margin-top:8px;'>
+          * 폐지 시점 수치는 상장폐지 확정 당시 데이터입니다.</p>
         </div>""")
 
     def _load_earnings_table(self):
@@ -926,83 +1020,100 @@ class DelistedDetailDialog(QDialog):
 
     def _load_full_history(self):
         try:
-            raw = self.gs.get_delisted_stock_history(self.stock_name)
+            raw = self.gs.get_delisted_stock_history_with_dates(self.stock_name)
             if not raw: return
-            count = len(raw)
+
+            dates  = [r[0] for r in raw]
+            prices = [r[1] for r in raw]
+            count  = len(prices)
+
             if count == 1:
-                disp = [float(raw[0]), float(raw[0])]
+                disp_prices = [prices[0], prices[0]]
+                disp_dates  = [dates[0], dates[0]]
             else:
-                step = 1 if count < 180 else (7 if count < 1095 else (30 if count < 3650 else (180 if count < 14600 else 365)))
-                disp = [float(raw[i]) for i in range(0, count, step)]
-                if (count - 1) % step != 0: disp.append(float(raw[-1]))
+                step = (1 if count < 180 else
+                        7 if count < 1095 else
+                        30 if count < 3650 else
+                        180 if count < 14600 else 365)
+                indices = list(range(0, count, step))
+                if indices[-1] != count - 1:
+                    indices.append(count - 1)
+                disp_prices = [prices[i] for i in indices]
+                disp_dates  = [dates[i]  for i in indices]
 
-            smoothed = disp[:]
+            if not disp_prices:
+                return
 
-            if smoothed:
-                # ── 라인 그래프 그리기 ────────────────────────
-                diff_color = "#FF4444" if float(raw[-1]) >= float(raw[0]) else "#4444FF"
-                self.curve.setPen(pg.mkPen(color=diff_color, width=2))
-                self.curve.setData(smoothed)
+            # ── 라인 그래프 ───────────────────────────────────
+            diff_color = "#FF4444" if prices[-1] >= prices[0] else "#4444FF"
+            self.curve.setPen(pg.mkPen(color=diff_color, width=2))
+            self.curve.setData(disp_prices)
+            self.baseline.setPos(float(prices[0]))
 
-                # 기준선 (상장 첫날 가격)
-                self.baseline.setPos(float(raw[0]))
+            # ── Y축 범위 (raw 전체 기준) ───────────────────────
+            real_max = max(prices)
+            real_min = min(prices)
+            y_pad = max(1.0, (real_max - real_min) * 0.05) if real_max != real_min else real_min * 0.01
+            self.chart_widget.setYRange(real_min - y_pad, real_max + y_pad)
 
-                # raw 전체 기준 실제 최고/최저
-                raw_floats = [float(x) for x in raw]
-                real_max   = max(raw_floats)
-                real_min   = min(raw_floats)
+            # ── X축 날짜 레이블 ────────────────────────────────
+            n       = len(disp_prices)
+            n_ticks = min(6, n)
+            t_idxs  = [int(i * (n - 1) / max(1, n_ticks - 1)) for i in range(n_ticks)]
+            seen    = set()
+            x_ticks = []
+            for idx in t_idxs:
+                d = disp_dates[idx]
+                label = d[2:7] if len(d) >= 7 else d   # 'YY-MM' 형식
+                if label not in seen:
+                    x_ticks.append((idx, label))
+                    seen.add(label)
+            self.chart_widget.getAxis('bottom').setTicks([x_ticks])
 
-                # Y축 범위는 raw 전체 기준
-                y_pad = max(1.0, (real_max - real_min) * 0.05) if real_max != real_min else real_min * 0.01
-                self.chart_widget.setYRange(real_min - y_pad, real_max + y_pad)
+            # ── 최고/최저 마커 ─────────────────────────────────
+            max_idx = min(range(n), key=lambda i: abs(disp_prices[i] - real_max))
+            min_idx = min(range(n), key=lambda i: abs(disp_prices[i] - real_min))
 
-                # 마커 x좌표는 smoothed에서 가장 가까운 위치로 근사
-                n       = len(smoothed)
-                max_idx = min(range(n), key=lambda i: abs(smoothed[i] - real_max))
-                min_idx = min(range(n), key=lambda i: abs(smoothed[i] - real_min))
-                max_val = real_max
-                min_val = real_min
+            for attr in ['max_scatter', 'min_scatter', 'max_text', 'min_text']:
+                if hasattr(self, attr):
+                    try: self.chart_widget.removeItem(getattr(self, attr))
+                    except: pass
 
-                for attr in ['max_scatter','min_scatter','max_text','min_text']:
-                    if hasattr(self, attr):
-                        try: self.chart_widget.removeItem(getattr(self, attr))
-                        except: pass
+            self.max_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#FF4444'), symbol='o')
+            self.max_scatter.addPoints([{'pos': (max_idx, real_max)}])
+            self.chart_widget.addItem(self.max_scatter)
 
-                self.max_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#FF4444'), symbol='o')
-                self.max_scatter.addPoints([{'pos': (max_idx, max_val)}])
-                self.chart_widget.addItem(self.max_scatter)
+            self.min_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#4444FF'), symbol='o')
+            self.min_scatter.addPoints([{'pos': (min_idx, real_min)}])
+            self.chart_widget.addItem(self.min_scatter)
 
-                self.min_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#4444FF'), symbol='o')
-                self.min_scatter.addPoints([{'pos': (min_idx, min_val)}])
-                self.chart_widget.addItem(self.min_scatter)
+            max_anchor = (1.0, 1.0) if max_idx > n * 0.75 else (0.0, 1.0)
+            self.max_text = pg.TextItem(
+                html=f"<span style='color:#FF4444;font-weight:bold;background-color:#000;'>최고: {int(real_max):,}</span>",
+                anchor=max_anchor)
+            self.max_text.setPos(max_idx, real_max)
+            self.chart_widget.addItem(self.max_text)
 
-                max_anchor = (1.1, 1.1) if max_idx > n * 0.75 else (0, 1)
-                self.max_text = pg.TextItem(
-                    html=f"<span style='color:#FF4444;font-weight:bold;background-color:#000;'>최고: {int(max_val):,}</span>",
-                    anchor=max_anchor)
-                self.max_text.setPos(max_idx, max_val)
-                self.chart_widget.addItem(self.max_text)
+            min_anchor = (1.0, 0.0) if min_idx > n * 0.75 else (0.0, 0.0)
+            self.min_text = pg.TextItem(
+                html=f"<span style='color:#4444FF;font-weight:bold;background-color:#000;'>최저: {int(real_min):,}</span>",
+                anchor=min_anchor)
+            self.min_text.setPos(min_idx, real_min)
+            self.chart_widget.addItem(self.min_text)
 
-                min_anchor = (1.1, -0.1) if min_idx > n * 0.75 else ((-0.1,-0.1) if min_idx < n * 0.25 else (0,0))
-                self.min_text = pg.TextItem(
-                    html=f"<span style='color:#4444FF;font-weight:bold;background-color:#000;'>최저: {int(min_val):,}</span>",
-                    anchor=min_anchor)
-                self.min_text.setPos(min_idx, min_val)
-                self.chart_widget.addItem(self.min_text)
-
-                # 전체 기준 수익률 표시
-                start_p = float(raw[0]); end_p = float(raw[-1])
-                diff    = end_p - start_p
-                rate    = (diff / start_p * 100) if start_p != 0 else 0
-                c_hex   = "#FF4444" if diff > 0 else ("#4444FF" if diff < 0 else "#e0e0e0")
-                sign    = "▲" if diff > 0 else ("▼" if diff < 0 else "─")
-                self.price_summary_label.setText(
-                    f"<span style='color:#aaa;'>전체 기준: </span>"
-                    f"<span style='color:#fff;'>{int(start_p):,}원</span>"
-                    f"<span style='color:#fff;'> → </span>"
-                    f"<span style='color:{c_hex};font-weight:bold;'>{int(end_p):,}원 "
-                    f"({sign}{int(abs(diff)):,}원, {rate:+.2f}%)</span>"
-                )
+            # ── 전체 수익률 요약 ───────────────────────────────
+            start_p = prices[0]; end_p = prices[-1]
+            diff    = end_p - start_p
+            rate    = (diff / start_p * 100) if start_p != 0 else 0
+            c_hex   = "#FF4444" if diff > 0 else ("#4444FF" if diff < 0 else "#e0e0e0")
+            sign    = "▲" if diff > 0 else ("▼" if diff < 0 else "─")
+            self.price_summary_label.setText(
+                f"<span style='color:#aaa;'>전체 기준: </span>"
+                f"<span style='color:#fff;'>{int(start_p):,}원</span>"
+                f"<span style='color:#fff;'> → </span>"
+                f"<span style='color:{c_hex};font-weight:bold;'>{int(end_p):,}원 "
+                f"({sign}{int(abs(diff)):,}원, {rate:+.2f}%)</span>"
+            )
         except Exception as e:
             print(f"❌ 상장폐지 차트 로드 실패: {e}")
 

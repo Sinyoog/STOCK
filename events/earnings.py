@@ -51,25 +51,178 @@ class EarningsManager:
 
         revenue   = meta['assets'] * random.uniform(0.04, 0.10) * cycle_revenue_mult
 
-        # ★ 테크 레벨 성장 가중치 (캐시 우선 사용, 없으면 직접 계산)
-        try:
-            ind          = meta.get('ind', '')
-            current_subs = [x.strip() for x in meta.get('sub', '').split(',')]
-            if _current_lv_cache is not None:
-                current_lv_list = _current_lv_cache.get(ind, [])
-                old_lv_list     = _old_lv_cache.get(ind, [])
-            else:
-                from engine.constants import INDUSTRY_LEVELS
-                current_lv    = self.s.max_tech_reached
-                lv_industries = INDUSTRY_LEVELS.get(ind, {})
-                current_lv_list = lv_industries.get(current_lv, [])
-                old_lv_list = [s for lv in range(1, current_lv)
-                               for s in lv_industries.get(lv, [])]
+        # ★ 페이즈별 매출 성장 승수 (핵심 — 이익 성장의 근원)
+        # 현실: 삼성전자 2000년 매출 30조 → 2025년 300조 (10배)
+        # 페이즈가 올라갈수록 시장 규모 자체가 커짐
+        # Growth 섹터는 더 크게, Value/Defensive는 완만하게
+        from engine.constants import SECTOR_MAP as _SM
+        _sector = _SM.get(meta.get('ind', ''), 'Value')
+        _cur_phase = getattr(self.s, '_last_processed_phase', '1A')
 
-            if any(s in current_lv_list for s in current_subs):
-                tech_mult = 1.3
-            elif any(s in old_lv_list for s in current_subs):
-                tech_mult = 1.0
+        _PHASE_REVENUE_MULT = {
+            # Growth 섹터: IT/건강/커뮤 — 현실 기준 (삼성전자급 26년 10배)
+            ("1A", "Growth"):    1.00,
+            ("1B", "Growth"):    1.30,
+            ("2A", "Growth"):    2.00,
+            ("2B", "Growth"):    3.20,
+            ("3A", "Growth"):    5.00,
+            ("3B", "Growth"):    7.50,
+            ("4A", "Growth"):   11.00,
+            ("4B", "Growth"):   16.00,
+            # Cyclical: 자유소비재 — 소비시장 성장
+            ("1A", "Cyclical"):  1.00,
+            ("1B", "Cyclical"):  1.20,
+            ("2A", "Cyclical"):  1.70,
+            ("2B", "Cyclical"):  2.50,
+            ("3A", "Cyclical"):  3.50,
+            ("3B", "Cyclical"):  5.00,
+            ("4A", "Cyclical"):  7.00,
+            ("4B", "Cyclical"): 10.00,
+            # Value: 에너지/금융/산업재/소재/부동산 — 안정 성장
+            ("1A", "Value"):     1.00,
+            ("1B", "Value"):     1.15,
+            ("2A", "Value"):     1.40,
+            ("2B", "Value"):     1.80,
+            ("3A", "Value"):     2.30,
+            ("3B", "Value"):     3.00,
+            ("4A", "Value"):     3.80,
+            ("4B", "Value"):     5.00,
+            # Defensive: 필수소비재/유틸 — 완만
+            ("1A", "Defensive"): 1.00,
+            ("1B", "Defensive"): 1.08,
+            ("2A", "Defensive"): 1.20,
+            ("2B", "Defensive"): 1.38,
+            ("3A", "Defensive"): 1.60,
+            ("3B", "Defensive"): 1.85,
+            ("4A", "Defensive"): 2.15,
+            ("4B", "Defensive"): 2.50,
+        }
+        phase_rev_mult = _PHASE_REVENUE_MULT.get((_cur_phase, _sector), 1.0)
+
+        # ★ 버그 방지: 승수 상한 — 너무 빠른 성장 억제
+        scenario = self.s.current_scenario
+        if "대공황" in scenario and "극복" not in scenario:
+            phase_rev_mult = max(1.0, phase_rev_mult * 0.5)
+        elif cycle in ("수축", "저점"):
+            phase_rev_mult = max(1.0, phase_rev_mult * 0.75)
+
+        # ★ 수출/내수 의존도 기반 성장 차등
+        from engine.constants import EXPORT_DEPENDENCY, EXPORT_SANCTION_TYPES
+        ind = meta.get('ind', '')
+        export_dep = EXPORT_DEPENDENCY.get(ind, 0.3)
+
+        # 수출 호황 시나리오 — 수출 의존도 높을수록 더 큰 수혜
+        boom = getattr(self.s, 'boom_event', {})
+        if boom.get('phase') == '진행중' and boom.get('type') == '수출호황':
+            export_bonus = 1.0 + (export_dep * 0.8)  # IT(0.75): +60%, 유틸(0.03): +2.4%
+            phase_rev_mult *= export_bonus
+
+        # 내수 붐 시나리오 — 내수 의존도 높을수록 더 큰 수혜
+        elif boom.get('phase') == '진행중' and boom.get('type') == '내수붐':
+            domestic_dep = 1.0 - export_dep
+            domestic_bonus = 1.0 + (domestic_dep * 0.5)
+            phase_rev_mult *= domestic_bonus
+
+        # ★ 내수형 섹터 자연 성장 상한 (유틸/부동산/금융)
+        # 아무리 페이즈가 올라가도 정부규제/인구한계로 제한
+        _DOMESTIC_CAP = {
+            "유틸리티":   2.0,   # 한전급 — 정부 요금 통제
+            "부동산":     2.5,   # 국내 시장 한계
+            "금융":       2.8,   # 예대마진 한계
+            "필수소비재": 2.0,   # 인구 정체 (K-식품 수출 예외는 boom에서 처리)
+        }
+        if ind in _DOMESTIC_CAP:
+            phase_rev_mult = min(phase_rev_mult, _DOMESTIC_CAP[ind])
+
+        # ★ 수출 규제 이벤트 적용
+        sanctions = getattr(self.s, 'export_sanctions', {})
+        for sanction_id, sanction_state in sanctions.items():
+            s_def = EXPORT_SANCTION_TYPES.get(sanction_id, {})
+            if ind not in s_def.get('target_inds', []):
+                continue
+            phase = sanction_state.get('phase', '')
+            if phase == '단기충격':
+                # 단기 패널티: 매출 승수 축소
+                penalty = s_def.get('short_penalty', -0.10)
+                phase_rev_mult *= (1.0 + penalty)
+                phase_rev_mult = max(0.5, phase_rev_mult)
+            elif phase == '중장기수혜':
+                # 공급망 재편 수혜: 매출 승수 소폭 증가
+                benefit = s_def.get('long_benefit', 0.05)
+                phase_rev_mult *= (1.0 + benefit)
+
+        # ★ 시총 기반 성장 감쇠 — 기업이 커질수록 기본 성장 둔화
+        # 호재(boom/수출/내수/수출규제)는 이미 위에서 phase_rev_mult에 반영됨
+        # 여기서는 기업 자체 규모에 따른 자연 둔화만 적용
+        # 단, 페이즈 전환 직후 1년간은 감쇠 완화 (LV전환 랠리 보호)
+        _mc = stock.get('market_cap', 0)
+        _조 = 1_000_000_000_000
+        if   _mc < 1 * _조:    _mc_decay = 1.00   # 1조 미만: 풀 성장
+        elif _mc < 5 * _조:    _mc_decay = 0.95
+        elif _mc < 10 * _조:   _mc_decay = 0.88
+        elif _mc < 30 * _조:   _mc_decay = 0.78
+        elif _mc < 80 * _조:   _mc_decay = 0.65
+        elif _mc < 200 * _조:  _mc_decay = 0.52
+        else:                  _mc_decay = 0.42   # 200조+: 대형 우량주 수준
+
+        # 페이즈 전환 부스트: 전환 후 252일간 감쇠 완화
+        _trans_day   = getattr(self.s, '_phase_transition_day', -9999)
+        _cur_day     = getattr(self.s, 'cycle_day', 0)
+        _since_trans = _cur_day - _trans_day
+        if 0 <= _since_trans <= 252:
+            _boost = 1.0 - (_since_trans / 252.0)
+            _mc_decay = _mc_decay + (1.0 - _mc_decay) * _boost
+
+        # 감쇠는 기본 페이즈 성장 부분에만 적용
+        # boom/수출/수출규제 등 이벤트 승수는 별도 보호
+        _base_rev_mult = _PHASE_REVENUE_MULT.get((_cur_phase, _sector), 1.0)
+        _event_bonus   = phase_rev_mult / max(0.01, _base_rev_mult)  # 이벤트가 올린 배율
+        phase_rev_mult = (_base_rev_mult * _mc_decay) * _event_bonus
+
+        revenue *= phase_rev_mult
+
+        # ★ 테크 레벨 성장 가중치 — 페이즈 기반으로 수정
+        try:
+            ind = meta.get('ind', '')
+            # sub_list 우선, 없으면 sub 단일값으로 fallback
+            sub_list = meta.get('sub_list') or [meta.get('sub', '')]
+            current_subs = [s.strip() for s in sub_list if s]
+
+            if _current_lv_cache is not None:
+                current_phase_subs = _current_lv_cache.get(ind, set())
+                old_phase_subs     = _old_lv_cache.get(ind, set())
+            else:
+                from engine.constants import INDUSTRY_LEVELS, TECH_PHASE
+                ind_data   = INDUSTRY_LEVELS.get(ind, {})
+                cur_phase  = getattr(self.s, '_last_processed_phase', '1A')
+                # 현재 페이즈 전체 subs
+                current_phase_subs = set()
+                for t_list in ind_data.get(cur_phase, {}).values():
+                    current_phase_subs.update(t_list)
+                for t_list in ind_data.get('common', {}).values():
+                    current_phase_subs.update(t_list)
+                # 과거 페이즈 subs
+                old_phase_subs = set()
+                lv = self.s.max_tech_reached
+                all_phases = [p["id"] for p in TECH_PHASE.get(lv, [])]
+                for ph in all_phases:
+                    if ph == cur_phase:
+                        break
+                    for t_list in ind_data.get(ph, {}).values():
+                        old_phase_subs.update(t_list)
+
+            if any(s in current_phase_subs for s in current_subs):
+                # ★ 현재 페이즈 사업: 페이즈가 높을수록 더 큰 보너스
+                _phase_tech_bonus = {
+                    "1A": 1.10, "1B": 1.15,
+                    "2A": 1.25, "2B": 1.35,
+                    "3A": 1.45, "3B": 1.55,
+                    "4A": 1.65, "4B": 1.80,
+                }.get(_cur_phase, 1.30)
+                tech_mult = _phase_tech_bonus
+            elif any(s in old_phase_subs for s in current_subs):
+                # ★ 구시대 사업: 페이즈 격차가 클수록 더 큰 패널티
+                tech_mult = 0.85  # 0.9 → 0.85 강화
             else:
                 tech_mult = 1.0
         except Exception:
@@ -164,18 +317,41 @@ class EarningsManager:
         op_income  = earning_data['op_income']
         net_income = earning_data['net_income']
 
-        # ★ efficiency 점진적 수렴 (PER 정상화 핵심)
-        # 기존 종목들이 낮은 efficiency를 가진 채 생성됐으므로
-        # 분기 실적 확정 시마다 목표값으로 서서히 수렴
+        # ★ efficiency 점진적 수렴 — 코스피 기준 + 페이즈 성장 반영
+        # 코스피 평균 PER 10~13배 목표
+        # 페이즈가 올라갈수록 기업들의 수익성이 자연스럽게 개선됨
         _tier      = meta.get('tier', '소형주')
-        _eff_now   = meta.get('efficiency', 0.05)
-        _eff_target = {
-            '대형주': random.uniform(0.12, 0.20),
-            '중형주': random.uniform(0.08, 0.15),
-            '소형주': random.uniform(0.04, 0.10),
-        }.get(_tier, random.uniform(0.04, 0.10))
-        # 10% 속도로 목표값에 수렴 (너무 급격한 변화 방지)
-        meta['efficiency'] = _eff_now + (_eff_target - _eff_now) * 0.10
+        _eff_now   = meta.get('efficiency', 0.03)
+        _cur_phase = getattr(self.s, '_last_processed_phase', '1A')
+
+        # 페이즈별 efficiency 상한 — 높은 페이즈일수록 수익성 개선 허용
+        _PHASE_EFF_CAP = {
+            '1A': {'대형주': 0.14, '중형주': 0.10, '소형주': 0.07},
+            '1B': {'대형주': 0.16, '중형주': 0.12, '소형주': 0.08},
+            '2A': {'대형주': 0.18, '중형주': 0.14, '소형주': 0.10},
+            '2B': {'대형주': 0.20, '중형주': 0.16, '소형주': 0.12},
+            '3A': {'대형주': 0.23, '중형주': 0.18, '소형주': 0.14},
+            '3B': {'대형주': 0.26, '중형주': 0.21, '소형주': 0.16},
+            '4A': {'대형주': 0.30, '중형주': 0.24, '소형주': 0.18},
+            '4B': {'대형주': 0.35, '중형주': 0.28, '소형주': 0.22},
+        }
+        _eff_cap = _PHASE_EFF_CAP.get(_cur_phase, {'대형주': 0.10, '중형주': 0.07, '소형주': 0.04})
+        _cap_val = _eff_cap.get(_tier, 0.04)
+
+        # 목표값: 현재 페이즈 상한의 70~90% 수준으로 수렴
+        _eff_target = random.uniform(_cap_val * 0.70, _cap_val * 0.90)
+        _eff_target = min(_eff_target, _cap_val)  # 상한 초과 방지
+
+        # 시총 기반 수렴 속도 감쇠 — 대기업일수록 효율성 개선 더딤
+        _mc_now = stock.get('market_cap', 0)
+        _조_e   = 1_000_000_000_000
+        if   _mc_now < 1  * _조_e:  _conv_speed = 0.10
+        elif _mc_now < 10 * _조_e:  _conv_speed = 0.07
+        elif _mc_now < 50 * _조_e:  _conv_speed = 0.04
+        else:                        _conv_speed = 0.02
+
+        # 10% → 속도로 수렴 (급격한 변화 방지)
+        meta['efficiency'] = min(_cap_val, _eff_now + (_eff_target - _eff_now) * _conv_speed)
 
         # ── HP / Shield 반영 ──────────────────────────────────────
         assets      = max(1, meta['assets'])
@@ -199,6 +375,24 @@ class EarningsManager:
             # 연속 적자 카운트
             loss_cnt = meta.get('continuous_loss_count', 0) + 1
             meta['continuous_loss_count'] = loss_cnt
+
+            # ★ 최소 4분기(1년)치 실적이 쌓인 후에만 HP 차감
+            # 첫 발표 때는 비교 기준이 없으므로 HP 차감 없음
+            # 현실: 신규 상장 후 첫 적자로 재무위기 판정은 불합리
+            _name = meta.get('c_name', '')
+            _hist = self.s.earnings_history.get(_name, {})
+            _total_q = sum(len(qd) for qd in _hist.values())
+            if _total_q < 4:
+                # 실적 기록 부족 — HP 차감 없이 assets/debt만 반영
+                meta['assets'] = max(
+                    meta.get('initial_assets', assets) * 0.01,
+                    meta['assets'] + net_income
+                )
+                debt = meta.get('debt', 0.0)
+                meta['debt'] = debt + abs(net_income) * 0.5
+                if meta['assets'] > 0:
+                    meta['debt_ratio'] = meta['debt'] / meta['assets']
+                return True
 
             from engine.constants import SECTOR_MAP
             scenario = self.s.current_scenario
@@ -401,30 +595,47 @@ class EarningsManager:
     def process_earnings_schedule(self, silent: bool):
         cur_month = self.s.current_date.month
         cur_day   = self.s.current_date.day
+        cur_date  = self.s.current_date
+        start_date = getattr(self.s, 'start_date', cur_date)
 
         # 1일: 다음 실적 발표일 예약 + 수치 확정
         if cur_month in [2, 5, 8, 11] and cur_day == 1:
-            # ★ INDUSTRY_LEVELS 캐시 — 400종목 루프에서 매번 import 방지
-            from engine.constants import INDUSTRY_LEVELS as _IL
-            current_lv = self.s.max_tech_reached
-            # 현재 레벨 산업 목록 및 구세대 산업 목록을 미리 계산 (루프 밖 1회)
-            _current_lv_cache = {
-                ind: _IL.get(ind, {}).get(current_lv, [])
-                for ind in _IL
-            }
-            _old_lv_cache = {
-                ind: [s for lv in range(1, current_lv) for s in _IL.get(ind, {}).get(lv, [])]
-                for ind in _IL
-            }
+            # ★ 페이즈 기반 캐시 (기존 숫자 LV 키 → 페이즈 ID 기반)
+            from engine.constants import INDUSTRY_LEVELS as _IL, TECH_PHASE
+            cur_phase = getattr(self.s, '_last_processed_phase', '1A')
+            lv        = self.s.max_tech_reached
+
+            # 현재 페이즈 subs 캐시
+            _current_lv_cache = {}
+            for ind, ind_data in _IL.items():
+                subs = set()
+                for t_list in ind_data.get(cur_phase, {}).values():
+                    subs.update(t_list)
+                for t_list in ind_data.get('common', {}).values():
+                    subs.update(t_list)
+                _current_lv_cache[ind] = subs
+
+            # 구시대 페이즈 subs 캐시
+            all_phases = [p["id"] for p in TECH_PHASE.get(lv, [])]
+            _old_lv_cache = {}
+            for ind, ind_data in _IL.items():
+                old_subs = set()
+                for ph in all_phases:
+                    if ph == cur_phase:
+                        break
+                    for t_list in ind_data.get(ph, {}).values():
+                        old_subs.update(t_list)
+                _old_lv_cache[ind] = old_subs
+
             for stock in self.s.stocks:
                 meta = stock['meta']
                 meta['report_day']        = random.randint(7, 28)
-                meta['earning_news_date'] = self.s.current_date.strftime('%Y-%m-%d')
+                meta['earning_news_date'] = cur_date.strftime('%Y-%m-%d')
                 meta['expected_earnings'] = self.calculate_potential_earnings(
                     stock, _current_lv_cache, _old_lv_cache
                 )
                 is_surplus = meta['expected_earnings'].get('is_surplus', True)
-                meta['momentum'] += 0.05 if is_surplus else -0.05
+                meta['momentum'] += 0.02 if is_surplus else -0.02
 
         # 공시 발표일 처리
         report_target_months = [3, 4, 6, 7, 9, 10, 12]

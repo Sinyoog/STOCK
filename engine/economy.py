@@ -1,68 +1,90 @@
 """
 engine/economy.py
 MacroEngine: 경기선행지수 기반 사이클, 피드백 루프 3개, 섹터 로테이션.
+
+[변경 사항]
+- get_current_phase(): 신규 — _tech_upgrade_years 기반 페이즈 계산
+- get_tech_level(): _tech_upgrade_year → _tech_upgrade_years 기록으로 변경
+                   LV3→LV4 확률 누적 방식으로 변경 (5판에 1판 확률)
+- apply_macro_sector_sensitivity(): _SECTOR_LV_ADJ 대신 PHASE_SECTOR_COEFF 사용
+                                    temp_sector_buff 반영 추가
+- _update_commodity_prices(): SOX 페이즈별 자연성장 로직 추가
+- 재건 섹터 관련 코드 제거 (temp_sector_buff로 대체)
 """
 import random
 import math
 from datetime import timedelta
-from .constants import SECTOR_MAP
+from .constants import SECTOR_MAP, TECH_PHASE, PHASE_SECTOR_COEFF, SOX_GROWTH_RATE
 
 
 class MacroEngine:
-    # ★ 섹터 기본 베이스 수익 — 클래스 상수 (매 호출마다 생성 방지)
-    # ★ 섹터 기본 베이스 수익 — 현실적 수준으로 조정
-    # 배당+안정수익 반영, 너무 크면 가치섹터 폭등 유발
+    # ★ 섹터 기본 베이스 수익 — 인플레 반영, 장기 마이너스 방지
+    # ★ 페이즈별 섹터 베이스 수익 — LV가 높을수록 내수형 둔화, 성장형 가속
+    # 사용처: apply_macro_sector_sensitivity에서 phase 참조
     _SECTOR_BASE_ADJ = {
-        # ★ 전 섹터 기본 수익률 — 인플레 반영, 장기 마이너스 방지
-        "에너지":       +0.025,
-        "금융":         +0.030,
-        "부동산":       +0.030,
-        "소재":         +0.025,
-        "유틸리티":     +0.020,
-        "산업재":       +0.025,
-        "필수소비재":   +0.020,
-        # ★ 기존에 없던 섹터 추가
-        "IT":           +0.020,
-        "건강관리":     +0.025,
-        "커뮤니케이션": +0.015,
-        "자유소비재":   +0.020,
-    }
-
-    # ★ 기술 레벨별 섹터 로테이션 보정
-    # LV1: 커뮤(포털/방송) 황금기 / LV2: IT(모바일/반도체) 주도 / LV3: AI+바이오 / LV4: 전방위
-    # ※ 이 값들은 economy dispatcher 경로로 적용되므로 미세 보정용
-    # 실질적인 산업 레벨 보정은 market.py의 _IND_LV_ADJ에서 담당
-    _SECTOR_LV_ADJ = {
-        1: {
-            "커뮤니케이션": +0.018,
-            "에너지":       +0.006,
-            "산업재":       +0.005,
-            "IT":           -0.006,
-            "건강관리":     -0.004,
+        "1A": {
+            "에너지":       +0.025, "금융":         +0.028,
+            "부동산":       +0.028, "소재":         +0.022,
+            "유틸리티":     +0.020, "산업재":       +0.022,
+            "필수소비재":   +0.020, "IT":           +0.018,
+            "건강관리":     +0.020, "커뮤니케이션": +0.015,
+            "자유소비재":   +0.018,
         },
-        2: {
-            "IT":           +0.028,
-            "건강관리":     +0.012,
-            "금융":         +0.008,
-            "커뮤니케이션": -0.012,
-            # 에너지 패널티 제거 — LV2에서 에너지는 중립
-            "부동산":       +0.005,
-            "산업재":       +0.004,
+        "1B": {
+            "에너지":       +0.026, "금융":         +0.026,
+            "부동산":       +0.025, "소재":         +0.024,
+            "유틸리티":     +0.020, "산업재":       +0.025,
+            "필수소비재":   +0.020, "IT":           +0.022,
+            "건강관리":     +0.022, "커뮤니케이션": +0.018,
+            "자유소비재":   +0.020,
         },
-        3: {
-            "IT":           +0.032,
-            "건강관리":     +0.025,
-            "에너지":       +0.015,
-            "소재":         +0.010,
-            "커뮤니케이션": -0.005,
-            "금융":         +0.010,
+        "2A": {
+            "에너지":       +0.022, "금융":         +0.022,
+            "부동산":       +0.020, "소재":         +0.022,
+            "유틸리티":     +0.018, "산업재":       +0.024,
+            "필수소비재":   +0.018, "IT":           +0.026,
+            "건강관리":     +0.026, "커뮤니케이션": +0.022,
+            "자유소비재":   +0.022,
         },
-        4: {
-            "IT":           +0.035,
-            "건강관리":     +0.030,
-            "소재":         +0.020,
-            "산업재":       +0.015,
-            "에너지":       +0.018,
+        "2B": {
+            "에너지":       +0.020, "금융":         +0.020,
+            "부동산":       +0.018, "소재":         +0.022,
+            "유틸리티":     +0.016, "산업재":       +0.022,
+            "필수소비재":   +0.016, "IT":           +0.030,
+            "건강관리":     +0.028, "커뮤니케이션": +0.024,
+            "자유소비재":   +0.020,
+        },
+        "3A": {
+            "에너지":       +0.018, "금융":         +0.016,
+            "부동산":       +0.014, "소재":         +0.020,
+            "유틸리티":     +0.014, "산업재":       +0.018,
+            "필수소비재":   +0.014, "IT":           +0.034,
+            "건강관리":     +0.032, "커뮤니케이션": +0.026,
+            "자유소비재":   +0.018,
+        },
+        "3B": {
+            "에너지":       +0.016, "금융":         +0.012,
+            "부동산":       +0.010, "소재":         +0.018,
+            "유틸리티":     +0.012, "산업재":       +0.015,
+            "필수소비재":   +0.012, "IT":           +0.036,
+            "건강관리":     +0.038, "커뮤니케이션": +0.024,
+            "자유소비재":   +0.016,
+        },
+        "4A": {
+            "에너지":       +0.014, "금융":         +0.008,
+            "부동산":       +0.006, "소재":         +0.016,
+            "유틸리티":     +0.012, "산업재":       +0.010,
+            "필수소비재":   +0.010, "IT":           +0.042,
+            "건강관리":     +0.040, "커뮤니케이션": +0.026,
+            "자유소비재":   +0.012,
+        },
+        "4B": {
+            "에너지":       +0.016, "금융":         +0.006,
+            "부동산":       +0.004, "소재":         +0.018,
+            "유틸리티":     +0.014, "산업재":       +0.008,
+            "필수소비재":   +0.008, "IT":           +0.050,
+            "건강관리":     +0.046, "커뮤니케이션": +0.028,
+            "자유소비재":   +0.010,
         },
     }
 
@@ -70,15 +92,34 @@ class MacroEngine:
         self.s = state
 
     # ─────────────────────────────────────────────
+    # 페이즈 계산 (신규)
+    # _tech_upgrade_years 기반 — 연도 고정 아님
+    # ─────────────────────────────────────────────
+    def get_current_phase(self) -> str:
+        """
+        현재 테크 레벨과 진입 후 경과 년수를 기반으로
+        페이즈 ID를 반환합니다. (예: "1A", "2B", "3A" 등)
+        """
+        lv = self.s.max_tech_reached
+        upgrade_years = getattr(self.s, '_tech_upgrade_years', {1: 2000})
+        lv_start = upgrade_years.get(lv) or 2000
+        elapsed = self.s.current_date.year - lv_start
+
+        for phase in TECH_PHASE.get(lv, []):
+            if phase["offset_start"] <= elapsed < phase["offset_end"]:
+                return phase["id"]
+
+        # fallback: 마지막 페이즈
+        phases = TECH_PHASE.get(lv, [])
+        return phases[-1]["id"] if phases else str(lv)
+
+    # ─────────────────────────────────────────────
     # 기술 레벨
     # ─────────────────────────────────────────────
     def get_tech_level(self) -> int:
-        cy = self.s.current_date.year
-        current_lv = self.s.max_tech_reached
-
+        cy          = self.s.current_date.year
+        current_lv  = self.s.max_tech_reached
         is_depression = "대공황" in self.s.current_scenario and "극복" not in self.s.current_scenario
-        is_t4_world   = "T4 발전"  in self.s.current_scenario
-        is_t3_world   = "T3 유지"  in self.s.current_scenario
 
         if is_depression:
             return current_lv
@@ -88,55 +129,74 @@ class MacroEngine:
         if self.s.pending_events.get("tech_jump"):
             evolution_chance = 0.0
         else:
+            upgrade_years = getattr(self.s, '_tech_upgrade_years', {1: 2000})
+
             if current_lv == 1:
-                # Lv1→Lv2: 2013년 이전 불가, GRI 1800 이상 필요
-                if cy < 2013 or self.s.gri < 1800:
+                lv1_start = upgrade_years.get(1, 2000)
+                years_in_lv1 = cy - lv1_start
+                # LV1 진입 후 10년 이전 불가, GRI 1800 이상 필요
+                if years_in_lv1 < 10 or self.s.gri < 1800:
                     evolution_chance = 0.0
                 else:
-                    t1_probs = {2013: 5, 2014: 10, 2015: 20, 2016: 30,
-                                2017: 20, 2018: 10, 2019: 5}
-                    base_chance      = t1_probs.get(cy, 8) / 100 / 252
-                    gri_mult         = min(2.0, max(0.5, self.s.gri / 2500))
-                    evolution_chance = base_chance * gri_mult
-                    if cy >= 2020:
+                    # 10~14년: 낮은 확률, 14년 이상: 점점 높아짐
+                    base = min(0.15, (years_in_lv1 - 10) * 0.025) / 100 / 252
+                    gri_mult = min(2.0, max(0.5, self.s.gri / 2500))
+                    evolution_chance = base * gri_mult
+                    # 20년 이상이면 강제 전환
+                    if years_in_lv1 >= 20:
                         evolution_chance = 1.0
 
             elif current_lv == 2:
-                # Lv2→Lv3: 2030년 이전 불가, GRI 7000 이상 필요
-                if cy < 2030 or self.s.gri < 7000:
+                lv2_start = upgrade_years.get(2, cy)
+                years_in_lv2 = cy - lv2_start if lv2_start else 0
+                # LV2 진입 후 12년 이전 불가, GRI 7000 이상 필요
+                if years_in_lv2 < 12 or self.s.gri < 7000:
                     evolution_chance = 0.0
                 else:
-                    t2_probs = {2030: 2, 2031: 3, 2032: 5, 2033: 8,
-                                2034: 12, 2035: 18, 2036: 15, 2037: 12,
-                                2038: 10, 2039: 8, 2040: 5}
-                    base_chance      = t2_probs.get(cy, 8) / 100 / 252
-                    gri_mult         = min(2.0, max(0.5, self.s.gri / 12000))
-                    evolution_chance = base_chance * gri_mult
-                    if cy >= 2042:
+                    base = min(0.20, (years_in_lv2 - 12) * 0.02) / 100 / 252
+                    gri_mult = min(2.0, max(0.5, self.s.gri / 12000))
+                    evolution_chance = base * gri_mult
+                    if years_in_lv2 >= 25:
                         evolution_chance = max(evolution_chance, 0.15 / 252)
-                    if cy >= 2045:
+                    if years_in_lv2 >= 30:
                         evolution_chance = 1.0
 
             elif current_lv == 3:
-                if is_t3_world:   return 3
-                # Lv3→Lv4: 2055년 이전 불가, 분기점 선택 후에만
-                elif is_t4_world and cy >= 2055:
-                    evolution_chance = 0.1 / 252
-                elif cy >= 2060 and not is_depression and not is_t3_world:
-                    evolution_chance = 0.05 / 252
+                lv3_start = upgrade_years.get(3, cy)
+                years_in_lv3 = cy - lv3_start if lv3_start else 0
+
+                # LV3→LV4: 진입 후 20년 경과부터 누적 확률
+                # 5판에 1판 도달 목표 (약 20% 확률)
+                # 20년 후부터 매일 0.003% 누적, 안정기 보너스 있음
+                if years_in_lv3 >= 20 and not is_depression:
+                    base_daily = 0.003 / 252
+                    # 안정기(버블 낮음) 보너스
+                    if self.s.bubble_index < 80:
+                        base_daily *= 1.5
+                    # 누적 (대공황 중엔 누적 중단)
+                    self.s.lv4_chance_accum = getattr(self.s, 'lv4_chance_accum', 0.0)
+                    self.s.lv4_chance_accum += base_daily
+                    evolution_chance = self.s.lv4_chance_accum
+                else:
+                    evolution_chance = 0.0
 
         if evolution_chance > 0 and random.random() < evolution_chance:
             jump_date = self.s.current_date + timedelta(days=30)
             target_lv = current_lv + 1
-            lv_name   = {2: "2단계 (모바일·클라우드 혁명)",
-                         3: "3단계 (AI·양자 혁명)",
-                         4: "4단계 (기술 특이점)"}.get(target_lv, f"{target_lv}단계")
+            lv_name   = {
+                2: "2단계 (모바일·클라우드 혁명)",
+                3: "3단계 (AI·양자 혁명)",
+                4: "4단계 (기술 특이점)",
+            }.get(target_lv, f"{target_lv}단계")
             self.s.pending_events["tech_jump"] = {
                 "target_lv": target_lv,
                 "date":      jump_date,
                 "lv_name":   lv_name,
                 "notified":  False,
             }
+            # LV4 전환 시 누적 확률 리셋
+            if target_lv == 4:
+                self.s.lv4_chance_accum = 0.0
 
         if self.s.pending_events.get("tech_jump"):
             jump_info = self.s.pending_events["tech_jump"]
@@ -165,9 +225,17 @@ class MacroEngine:
             if jump_info and self.s.current_date.date() >= jump_info["date"].date():
                 new_lv  = jump_info["target_lv"]
                 lv_name = jump_info.get("lv_name", f"{new_lv}단계")
-                self.s.max_tech_reached   = new_lv
-                self.s._tech_upgrade_year = self.s.current_date.year
-                # 테크 전환 랠리: 심리 과열 + 경기 확장 강제 전환
+                self.s.max_tech_reached = new_lv
+
+                # ★ _tech_upgrade_years에 진입 연도 기록
+                upgrade_years = getattr(self.s, '_tech_upgrade_years', {1: 2000})
+                upgrade_years[new_lv] = self.s.current_date.year
+                self.s._tech_upgrade_years = upgrade_years
+
+                # ★ 페이즈 전환 부스트 시작 — 감쇠 1년간 완화
+                self.s._phase_transition_day = getattr(self.s, 'cycle_day', 0)
+
+                # 테크 전환 랠리
                 self.s.sentiment   = min(85.0, getattr(self.s, 'sentiment', 50.0) + 25.0)
                 self.s.cycle_stage = "확장"
                 self.s.cycle_day   = 0
@@ -175,7 +243,6 @@ class MacroEngine:
                     f"🚀 [시대 진화] {cy}년, 문명이 {lv_name}로 도약했습니다! "
                     f"산업 전반에 대규모 기술 혁신이 시작됩니다."
                 )
-                # 테크 전환 섹터 충격
                 self._apply_tech_shock(new_lv)
                 self.s.pending_events["tech_jump"] = None
 
@@ -183,28 +250,23 @@ class MacroEngine:
 
     def _apply_tech_shock(self, new_lv: int):
         """테크 전환 시 섹터별 efficiency 영구 조정"""
-        # Lv1→Lv2
         if new_lv == 2:
-            boost  = {"IT": 0.20, "커뮤니케이션": 0.15, "자유소비재": 0.10, "금융": 0.08}
-            penalty= {"에너지": -0.10}
-        # Lv2→Lv3
+            boost   = {"IT": 0.20, "커뮤니케이션": 0.15, "자유소비재": 0.10, "금융": 0.08}
+            penalty = {"에너지": -0.10}
         elif new_lv == 3:
-            boost  = {"건강관리": 0.25, "IT": 0.20, "산업재": 0.15, "소재": 0.10}
-            penalty= {"필수소비재": -0.05, "유틸리티": -0.10}
-        # Lv3→Lv4
+            boost   = {"건강관리": 0.25, "IT": 0.20, "산업재": 0.15, "소재": 0.10}
+            penalty = {"필수소비재": -0.05, "유틸리티": -0.10}
         elif new_lv == 4:
-            boost  = {"IT": 0.30, "건강관리": 0.25, "금융": 0.15}
-            penalty= {"에너지": -0.15, "부동산": -0.05}
+            boost   = {"IT": 0.30, "건강관리": 0.25, "금융": 0.15}
+            penalty = {"에너지": -0.15, "부동산": -0.05}
         else:
             return
 
         for stock in self.s.stocks:
             meta   = stock['meta']
-            sector = SECTOR_MAP.get(meta.get('ind', ''), 'Value')
             ind    = meta.get('ind', '')
-            # sector 이름과 ind 이름 모두 체크
             for key, delta in {**boost, **penalty}.items():
-                if key in ind or key == sector:
+                if key == ind:
                     old_eff = meta.get('efficiency', 0.05)
                     meta['efficiency'] = max(0.005, min(0.30, old_eff + old_eff * delta))
                     break
@@ -218,54 +280,39 @@ class MacroEngine:
     # 경기선행지수 계산
     # ─────────────────────────────────────────────
     def calc_leading_index(self) -> float:
-        """
-        Conference Board 방식의 경기선행지수.
-        게임 내 지표들로 구성:
-          1. 금리 방향성   : 최근 금리가 내리면 +, 오르면 -
-          2. GRI 모멘텀    : 최근 20일 GRI 변화율
-          3. 실적 방향성   : avg_earnings_growth
-          4. 물가 안정성   : CPI vs 목표치
-        반환값: -1.0 ~ +1.0
-        """
         macro = self.s.macro
         lv    = self.s.max_tech_reached
         target_cpi = {1: 2.0, 2: 2.5, 3: 4.0, 4: 1.0}.get(lv, 2.0)
 
-        # 1. 금리 방향성 (전일 스냅샷과 비교)
-        prev = getattr(self.s, '_prev_macro_snapshot', {})
+        prev      = getattr(self.s, '_prev_macro_snapshot', {})
         prev_rate = prev.get('interest_rate', macro['interest_rate'])
         rate_delta = macro['interest_rate'] - prev_rate
-        rate_score = max(-0.4, min(0.4, -rate_delta * 10))  # 금리 오르면 음수
+        rate_score = max(-0.4, min(0.4, -rate_delta * 10))
 
-        # 2. GRI 모멘텀 (최근 20일)
         hist = getattr(self.s, '_gri_history_20', [])
         if len(hist) >= 20:
             gri_mom = (hist[-1] - hist[0]) / max(1.0, hist[0])
             gri_score = max(-0.3, min(0.3, gri_mom * 5))
         else:
-            gri_score = 0.05  # 초반엔 약간 긍정
+            gri_score = 0.05
 
-        # 3. 실적 방향성 (초반 2년은 최솟값 보정)
         earn = getattr(self.s, 'avg_earnings_growth', 0.05)
         cur_year = self.s.current_date.year
         if cur_year <= 2001:
-            earn = max(0.02, earn)  # 초반엔 음수로 안 내려가게
+            earn = max(0.02, earn)
         earn_score = max(-0.2, min(0.2, earn * 2))
 
-        # 4. 물가 안정성 (CPI가 목표보다 낮으면 +)
-        cpi_diff = target_cpi - macro['cpi']
+        cpi_diff  = target_cpi - macro['cpi']
         cpi_score = max(-0.2, min(0.2, cpi_diff * 0.05))
 
         leading = rate_score + gri_score + earn_score + cpi_score
         return max(-1.0, min(1.0, leading))
 
     def _update_cycle_stage(self, leading: float):
-        """경기 사이클 단계 업데이트 - 최소 지속 기간 적용"""
         s = self.s
         prev_stage = getattr(s, 'cycle_stage', '확장')
         s.cycle_day = getattr(s, 'cycle_day', 0) + 1
 
-        # 선행지수 기반 단계 결정
         if leading >= 0.15:
             new_stage = "확장"
         elif leading >= 0.0:
@@ -275,30 +322,18 @@ class MacroEngine:
         else:
             new_stage = "저점"
 
-        # 최소 지속 기간 (현실 경기 사이클: 각 국면 최소 6개월~2년)
-        # 박스피처럼 수축이 오래 지속될 수 있어야 함
-        MIN_DAYS = {
-            "확장": 63,     # 최소 3개월 (선행지수가 나쁘면 빨리 전환 가능)
-            "정점": 21,     # 최소 1개월
-            "수축": 126,    # 최소 6개월
-            "저점": 42,     # 최소 2개월
-        }
+        MIN_DAYS = {"확장": 63, "정점": 21, "수축": 126, "저점": 42}
 
         if new_stage != prev_stage:
             min_d = MIN_DAYS.get(prev_stage, 63)
             if s.cycle_day < min_d:
-                return  # 최소 기간 미달 시 전환 안 함
+                return
+            if prev_stage == "확장" and new_stage == "정점" and leading > 0.30:
+                return
+            elif prev_stage == "정점" and new_stage == "수축" and leading > 0.10:
+                return
 
-            # 선행지수가 강하게 긍정적이면 확장 유지 (강제 전환 방지)
-            # 예) 확장기인데 leading=0.5면 정점으로 안 넘어감
-            if prev_stage == "확장" and new_stage == "정점":
-                if leading > 0.30:
-                    return   # 선행지수가 충분히 좋으면 확장 유지
-            elif prev_stage == "정점" and new_stage == "수축":
-                if leading > 0.10:
-                    return   # 선행지수가 아직 양수면 수축 안 함
-
-            s.cycle_day = 0
+            s.cycle_day   = 0
             s.cycle_stage = new_stage
             if not s.silent_mode:
                 emoji = {"확장": "📈", "정점": "🔝", "수축": "📉", "저점": "🔻"}.get(new_stage, "")
@@ -306,18 +341,12 @@ class MacroEngine:
                     f"{emoji} [경기 전환] 경기 국면이 '{prev_stage}' → '{new_stage}'로 전환됩니다."
                 )
 
-    # ─────────────────────────────────────────────
-    # 투자심리 업데이트
-    # ─────────────────────────────────────────────
     def _update_sentiment(self, leading: float):
-        """투자심리 (0~100): 50 중립, 80+ 과열, 20- 공포"""
         s = self.s
         sentiment = getattr(s, 'sentiment', 50.0)
-
-        # 선행지수에 따라 서서히 이동
-        target = 50.0 + leading * 40.0   # leading +1.0 → target 90, -1.0 → target 10
-        diff   = (target - sentiment) * 0.02  # 하루 2% 속도로 수렴
-        noise  = random.uniform(-0.5, 0.5)
+        target    = 50.0 + leading * 40.0
+        diff      = (target - sentiment) * 0.02
+        noise     = random.uniform(-0.5, 0.5)
         s.sentiment = max(5.0, min(95.0, sentiment + diff + noise))
 
     # ─────────────────────────────────────────────
@@ -335,7 +364,7 @@ class MacroEngine:
             hist.pop(0)
         self.s._gri_history_20 = hist
 
-        # ── 선행지수 & 사이클 단계 ────────────────
+        # ── 선행지수 & 사이클 ─────────────────────
         is_depression = "대공황" in scenario and "극복" not in scenario
         if not is_depression:
             leading = self.calc_leading_index()
@@ -343,19 +372,26 @@ class MacroEngine:
             self._update_cycle_stage(leading)
             self._update_sentiment(leading)
         else:
-            leading = self.s.leading_index  # 대공황 중엔 선행지수 고정
+            leading = self.s.leading_index
 
         cycle = getattr(self.s, 'cycle_stage', '확장')
+
+        # ── 원자재 업데이트 (SOX 포함) ────────────
+        self._update_commodity_prices()
 
         # ── 기준 목표값 ───────────────────────────
         target_cpi      = {1: 2.0, 2: 2.5, 3: 4.0, 4: 1.0}.get(lv, 2.0)
         target_interest = target_cpi + 1.5
         target_oil      = {1: 45, 2: 90, 3: 140, 4: 25}.get(lv, 50)
-        target_fx       = {1: 1150, 2: 1250, 3: 1350, 4: 950}.get(lv, 1150)
-
+        # ★ 환율 기준값 상향 (현실 반영)
+        # LV1: 1,250 (2000년대 평균)
+        # LV2: 1,350 (2010년대 평균 — 수출 강세 시 1,050, 위기 시 1,500+)
+        # LV3: 1,200 (기술 강국 → 원화 강세)
+        # LV4: 900  (포스트휴먼 경제 — 달러 패권 약화)
+        target_fx       = {1: 1250, 2: 1350, 3: 1200, 4: 900}.get(lv, 1250)
         MAX_RATE_CHANGE = 0.05
 
-        # ── 소조정 ───────────────────────────────
+        # ── 소조정 ────────────────────────────────
         if "📉 소조정" in scenario:
             if getattr(self.s, 'scenario_timer', 0) > 180:
                 self.s.current_scenario = "📈 일반 성장"
@@ -370,34 +406,28 @@ class MacroEngine:
                 macro["oil_price"] = max(5, macro["oil_price"] + oil_drift)
                 self.s.cumulative_inflation *= (1 + (macro["cpi"] / 100) / 252)
                 self.s.base_item_price = 1000.0 * self.s.cumulative_inflation
-                # 전일 스냅샷 업데이트
                 self.s._prev_macro_snapshot = {k: macro[k] for k in macro}
                 return
 
-        # ── 대공황 ───────────────────────────────
+        # ── 대공황 ────────────────────────────────
         if is_depression or "✨ 대공황V" in scenario:
             total_days   = 252 * 10
             timer        = getattr(self.s, 'scenario_timer', 0)
             elapsed_days = total_days - timer
             progress     = max(0.0, min(1.0, elapsed_days / total_days))
 
-            # 현실적: 초기 금리 인하(양적완화), 중기 물가 상승, 후기 정상화
             if progress < 0.2:
-                # 초기: 중앙은행 대응 → 금리 인하
                 target_interest = max(0.25, target_cpi - 1.0)
-                target_cpi      = target_cpi * 0.8   # 디플레 압력
-                target_oil      *= 0.6                # 유가 급락
+                target_cpi      = target_cpi * 0.8
+                target_oil      *= 0.6
             elif progress < 0.6:
-                # 중기: 저금리 유지 + 물가 서서히 상승
                 target_interest = target_cpi + 0.5
                 target_cpi      = target_cpi + 6.0 * (progress - 0.2) / 0.4
                 target_oil      = target_oil * (0.6 + 0.4 * (progress - 0.2) / 0.4)
             else:
-                # 후기: 정상화
                 target_interest = target_cpi + 2.0
                 target_oil      *= 0.9
 
-            # 상한 (현실적: 금리 최대 12%, CPI 최대 10%)
             target_interest = min(12.0, target_interest)
             target_cpi      = min(10.0, target_cpi)
             target_fx       = target_fx + 300 * progress
@@ -419,36 +449,30 @@ class MacroEngine:
             target_fx       = 900.0
 
         else:
-            # ── 정상 국면: 경기 사이클 연동 ─────────
-            # 피드백 루프 1: GRI 고성장 → CPI 목표 상승 → 금리 인상
             gri_growth_annual = 0.0
             if len(hist) >= 20:
                 gri_growth_annual = (hist[-1] / max(1.0, hist[0]) - 1.0) * (252 / 20)
-            # GRI 연 30% 이상 성장할 때만 CPI 압력 (기존 15% → 30%로 완화)
             if gri_growth_annual > 0.30:
                 target_cpi += min(1.0, (gri_growth_annual - 0.30) * 3)
 
-            # 경기 사이클별 금리 목표
             if cycle == "확장":
-                target_interest = target_cpi + 0.5   # 완화: 1.5 → 0.5
+                target_interest = target_cpi + 0.5
             elif cycle == "정점":
-                target_interest = target_cpi + 1.5   # 완화: 2.5 → 1.5
+                target_interest = target_cpi + 1.5
             elif cycle == "수축":
-                target_interest = max(0.5, target_cpi - 0.5)  # 인하
+                target_interest = max(0.5, target_cpi - 0.5)
             elif cycle == "저점":
-                target_interest = max(0.25, target_cpi - 1.5)  # 적극 인하
+                target_interest = max(0.25, target_cpi - 1.5)
 
         # ── CPI 업데이트 ──────────────────────────
         cpi_step = (target_cpi - macro["cpi"]) * 0.02 + random.uniform(-0.05, 0.05)
         macro["cpi"] = max(0.3, min(15.0, macro["cpi"] + cpi_step))
-
         if macro["cpi"] > target_cpi + 1.0:
             target_interest += 0.5
 
         # ── 금리 업데이트 ─────────────────────────
         diff_r = (target_interest - macro["interest_rate"]) * 0.03 + random.uniform(-0.02, 0.02)
         macro["interest_rate"] += max(-MAX_RATE_CHANGE, min(MAX_RATE_CHANGE, diff_r))
-        # Lv1 정상 성장기 금리 상한 3% (이자비용 폭증 방지)
         if lv == 1 and not is_depression and "대공황" not in scenario:
             r_max = 3.5
         elif is_depression:
@@ -462,11 +486,42 @@ class MacroEngine:
         macro["oil_price"] = max(5, macro["oil_price"] + oil_drift + random.uniform(-1.5, 1.5))
 
         # ── 환율 업데이트 ─────────────────────────
-        rate_impact  = (macro["interest_rate"] - 3.5) * -15
-        final_target_fx = target_fx + rate_impact
-        diff_fx = (final_target_fx - macro["exchange_rate"]) * 0.02 + random.uniform(-10, 10)
-        macro["exchange_rate"] += max(-5.0, min(5.0, diff_fx))
-        macro["exchange_rate"]  = max(800, min(2200, macro["exchange_rate"]))
+        # 현실 원달러 환율 결정 요인:
+        # 1. 금리차: 미국 금리 > 한국 금리 → 달러 강세 → 환율 상승
+        # 2. 수출 호황: 달러 유입 → 원화 강세 → 환율 하락
+        # 3. 위기/전쟁: 안전자산 달러 수요 → 환율 급등
+        # 4. 인플레이션: 물가 상승 → 화폐가치 하락 → 환율 상승
+
+        # 금리 영향: 금리 높을수록 달러 강세 (원화 약세)
+        rate_impact = (macro["interest_rate"] - 3.5) * 20
+
+        _boom = getattr(self.s, 'boom_event', {})
+        if _boom.get('phase') == '진행중' and _boom.get('type') == '수출호황':
+            target_fx -= 80
+        elif _boom.get('phase') == '진행중' and _boom.get('type') == '유동성장세':
+            target_fx -= 50
+
+        war = getattr(self.s, 'war_event', {})
+        if war.get('phase') == '진행중':
+            if war.get('type') == '대규모전쟁':
+                target_fx += 150  # 대규모 전쟁: 환율 급등 (1,500원 가능)
+            else:
+                target_fx += 80
+
+        if is_depression:
+            target_fx += 200
+
+        if macro["cpi"] > 4.0:
+            target_fx += (macro["cpi"] - 4.0) * 30
+
+        sanctions = getattr(self.s, 'export_sanctions', {})
+        if any(s.get('phase') == '단기충격' for s in sanctions.values()):
+            target_fx += 50
+
+        final_target_fx = max(900, min(2000, target_fx + rate_impact))
+        diff_fx = (final_target_fx - macro["exchange_rate"]) * 0.015 + random.uniform(-8, 8)
+        macro["exchange_rate"] += max(-7.0, min(7.0, diff_fx))
+        macro["exchange_rate"]  = max(900, min(2000, macro["exchange_rate"]))
 
         # ── 물가 누적 ────────────────────────────
         self.s.cumulative_inflation *= (1 + (macro["cpi"] / 100) / 252)
@@ -479,19 +534,71 @@ class MacroEngine:
     # 동적 목표 지수
     # ─────────────────────────────────────────────
     def get_dynamic_target(self) -> float:
-        base_growth_rates = {1: 0.07, 2: 0.08, 3: 0.065, 4: 0.04}  # Tech4: 0.15 → 0.04
-        annual_rate = base_growth_rates.get(self.s.max_tech_reached, 0.08)
+        """
+        GRI 목표값 — 고정 LV 성장률 대신 시나리오+사이클 기반으로 결정.
+        LV는 상한/하한 밴드만 제공하고, 실제 방향은 시나리오가 결정.
+        """
+        scenario = self.s.current_scenario
+        cycle    = getattr(self.s, 'cycle_stage', '확장')
+        lv       = self.s.max_tech_reached
 
-        if "💀 대공황" in self.s.current_scenario:
+        # ── 대공황: 무조건 하락 ───────────────────
+        if "💀 대공황" in scenario:
             return self.s.gri * 0.96
-        elif "📉 소조정" in self.s.current_scenario:
-            return self.s.gri * 0.985
-        elif "🚀 T4 발전" in self.s.current_scenario:
-            return self.s.gri * 1.07
-        elif "🟢 T3 유지" in self.s.current_scenario:
-            annual_rate *= 0.5
 
-        daily_rate = annual_rate / 252
+        # ── 소조정: 완만 하락 ─────────────────────
+        if "📉 소조정" in scenario:
+            return self.s.gri * 0.987
+
+        # ── 대공황V / 팬데믹 극복 / 재건: 회복 랠리
+        if any(x in scenario for x in ["✨ 대공황V", "✨ 팬데믹 극복", "🏗️"]):
+            return self.s.gri * 1.004
+
+        # ── 팬데믹 진행중: 초기 하락 → 후기 반등 ─
+        pandemic = getattr(self.s, 'pandemic_event', {})
+        if pandemic.get('phase') == '진행중':
+            pan_timer = pandemic.get('timer', 0)
+            if pan_timer > 300:   # 초기: 하락
+                return self.s.gri * 0.992
+            elif pan_timer > 100: # 중기: 보합
+                return self.s.gri * 1.001
+            else:                 # 후기: 반등 기대
+                return self.s.gri * 1.003
+
+        # ── 호재 시나리오 ─────────────────────────
+        boom = getattr(self.s, 'boom_event', {})
+        if boom.get('phase') == '진행중':
+            boom_type = boom.get('type', '')
+            if boom_type == '수출호황':
+                return self.s.gri * 1.0045
+            elif boom_type == '유동성장세':
+                return self.s.gri * 1.0040
+            elif boom_type == '내수붐':
+                return self.s.gri * 1.0035
+
+        # ── 전쟁 진행중: 하락 압력 ───────────────
+        war = getattr(self.s, 'war_event', {})
+        if war.get('phase') == '진행중':
+            if war.get('type') == '대규모전쟁':
+                return self.s.gri * 0.994
+            else:
+                return self.s.gri * 0.997
+
+        # ── 기본: 경기 사이클 + LV 밴드 ─────────
+        # LV는 장기 성장의 상한/하한만 제공
+        # 실제 일별 방향은 사이클이 결정
+        _cycle_rate = {
+            "확장": 0.0004,   # 연 ~10%
+            "정점": 0.0001,   # 연 ~2.5% (둔화)
+            "수축": -0.0002,  # 연 -5% (하락)
+            "저점": -0.0001,  # 연 -2.5% (바닥 탐색)
+        }.get(cycle, 0.0002)
+
+        # LV 밴드: 너무 빠르거나 느린 성장 완화
+        # 연 최대 성장률 상한 (LV별 기술 혁신 한계)
+        _lv_cap = {1: 0.0005, 2: 0.0006, 3: 0.0005, 4: 0.0003}.get(lv, 0.0004)
+        daily_rate = max(-0.0008, min(_lv_cap, _cycle_rate))
+
         return self.s.gri * (1 + daily_rate)
 
     # ─────────────────────────────────────────────
@@ -511,27 +618,33 @@ class MacroEngine:
         sentiment     = getattr(self.s, 'sentiment', 50.0)
         scenario      = self.s.current_scenario
 
-        # 모든 값은 연간 기준 → /252로 일별 변환
         annual_adj = 0.0
 
         # ── 환율 영향 ─────────────────────────────
-        fx_diff = (ex_rate - 1100.0) / 100.0
-        if sector in ["IT", "산업재", "커뮤니케이션"]:
-            annual_adj += fx_diff * 0.0018
-        elif sector == "에너지":
-            annual_adj += fx_diff * 0.0010
-        elif sector in ["필수소비재", "유틸리티", "부동산"]:
-            annual_adj -= fx_diff * 0.0012
+        # ★ EXPORT_DEPENDENCY 기반 수출/내수 차등 적용
+        # 수출형: 환율 상승 → 원화 환산 이익 증가 → 주가 상승
+        # 내수형: 환율 상승 → 수입 비용 증가 → 주가 하락
+        from engine.constants import EXPORT_DEPENDENCY as _EXP_DEP
+        _export_dep   = _EXP_DEP.get(ind, 0.3)
+        _domestic_dep = 1.0 - _export_dep
+        fx_diff = (ex_rate - 1100.0) / 100.0  # 100원 단위
+
+        _export_benefit  = fx_diff * 0.0020 * _export_dep
+        _domestic_cost   = fx_diff * 0.0015 * _domestic_dep
+        annual_adj += _export_benefit - _domestic_cost
+        # IT(수출0.75):   +0.0015 - 0.0004 = +0.0011/100원 (수혜)
+        # 유틸(내수0.97): +0.0006 - 0.0015 = -0.0009/100원 (피해)
+        # 소재(수출0.60): +0.0012 - 0.0009 = +0.0003/100원 (소폭 수혜)
 
         # ── 유가 영향 ─────────────────────────────
-        oil_diff = (oil_price - 30.0) / 50.0
+        oil_diff  = (oil_price - 30.0) / 50.0
         prev_oil  = self.s._prev_macro_snapshot.get('oil_price', oil_price)
         oil_shock = abs(oil_price - prev_oil) / max(1.0, prev_oil) >= 0.10
 
         if sector == "에너지" or "에너지" in ind:
             annual_adj += oil_diff * 0.0025
             if oil_shock and oil_price > prev_oil:
-                perf += 0.005  # 유가 충격은 당일 즉시 반영
+                perf += 0.005
         elif sector in ["산업재", "유틸리티"]:
             annual_adj -= oil_diff * 0.0015
             if oil_shock and oil_price > prev_oil:
@@ -541,7 +654,7 @@ class MacroEngine:
 
         # ── 금리 영향 ─────────────────────────────
         rate_diff = interest_rate - 4.0
-        if sector in ["IT", "건강관리", "커뮤니케이션"] or "Growth" in sector:
+        if sector in ["IT", "건강관리", "커뮤니케이션"]:
             annual_adj -= rate_diff * 0.0020 * (1.5 if tier == "소형주" else 1.0)
         elif sector == "금융":
             annual_adj += rate_diff * 0.0015
@@ -554,297 +667,185 @@ class MacroEngine:
             if sector in ["IT", "건강관리", "커뮤니케이션"]:
                 extra = (interest_rate - 8.0) * 0.004
                 annual_adj -= extra
-                if self.s.has_paid_news_access:
-                    annual_adj += extra * 0.3
 
-        # ── 섹터 로테이션 (경기 사이클) ──────────
-        # ★ Value/Defensive 섹터 기본 베이스 수익 (클래스 상수 참조 — 매 호출 생성 방지)
-        base = self._SECTOR_BASE_ADJ.get(ind) or self._SECTOR_BASE_ADJ.get(sector, 0.0)
-        annual_adj += base
+        # ── 섹터 기본 베이스 수익 ────────────────
+        # ★ market.py sector_adj에서 담당 → 여기서 제거 (중복 방지)
 
-        # ★ 기술 레벨별 섹터 로테이션 보정 (LV1 커뮤 → LV2 IT 역전 등)
-        lv_adj = self._SECTOR_LV_ADJ.get(self.s.max_tech_reached, {})
-        annual_adj += lv_adj.get(ind, 0.0)
+        # ── ★ 페이즈별 섹터 계수 적용 (감쇠 포함) ──────────────────────────
+        phase = self.get_current_phase()
+        phase_coeff = PHASE_SECTOR_COEFF.get(phase, {})
+        raw_coeff   = phase_coeff.get(ind, 0.0)
 
-        ROTATION = {
-            "확장": {
-                "IT": +0.10, "자유소비재": +0.08, "산업재": +0.08,
-                "금융": +0.06, "에너지": +0.04, "소재": +0.04,
-                "필수소비재": -0.02, "유틸리티": -0.02,
-            },
-            "정점": {
-                "에너지": +0.10, "소재": +0.08, "IT": +0.03,
-                "금융": +0.04, "부동산": +0.03,
-                "건강관리": -0.02,
-            },
-            "수축": {
-                "필수소비재": +0.08, "유틸리티": +0.08, "건강관리": +0.06,
-                "부동산": +0.04, "금융": +0.02,
-                "IT": -0.06, "자유소비재": -0.06, "산업재": -0.04,
-            },
-            "저점": {
-                "금융": +0.08, "부동산": +0.06, "산업재": +0.05,
-                "에너지": +0.03, "소재": +0.02,
-            },
-        }
-        rot = ROTATION.get(cycle, {})
-        for key, delta in rot.items():
-            if key in ind or key == sector:
-                annual_adj += delta  # 연간 % 기준
-                break
+        # ★ GRI 기반 성장 감쇠 — 시장이 커질수록 기본 성장률 둔화
+        # 단, 호재(boom/war/pandemic 섹터 조정)는 이미 위에서 처리됐으므로
+        # 여기서는 기본 페이즈 계수만 감쇠시킴
+        # 삼성전자처럼 실적/이벤트 호재로 뚫고 올라가는 건 위 블록들이 담당
+        _gri_now = max(1.0, self.s.gri)
+        if   _gri_now < 1500:   _decay = 1.00   # 초기: 풀 성장
+        elif _gri_now < 2500:   _decay = 0.88
+        elif _gri_now < 4000:   _decay = 0.75
+        elif _gri_now < 7000:   _decay = 0.62
+        elif _gri_now < 12000:  _decay = 0.50
+        else:                   _decay = 0.40   # 성숙 시장: 40%만 작동
 
-        # ────────────────────────────────────────────────────────
-        # ★ 3가지 필터: CPI 수준 / 금리 인상 속도 / 전쟁 단계
-        # ────────────────────────────────────────────────────────
+        # ★ 페이즈/LV 전환 직후 1년간 감쇠 완화 (삼성전자 AI 반도체처럼)
+        # _phase_transition_day: 페이즈 전환 시 기록, 252일간 부스트
+        _trans_day = getattr(self.s, '_phase_transition_day', 0)
+        _cur_day   = getattr(self.s, 'cycle_day', 0)
+        _days_since_trans = _cur_day - _trans_day
+        if 0 <= _days_since_trans <= 252:
+            # 전환 직후: decay 1.0 → 252일에 걸쳐 원래 decay로 수렴
+            _boost_ratio = 1.0 - (_days_since_trans / 252.0)
+            _decay = _decay + (1.0 - _decay) * _boost_ratio
 
-        cpi       = macro.get('cpi', 2.0)
-        prev_rate = self.s._prev_macro_snapshot.get('interest_rate', interest_rate)
-        rate_speed = interest_rate - prev_rate  # 양수=인상, 음수=인하
+        # 감쇠는 양수(성장) 계수에만 적용 — 음수(페널티)는 그대로 유지
+        if raw_coeff > 0:
+            annual_adj += raw_coeff * _decay
+        else:
+            annual_adj += raw_coeff
 
-        # ── 필터 1: CPI 수준 ─────────────────────
-        # 인플레 높으면 에너지/소재 수혜, 소비재 마진 압박
+        # ── ★ 임시 섹터 버프 적용 (재건 이벤트 등) ───────────────────────
+        temp_buff = getattr(self.s, 'temp_sector_buff', {})
+        today = self.s.current_date
+        for buff_ind, (buff_val, expire_dt) in list(temp_buff.items()):
+            if today >= expire_dt:
+                del self.s.temp_sector_buff[buff_ind]
+            elif buff_ind == ind:
+                annual_adj += buff_val
+
+        # ── 섹터 로테이션 ────────────────────────
+        # ★ market.py cycle_sector에서 담당 → 여기서 제거 (중복 방지)
+
+        # ── 거시 필터들 ───────────────────────────
+        cpi        = macro.get('cpi', 2.0)
+        prev_rate  = self.s._prev_macro_snapshot.get('interest_rate', interest_rate)
+        rate_speed = interest_rate - prev_rate
+
+        # CPI 수준
         if cpi > 4.0:
             if ind in ('에너지', '소재'):
-                annual_adj += (cpi - 4.0) * 0.012    # CPI 1%p당 +1.2%
+                annual_adj += (cpi - 4.0) * 0.012
             if ind in ('필수소비재', '자유소비재'):
-                annual_adj -= (cpi - 4.0) * 0.008    # 원가 압박
+                annual_adj -= (cpi - 4.0) * 0.008
             if sector == 'Growth':
-                annual_adj -= (cpi - 4.0) * 0.005    # 실질금리 상승 타격
+                annual_adj -= (cpi - 4.0) * 0.005
         elif cpi < 2.0:
-            # 저물가 → 소비재/IT 유리
             if ind in ('IT', '자유소비재'):
                 annual_adj += (2.0 - cpi) * 0.005
 
-        # ── 필터 2: 금리 인상 속도 ───────────────
-        # 급격한 인상(월 0.05%p 이상) → 성장주 충격
+        # 금리 인상 속도
         if rate_speed > 0.05:
             if sector == 'Growth' or ind in ('IT', '건강관리', '커뮤니케이션'):
-                annual_adj -= rate_speed * 0.8    # 인상 속도 비례 타격
+                annual_adj -= rate_speed * 0.8
             if ind == '금융':
-                annual_adj += rate_speed * 0.4    # 금융 수혜
+                annual_adj += rate_speed * 0.4
         elif rate_speed < -0.05:
-            # 급격한 인하(QE) → IT/금융 저평가 반등 주도
             if sector == 'Growth' or ind in ('IT',):
                 annual_adj += abs(rate_speed) * 0.6
             if ind == '금융':
                 annual_adj += abs(rate_speed) * 0.3
 
-        # ── 필터 3: 전쟁 단계별 섹터 영향 ───────
-        war = getattr(self.s, 'war_event', {})
+        # 전쟁 단계별 섹터 영향 — LV별 차등 (LV4는 핵융합 시대라 유가 충격 약함)
+        war       = getattr(self.s, 'war_event', {})
         war_phase = war.get('phase', '')
+        _lv_war   = self.s.max_tech_reached
+        # LV가 높을수록 에너지 충격 감소 (재생에너지/핵융합 비중 증가)
+        _energy_war_mult = {1: 1.0, 2: 0.75, 3: 0.45, 4: 0.20}.get(_lv_war, 1.0)
+        # LV가 높을수록 전쟁 충격 전반 감소 (글로벌 협력체계 발달)
+        _war_impact_mult = {1: 1.0, 2: 0.85, 3: 0.60, 4: 0.35}.get(_lv_war, 1.0)
+
         if war_phase == '진행중':
             war_timer = war.get('timer', 0)
-            # war_duration은 초기 설정값을 저장해야 하므로 scenario_timer 활용
-            war_total = max(war_timer, 1)
-            # timer가 클수록 초기, 작을수록 종전 직전
-            # 단순히 timer 절대값으로 단계 구분
-            is_early  = war_timer > 365   # 1년 이상 남음 = 초기
-            is_late   = war_timer < 126   # 6개월 미만 남음 = 종전 직전
+            is_early  = war_timer > 365
+            is_late   = war_timer < 126
 
-            # 에너지: 초기 급등 → 후기 수요파괴로 하락
             if '에너지' in ind:
                 if is_early:
-                    annual_adj += 0.08   # 초기 급등
+                    annual_adj += 0.08 * _energy_war_mult
                 elif is_late:
-                    annual_adj -= 0.04   # 수요파괴 시작
+                    annual_adj -= 0.04 * _energy_war_mult
                 else:
-                    annual_adj += 0.02   # 중기 유지
-
-            # 소재: 초기 급등 유지
+                    annual_adj += 0.02 * _energy_war_mult
             if '소재' in ind and is_early:
-                annual_adj += 0.05
-
-            # 재건: 종전 직전 선반영 급등
-            if '재건' in ind:
-                if is_late:
-                    annual_adj += 0.15   # 종전 선반영
-                elif is_early:
-                    annual_adj += 0.05   # 초기엔 소폭만
-                else:
-                    annual_adj += 0.08
-
-            # IT/성장주: 전쟁 중 불확실성 타격
+                annual_adj += 0.05 * _war_impact_mult
             if sector == 'Growth' and not is_late:
-                annual_adj -= 0.03
+                annual_adj -= 0.03 * _war_impact_mult
 
         elif war_phase == '종전':
-            # 종전 후: 재건 피크 → 이후 점진 하락
-            recon_timer = war.get('recon_timer', 0)
-            if '재건' in ind:
-                if recon_timer > 400:    # 재건 초기 (피크)
-                    annual_adj += 0.25
-                elif recon_timer > 150:  # 재건 중기
-                    annual_adj += 0.12
-                else:                    # 재건 말기 (정상화)
-                    annual_adj += 0.03
-            # 종전 후 IT/성장주 회복
             if sector == 'Growth':
-                annual_adj += 0.04
+                annual_adj += 0.04 * _war_impact_mult
 
-        # ── 재건 섹터 조건부 강세 (기존 로직 유지) ───
-        if "재건" in ind and war_phase not in ('진행중', '종전'):
-            is_depression = "대공황" in scenario and "극복" not in scenario
-            timer = getattr(self.s, 'scenario_timer', 0)
-            if is_depression or cycle == "수축":
-                if interest_rate < 5.0 and timer > 252 * 3:
-                    annual_adj += 0.10   # 0.15 → 0.10 하향
-                elif interest_rate > 8.0 or timer < 252:
-                    annual_adj -= 0.10
-
-        # ── 투자심리 반영 ─────────────────────────
+        # 투자심리 반영
         sent_diff = (sentiment - 50.0) / 50.0
         sent_mult = 1.5 if tier == "소형주" else 0.8
         annual_adj += sent_diff * 0.03 * sent_mult
 
-        # ── 필터 4: 팬데믹 단계별 효과 ─────────
-        pandemic = getattr(self.s, 'pandemic_event', {})
+        # 팬데믹 단계별 효과 — LV별 차등
+        # LV가 높을수록 의료 인프라 발달 → 충격 약화, 회복 빠름
+        pandemic    = getattr(self.s, 'pandemic_event', {})
         if pandemic.get('phase') == '진행중':
-            pan_timer = pandemic.get('timer', 0)
-            is_pan_early = pan_timer > 300    # 팬데믹 초기
-            is_pan_late  = pan_timer < 100    # 팬데믹 말기/회복기
+            pan_timer    = pandemic.get('timer', 0)
+            is_pan_early = pan_timer > 300
+            is_pan_late  = pan_timer < 100
+            _lv_pan      = self.s.max_tech_reached
+            # LV1: 풀 충격 / LV2: 75% / LV3: 45% / LV4: 20%
+            _pan_mult    = {1: 1.0, 2: 0.75, 3: 0.45, 4: 0.20}.get(_lv_pan, 1.0)
 
             if is_pan_early:
-                # 초기: 비대면/바이오 강세
                 if ind in ('IT', '건강관리', '필수소비재'):
-                    annual_adj += 0.15
+                    annual_adj += 0.15 * _pan_mult
                 if ind in ('자유소비재', '부동산'):
-                    annual_adj -= 0.20
-
+                    annual_adj -= 0.20 * _pan_mult
             elif is_pan_late:
-                # 말기: 금리 인상 반영 → IT 조정, 방어주 강세
                 if ind in ('IT', '커뮤니케이션') and interest_rate > 3.0:
-                    annual_adj -= 0.08   # 금리 인상 시 IT 조정
+                    annual_adj -= 0.08 * _pan_mult
                 if sector == 'Defensive':
-                    annual_adj += 0.06
-                # 회복 선반영: 저평가 IT/금융 반등
+                    annual_adj += 0.06 * _pan_mult
                 if ind in ('IT', '금융') and interest_rate < 3.0:
-                    annual_adj += 0.10
-
+                    annual_adj += 0.10 * _pan_mult
             else:
-                # 중기: 방어주 유지, IT 혼조
                 if sector == 'Defensive':
-                    annual_adj += 0.04
+                    annual_adj += 0.04 * _pan_mult
                 if ind == 'IT' and rate_speed > 0.03:
-                    annual_adj -= 0.06   # 금리 인상 속도 빠르면 IT 타격
+                    annual_adj -= 0.06 * _pan_mult
 
-        # ── 필터 5: 기술 레벨별 장기 기저 트렌드 ──────────────────────────────
-        # 시나리오/사이클과 독립적으로 LV 시대 동안 매일 지속 적용
-        # 범위값으로 랜덤성 부여 (같은 LV라도 매년 다르게 움직임)
-        # 단위: 연간 % → /252 로 일별 변환
-        lv = self.s.max_tech_reached
-        tech_year = getattr(self.s, '_tech_upgrade_year', 2000)
-        years_since_tech = self.s.current_date.year - tech_year
-
-        # (산업키워드, LV): (하한%, 상한%)
-        _TECH_TREND = {
-            # ── LV1: 인터넷/닷컴 ──────────────────────────────────────────
-            # 중국 수요 시작, IT 태동, 금융 신용팽창
-            ("IT",          1): (3,  5),
-            ("에너지",      1): (3,  5),
-            ("소재",        1): (2,  4),
-            ("산업재",      1): (1,  3),
-            ("금융",        1): (2,  4),
-            ("부동산",      1): (1,  3),
-            ("건강관리",    1): (1,  3),
-            ("커뮤니케이션",1): (1,  3),
-            ("유틸리티",    1): (0,  1),
-            ("필수소비재",  1): (0,  1),
-            ("자유소비재",  1): (1,  3),
-            ("재건",        1): (-1, 0),
-
-            # ── LV2: 모바일·클라우드 ──────────────────────────────────────
-            # 스마트폰 혁명, 원자재 슈퍼사이클, 2008 금융위기 타격
-            ("IT",          2): (6,  9),
-            ("커뮤니케이션",2): (4,  7),
-            ("에너지",      2): (4,  6),
-            ("소재",        2): (4,  6),
-            ("건강관리",    2): (3,  5),
-            ("자유소비재",  2): (2,  4),
-            ("산업재",      2): (2,  4),
-            ("필수소비재",  2): (0,  1),
-            ("유틸리티",    2): (0,  1),
-            ("금융",        2): (-2, 1),   # 금융위기 타격 반영
-            ("부동산",      2): (-1, 2),   # 서브프라임 반영
-            ("재건",        2): (0,  1),
-
-            # ── LV3: AI·양자 혁명 ─────────────────────────────────────────
-            # FAANG 독주, 저금리 버블, 바이오 붐, ESG 에너지 압박
-            ("IT",          3): (8, 12),
-            ("건강관리",    3): (6, 10),
-            ("자유소비재",  3): (4,  7),
-            ("커뮤니케이션",3): (4,  6),
-            ("부동산",      3): (4,  6),   # 초저금리 수혜
-            ("금융",        3): (1,  3),   # 핀테크 부상
-            ("유틸리티",    3): (1,  3),   # ESG 초기
-            ("소재",        3): (2,  4),   # 배터리 소재
-            ("산업재",      3): (2,  4),   # 자동화 초기
-            ("필수소비재",  3): (0,  1),
-            ("에너지",      3): (-3, 0),   # ESG/전기차 압박
-            ("재건",        3): (0,  1),
-
-            # ── LV4: 기술 특이점 ──────────────────────────────────────────
-            # AI 극강세, 전력수요 폭증, 로봇/배터리, 화석연료 구조 하락
-            ("IT",          4): (5,  9),   # AI 성숙기 진입, 소폭 둔화
-            ("건강관리",    4): (9, 13),   # AI+바이오 융합, 피크
-            ("유틸리티",    4): (7, 11),   # AI 전력수요 폭증
-            ("산업재",      4): (5,  8),   # 로봇/자동화/전기차
-            ("소재",        4): (4,  6),   # 배터리/희토류
-            ("커뮤니케이션",4): (3,  5),
-            ("자유소비재",  4): (3,  5),
-            ("금융",        4): (2,  4),   # AI 금융
-            ("필수소비재",  4): (0,  1),
-            ("부동산",      4): (-3, 0),   # 고금리 전환 압박
-            ("에너지",      4): (-6,-2),   # 화석연료 구조적 하락
-            ("재건",        4): (1,  2),
-        }
-
-        # 산업 키워드 매칭 (ind 문자열에 키워드 포함 여부)
-        _trend_annual = None
-        for (key, key_lv), (lo, hi) in _TECH_TREND.items():
-            if key_lv == lv and key in ind:
-                _trend_annual = random.uniform(lo, hi) / 100.0
-                break
-
-        if _trend_annual is not None:
-            annual_adj += _trend_annual
-
-        # ── 기술 전환 직후 3년 추가 부스트 (기존 로직 확장) ─────────────
-        if years_since_tech <= 3:
-            if lv == 2:
-                if '소프트웨어' in ind or '플랫폼' in ind or '커뮤니케이션' in ind:
-                    annual_adj += 0.06
-            elif lv == 3:
-                if '반도체' in ind or 'IT' in ind:
-                    annual_adj += 0.06
-                if '유틸리티' in ind:
-                    annual_adj += 0.03
-            elif lv == 4:
-                if 'IT' in ind:
-                    annual_adj += 0.05
-                if '유틸리티' in ind or '소재' in ind:
+        # ── 호재 시나리오 섹터 영향 ──────────────
+        boom = getattr(self.s, 'boom_event', {})
+        if boom.get('phase') == '진행중':
+            boom_type = boom.get('type', '')
+            if boom_type == '수출호황':
+                if ind in ('IT', '산업재', '소재'):
+                    annual_adj += 0.08
+                if ind == '커뮤니케이션':
                     annual_adj += 0.04
+            elif boom_type == '유동성장세':
+                # 전 섹터 완만한 상승
+                annual_adj += 0.04
+                if sector == 'Growth':
+                    annual_adj += 0.04   # 성장주 추가 수혜
+            elif boom_type == '내수붐':
+                if ind in ('필수소비재', '자유소비재', '커뮤니케이션'):
+                    annual_adj += 0.10
+                if ind == '부동산':
+                    annual_adj += 0.06
 
-        # ── 필터 6: 금융위기 QE 반등 ────────────
+        # 금융위기/침체 QE 반등
         if '금융위기' in scenario or '침체' in scenario:
             timer = getattr(self.s, 'scenario_timer', 0)
-            is_crisis_late = timer < 180   # 위기 후반
-
+            is_crisis_late = timer < 180
             if is_crisis_late:
-                # QE 시작 → IT/금융 저평가 반등 주도
                 if ind in ('IT', '금융') and interest_rate < 3.0:
                     annual_adj += 0.08
                 elif sector == 'Defensive':
-                    annual_adj -= 0.03   # 방어주 이탈
+                    annual_adj -= 0.03
             else:
-                # 위기 초기: 방어주/필수소비재 강세
                 if sector == 'Defensive' or ind == '필수소비재':
                     annual_adj += 0.05
                 if sector == 'Growth':
                     annual_adj -= 0.04
 
-        # 연간 조정값을 일별로 변환해서 perf에 추가
+        # 연간 조정값 → 일별 변환
         perf += annual_adj / 252
-
         return perf
 
     # ─────────────────────────────────────────────
@@ -864,30 +865,29 @@ class MacroEngine:
             ipo_multiplier = 2.0 if self.s.has_paid_news_access else 1.2
 
         if risk_score > 60.0:
-            # 충격 크기 축소: 기존 0.005~0.025 → 0.001~0.005
             shock_factor = -random.uniform(0.001, 0.005) * min(2.0, total_inst * 3)
         else:
             shock_factor = random.uniform(-0.001, 0.001) * total_inst
 
         return perf + (shock_factor * ipo_multiplier)
+
     # ─────────────────────────────────────────────
-    # ★ 공급망 패널티 적용 (6순위)
-    # update_macro_logic에서 매일 호출
-    # 의존 대상 산업이 수축/저점기이면 피해 산업 efficiency에 패널티
+    # 공급망 패널티
     # ─────────────────────────────────────────────
     def apply_supply_chain_penalty(self):
-        from engine.constants import SUPPLY_CHAIN
-        cycle = getattr(self.s, 'cycle_stage', '확장')
+        try:
+            from engine.constants import SUPPLY_CHAIN
+        except ImportError:
+            return
 
-        # 산업별 현재 경기 단계 판단 (전체 사이클 기준으로 단순화)
-        is_downturn = cycle in ("수축", "저점")
+        cycle        = getattr(self.s, 'cycle_stage', '확장')
+        is_downturn  = cycle in ("수축", "저점")
         is_depression = ("대공황" in self.s.current_scenario
                          and "극복" not in self.s.current_scenario)
 
         if not (is_downturn or is_depression):
-            return   # 확장/정점기엔 패널티 없음
+            return
 
-        # 산업별 평균 efficiency 사전 계산
         ind_efficiency = {}
         for stock in self.s.stocks:
             ind = stock['meta'].get('ind', '')
@@ -897,7 +897,6 @@ class MacroEngine:
             ind_efficiency[ind].append(eff)
         ind_avg_eff = {ind: sum(v)/len(v) for ind, v in ind_efficiency.items()}
 
-        # 공급망 패널티 적용
         penalty_mult = 1.5 if is_depression else 1.0
         for stock in self.s.stocks:
             meta = stock['meta']
@@ -908,8 +907,7 @@ class MacroEngine:
             total_penalty = 0.0
             for dep_ind, dep_ratio in SUPPLY_CHAIN[ind]:
                 dep_avg = ind_avg_eff.get(dep_ind, 0.05)
-                # 의존 대상 산업의 efficiency가 낮을수록 패널티 강화
-                if dep_avg < 0.03:   # 매우 낮은 efficiency → 강한 패널티
+                if dep_avg < 0.03:
                     total_penalty += dep_ratio * 0.5 * penalty_mult
                 elif dep_avg < 0.05:
                     total_penalty += dep_ratio * 0.25 * penalty_mult
@@ -918,78 +916,83 @@ class MacroEngine:
                 old_eff = meta.get('efficiency', 0.05)
                 meta['efficiency'] = max(0.005, old_eff * (1.0 - total_penalty))
 
-                # 뉴스 (낮은 확률로 공급망 충격 뉴스 발행)
                 if not self.s.silent_mode and total_penalty > 0.1 and random.random() < 0.02:
                     dep_names = ', '.join(d for d, _ in SUPPLY_CHAIN[ind])
                     self.s.daily_news.append(
                         f"🔗 [공급망 충격] {meta['c_name']} — "
-                        f"{dep_names} 침체로 {ind} 마진 압박 "
-                        f"({dep_names} 공급 차질 → {ind} efficiency 하락)"
+                        f"{dep_names} 침체로 {ind} 마진 압박"
                     )
+
     # ─────────────────────────────────────────────
-    # ★ 원자재 지수 업데이트
+    # 원자재 지수 업데이트 (SOX 페이즈별 자연성장 추가)
     # ─────────────────────────────────────────────
     def _update_commodity_prices(self):
-        """
-        곡물/금속/반도체 현실 가격 기준 업데이트
-        - 곡물: $/부셸 (밀 기준, 2000년 $250)
-        - 금속: $/톤   (구리 기준, 2000년 $1,800)
-        - 반도체: SOX 지수 (2000년 1,000)
-        """
         macro = self.s.macro
         cycle = getattr(self.s, 'cycle_stage', '확장')
         war   = getattr(self.s, 'war_event', {})
         lv    = self.s.max_tech_reached
 
-        # ── 곡물 (grain_price, $/부셸) ──────────
-        # 현실: 2000년 $250 → 2008년 $400 → 2012년 $350 → 2022년 $550
-        # 테크/경기 기반 장기 트렌드 + 사이클 등락
+        # ── 곡물 ──────────────────────────────────
         grain = macro.get('grain_price', 250.0)
-        # 장기 목표가 (테크 레벨에 따라 점진 상승)
-        grain_long = {1: 300.0, 2: 380.0, 3: 480.0, 4: 400.0}.get(lv, 300.0)
+        grain_long   = {1: 300.0, 2: 380.0, 3: 480.0, 4: 400.0}.get(lv, 300.0)
         grain_target = grain_long * {
-            '확장': 1.05, '정점': 1.15,
-            '수축': 0.92, '저점': 0.85,
+            '확장': 1.05, '정점': 1.15, '수축': 0.92, '저점': 0.85,
         }.get(cycle, 1.0)
-        # 동유럽 전쟁 시 곡물 급등
         if war.get('region') == '동유럽' and war.get('phase') == '진행중':
             grain_target *= 1.6
         grain_step = (grain_target - grain) * 0.008 + random.uniform(-3.0, 3.0)
         macro['grain_price'] = max(100.0, min(900.0, grain + grain_step))
 
-        # ── 금속 (metal_price, $/톤 구리) ────────
-        # 현실: 2000년 $1,800 → 2011년 $10,000 → 2016년 $4,500 → 2024년 $9,000
+        # ── 금속 ──────────────────────────────────
         metal = macro.get('metal_price', 1800.0)
-        metal_long = {1: 3000.0, 2: 6000.0, 3: 8000.0, 4: 7000.0}.get(lv, 3000.0)
+        metal_long   = {1: 3000.0, 2: 6000.0, 3: 8000.0, 4: 7000.0}.get(lv, 3000.0)
         metal_target = metal_long * {
-            '확장': 1.10, '정점': 1.20,
-            '수축': 0.85, '저점': 0.75,
+            '확장': 1.10, '정점': 1.20, '수축': 0.85, '저점': 0.75,
         }.get(cycle, 1.0)
-        # 아프리카/동남아 분쟁 시 금속 급등
         if war.get('region') in ('아프리카', '동남아') and war.get('phase') == '진행중':
             metal_target *= 1.5
         metal_step = (metal_target - metal) * 0.006 + random.uniform(-50.0, 50.0)
         macro['metal_price'] = max(500.0, min(20000.0, metal + metal_step))
 
-        # ── 반도체 SOX 지수 ──────────────────────
-        # 현실: 2000년 1,000 → 2002년 200 (닷컴버블) → 2024년 5,000
-        semi = macro.get('semi_index', 1000.0)
-        semi_long = {1: 500.0, 2: 1500.0, 3: 3500.0, 4: 6000.0}.get(lv, 1000.0)
-        semi_target = semi_long * {
-            '확장': 1.15, '정점': 1.05,
-            '수축': 0.80, '저점': 0.70,
-        }.get(cycle, 1.0)
-        # 동남아 분쟁 시 공급 차질 → 지수 하락
-        if war.get('region') == '동남아' and war.get('phase') == '진행중':
-            semi_target *= 0.65
-        semi_step = (semi_target - semi) * 0.008 + random.uniform(-20.0, 20.0)
-        macro['semi_index'] = max(100.0, min(15000.0, semi + semi_step))
+        # ── SOX 반도체 지수 ───────────────────────
+        semi  = macro.get('semi_index', 1000.0)
+        phase = self.get_current_phase()
+
+        # ★ SOX 목표값 — 페이즈 고정값 제거
+        # 시나리오+사이클이 방향 결정, 페이즈는 자연성장률만 제공
+        _semi_scenario = self.s.current_scenario
+        _semi_boom     = getattr(self.s, 'boom_event', {})
+        _semi_pandemic = getattr(self.s, 'pandemic_event', {})
+        _semi_war      = getattr(self.s, 'war_event', {})
+
+        if "💀 대공황" in _semi_scenario:
+            semi_dir = 0.990
+        elif "✨ 대공황V" in _semi_scenario or "✨ 팬데믹 극복" in _semi_scenario:
+            semi_dir = 1.015
+        elif _semi_pandemic.get('phase') == '진행중':
+            pan_t = _semi_pandemic.get('timer', 0)
+            semi_dir = 0.985 if pan_t > 300 else (1.005 if pan_t < 100 else 0.998)
+        elif _semi_boom.get('phase') == '진행중' and _semi_boom.get('type') == '수출호황':
+            semi_dir = 1.012
+        elif _semi_war.get('region') == '동남아' and _semi_war.get('phase') == '진행중':
+            semi_dir = 0.970
+        elif _semi_war.get('region') == '동남아' and _semi_war.get('phase') == '종전':
+            semi_dir = 1.008
+        else:
+            semi_dir = {
+                '확장': 1.004, '정점': 1.001,
+                '수축': 0.994, '저점': 0.990,
+            }.get(cycle, 1.001)
+
+        daily_growth = SOX_GROWTH_RATE.get(phase, 0.0003)
+        semi_natural = semi * daily_growth
+        semi_step    = semi * (semi_dir - 1.0) + semi_natural + random.uniform(-15.0, 15.0)
+        macro['semi_index'] = max(100.0, min(200000.0, semi + semi_step))
 
     # ─────────────────────────────────────────────
-    # ★ 원자재 → 섹터 민감도 (apply_macro_sector_sensitivity에서 호출)
+    # 원자재 → 섹터 민감도
     # ─────────────────────────────────────────────
     def get_commodity_adj(self, stock: dict) -> float:
-        """원자재 지수 변화에 따른 섹터별 주가 조정값 (연간 기준)"""
         meta   = stock['meta']
         sector = SECTOR_MAP.get(meta.get('ind', ''), 'Value')
         ind    = meta.get('ind', '')
@@ -999,22 +1002,17 @@ class MacroEngine:
         metal = macro.get('metal_price', 1800.0)
         semi  = macro.get('semi_index',  1000.0)
 
-        # 기준값 대비 변화율
         grain_diff = (grain - 250.0) / 250.0
-        metal_diff_raw = (metal - 1800.0) / 1800.0
-        semi_diff_raw  = (semi  - 1000.0) / 1000.0
+        metal_diff = (metal - 1800.0) / 1800.0
+        semi_diff  = (semi  - 1000.0) / 1000.0
 
         annual_adj = 0.0
 
-        # 곡물가 영향
-        grain_diff = grain_diff  # 재사용
-        if sector == 'Defensive' or '필수소비재' in ind or '식품' in ind:
-            annual_adj -= grain_diff * 0.04   # 원가 상승 → 마진 압박
+        if sector == 'Defensive' or '필수소비재' in ind:
+            annual_adj -= grain_diff * 0.04
         elif '농업' in ind or '비료' in ind:
-            annual_adj += grain_diff * 0.06   # 수혜
+            annual_adj += grain_diff * 0.06
 
-        # 금속가 영향
-        metal_diff = metal_diff_raw
         if '소재' in sector or '금속' in ind or '철강' in ind:
             annual_adj += metal_diff * 0.06
         elif '자동차' in ind or '건설' in ind or '조선' in ind:
@@ -1022,11 +1020,9 @@ class MacroEngine:
         elif sector == 'Value' and '산업재' in ind:
             annual_adj -= metal_diff * 0.02
 
-        # 반도체 지수 영향
-        semi_diff = semi_diff_raw
         if 'IT' in sector or 'IT' in ind or '반도체' in ind:
-            annual_adj += semi_diff * 0.05   # SOX 오를수록 IT 수혜
+            annual_adj += semi_diff * 0.05
         elif '전자' in ind or '통신장비' in ind:
             annual_adj += semi_diff * 0.03
 
-        return annual_adj / 252  # 일별 변환
+        return annual_adj / 252

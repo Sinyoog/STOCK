@@ -79,12 +79,20 @@ class EventDispatcher:
             self.eco.update_macro_logic()
             # ★ 6순위: 공급망 패널티 적용
             self.eco.apply_supply_chain_penalty()
+            # ★ 7순위: 호재 시나리오 체크 (신규)
+            self._check_boom_event(silent)
+            # ★ 7.5순위: 수출 규제 이벤트 체크
+            self._check_export_sanction(silent)
             # ★ 8순위: 외부 충격 이벤트 체크 (매년 1월 1일)
             self._check_external_shock(silent)
             # ★ 9순위: 전쟁/분쟁 이벤트 체크
             self._check_war_event(silent)
             # ★ 10순위: 팬데믹 이벤트 체크
             self._check_pandemic_event(silent)
+            # ★ 11순위: 대공황 자연 발생 트리거 체크 (신규)
+            self._check_depression(silent)
+            # ★ 12순위: 페이즈 전환 체크 (신규)
+            self._check_phase_transition(silent)
             self.mkt.apply_price_change()
             self.mkt.update_company_technology()
             # 경고 진입/해제 7일 선반영 시스템
@@ -162,6 +170,8 @@ class EventDispatcher:
 
             # market_stats 수집 (PER/섹터/산업)
             market_stats = self._collect_market_stats()
+            # ★ 대공황 트리거 판단용 캐시 업데이트
+            self.s._last_market_stats = market_stats
 
             self.db.log_scenario_change(
                 date_str     = date_str,
@@ -248,14 +258,17 @@ class EventDispatcher:
 
     # ─────────────────────────────────────────────
     # 분기점 시나리오 뉴스 (테크3 도달 후)
+    # ★ 역할 변경: 결말 확정 → 대공황 임계값/강도 조정
     # ─────────────────────────────────────────────
     def _check_branching_point_news(self, silent: bool):
-        """테크3 도달 이후 분기점 시나리오가 결정됐을 때 프리미엄 예고 뉴스 발송"""
+        """
+        테크3 도달 이후 분기점이 결정됐을 때 프리미엄 예고 뉴스 발송.
+        ★ 변경: 시나리오 강제 설정 대신 대공황 트리거 임계값 조정.
+        """
         if self.s.max_tech_reached < 3:
             return
         if self.s.world_line == "Decided":
             return
-        # reserved_scenario가 설정됐는데 아직 뉴스를 안 보낸 경우
         if not self.s.reserved_scenario:
             return
         if getattr(self.s, '_branch_news_sent', False):
@@ -265,11 +278,22 @@ class EventDispatcher:
         scenario = self.s.reserved_scenario
         cy = self.s.current_date.year
 
-        # 프리미엄 전용 — 분기점 결정 즉시 (30일 전 예고)
+        # ★ 분기점에 따라 대공황 트리거 임계값 조정
+        if "낙관" in scenario or "T4" in scenario:
+            self.s._depression_threshold = 250   # 버블 임계 상향 → 대공황 어려워짐
+            branch_desc = "낙관적 분기 — 경제 안정성 강화"
+        elif "비관" in scenario or "대공황" in scenario:
+            self.s._depression_threshold = 150   # 버블 임계 하향 → 대공황 쉬워짐
+            branch_desc = "비관적 분기 — 경제 불안정성 증가"
+        else:
+            self.s._depression_threshold = 200   # 기본값
+            branch_desc = "중립적 분기"
+
+        # 프리미엄 전용 예고
         if self.s.has_paid_news_access and not silent:
             self.s.daily_news.append(
-                f"💎 [분기점 예고] {cy}년, 문명의 갈림길이 결정되었습니다! "
-                f"2050~2060년 이후 시나리오: '{scenario}' (프리미엄 전용 정보)"
+                f"💎 [분기점 결정] {cy}년, {branch_desc}. "
+                f"경제 임계값이 조정되었습니다. (프리미엄 전용 정보)"
             )
 
     # ─────────────────────────────────────────────
@@ -642,10 +666,10 @@ class EventDispatcher:
         if last_shock_year == cur.year:
             return
 
-        # ★ 종목 수가 한 번이라도 400개를 달성한 후에만 외부 충격 발동
-        # 시장이 충분히 형성되기 전 충격은 비현실적이고 게임 밸런스를 해침
-        # 한 번 400개 달성 후 종목이 줄어도 플래그는 유지됨
-        if len(self.s.stocks) >= self.s.MAX_STOCKS:
+        # ★ 시장 형성 조건: 게임 시작 후 최소 3년 경과 + 종목 200개 이상
+        # (기존 400개 달성 조건은 너무 빠름 → 초반 팬데믹/전쟁 방지)
+        years_since_start = self.s.current_date.year - self.s.start_date.year
+        if years_since_start >= 3 and len(self.s.stocks) >= 200:
             self.s._market_fully_formed = True
         if not getattr(self.s, '_market_fully_formed', False):
             return
@@ -775,12 +799,17 @@ class EventDispatcher:
         if not getattr(self.s, '_market_fully_formed', False):
             return
 
-        # 발생 확률 체크
+        # ★ 악재 쿨다운: 마지막 위기 후 2년 이내엔 전쟁 없음
+        last_crisis = getattr(self.s, '_last_crisis_year', 0)
+        if last_crisis and cur.year - last_crisis < 2:
+            return
+
+        # ★ 발생 확률 하향 (기존: 대규모 3% + 지역 8% = 11% → 대규모 1.5% + 지역 3.5% = 5%)
         roll = random.random()
-        if roll < 0.03:
+        if roll < 0.015:
             war_type = '대규모전쟁'
             duration = random.randint(504, 1260)  # 2~5년
-        elif roll < 0.11:  # 0.03 + 0.08
+        elif roll < 0.05:  # 0.015 + 0.035
             war_type = '지역분쟁'
             duration = random.randint(126, 504)   # 6개월~2년
         else:
@@ -828,6 +857,9 @@ class EventDispatcher:
         self.s.current_scenario = scenario_map.get((war_type, region), f'🔫 {region} {war_type}')
         self.s.scenario_timer   = duration
 
+        # ★ 악재 쿨다운 기록
+        self.s._last_crisis_year = cur.year
+
         if not silent:
             commodity_str = ', '.join(f"{k} x{v:.1f}" for k, v in shocks.items())
             self.s.daily_news.append(
@@ -836,12 +868,12 @@ class EventDispatcher:
             )
             self.s.daily_news.append(
                 f"  └ 예상 지속: 약 {duration//252}년 {(duration%252)//21}개월 "
-                f"| 재건 섹터 주목"
+                f"| 산업재/소재/유틸 섹터 수혜 예정"
             )
 
     def _on_war_end(self, silent: bool):
-        """종전 처리 — 재건 섹터 강세 시작"""
-        war = getattr(self.s, 'war_event', {})
+        """종전 처리 — 산업재/소재/유틸리티에 임시 버프 주입 (재건 섹터 대체)"""
+        war      = getattr(self.s, 'war_event', {})
         region   = war.get('region', '')
         war_type = war.get('type', '')
 
@@ -851,8 +883,21 @@ class EventDispatcher:
         self.s.war_event['phase']       = '종전'
         self.s.war_event['recon_timer'] = recon_days
 
+        # ★ 재건 섹터 대신 기존 산업에 임시 버프 주입
+        from datetime import timedelta
+        expire_dt = self.s.current_date + timedelta(days=recon_days)
+        self.s.temp_sector_buff = {
+            "산업재":   (0.015, expire_dt),
+            "소재":     (0.010, expire_dt),
+            "유틸리티": (0.008, expire_dt),
+        }
+
+        # ★ 동남아 전쟁 종전 시 SOX 점진 회복
+        if region == '동남아':
+            self.s.macro['semi_index'] = self.s.macro.get('semi_index', 1000.0) * 1.15
+
         # 재건 시나리오로 전환
-        self.s.current_scenario = f'🏗️ {region} 전후 재건 (재건 섹터 강세)'
+        self.s.current_scenario = f'🏗️ {region} 전후 재건 (산업재/소재 강세)'
         self.s.scenario_timer   = recon_days
 
         if not silent:
@@ -910,12 +955,20 @@ class EventDispatcher:
             return
 
         # 발생 확률 체크 — 매년 1월 1~7일에만 (연 1회 체크)
-        # 팬데믹: 연 1.5% → 100년간 약 1.5회 (현실: 스페인독감/코로나 = 100년에 2번)
+        # ★ 팬데믹 확률 상향: 1.5% → 4% (26년간 기댓값 약 1회)
         if cur.month != 1 or cur.day > 7:
             return
 
-        if random.random() > 0.015:
+        # ★ 악재 쿨다운: 전쟁/위기 후 2년 이내엔 팬데믹 없음
+        last_crisis = getattr(self.s, '_last_crisis_year', 0)
+        if last_crisis and cur.year - last_crisis < 2:
             return
+
+        if random.random() > 0.04:
+            return
+
+        # ★ 팬데믹 발생 시 쿨다운 기록
+        self.s._last_crisis_year = cur.year
 
         # 강도 결정
         intensity = random.uniform(0.20, 0.35)
@@ -923,6 +976,14 @@ class EventDispatcher:
 
         # GRI 즉시 충격
         self.s.gri = max(100.0, self.s.gri * (1.0 - intensity))
+
+        # ★ 팬데믹 금리/CPI 강제 인하 (코스피 현실 반영)
+        # 실제 2020년: 한국 기준금리 0.5%까지 인하, 초기 물가 하락
+        # 수요 위축 → CPI 하락 → 중앙은행 긴급 금리 인하
+        _cur_rate = self.s.macro.get('interest_rate', 4.0)
+        _cur_cpi  = self.s.macro.get('cpi', 2.0)
+        self.s.macro['interest_rate'] = max(0.5, _cur_rate * 0.30)   # 금리 → 30% 수준으로 급락
+        self.s.macro['cpi']           = max(0.5, min(1.5, _cur_cpi * 0.50))  # CPI → 0.5~1.5%로 하락
 
         # 팬데믹 상태 저장
         if not hasattr(self.s, 'pandemic_event'):
@@ -1008,6 +1069,7 @@ class EventDispatcher:
             'per_small':      wavg(per_sum['소형주'], per_cnt['소형주']),
             'sector_growth':  wavg(sec_sum.get('Growth',    0), sec_cnt.get('Growth',    0)),
             'sector_value':   wavg(sec_sum.get('Value',     0), sec_cnt.get('Value',     0)),
+            'sector_cyclical': wavg(sec_sum.get('Cyclical', 0), sec_cnt.get('Cyclical',  0)),
             'ind_it':         wi('IT'),
             'ind_health':     wi('건강관리'),
             'ind_energy':     wi('에너지'),
@@ -1015,9 +1077,503 @@ class EventDispatcher:
             'ind_industry':   wi('산업재'),
             'ind_material':   wi('소재'),
             'ind_realestate': wi('부동산'),
-            'ind_rebuild':    wi('재건'),
             'ind_util':       wi('유틸리티'),
             'ind_consumer':   wi('자유소비재'),
             'ind_staple':     wi('필수소비재'),
             'ind_comm':       wi('커뮤니케이션'),
         }
+
+    # ─────────────────────────────────────────────
+    # ★ 호재 시나리오 (신규)
+    # ─────────────────────────────────────────────
+    def _check_boom_event(self, silent: bool):
+        """
+        호재 시나리오 체크 및 진행.
+        현실 기준:
+          수출 호황 (반도체/자동차 슈퍼사이클): 10년에 2~3회
+          유동성 장세 (저금리 + 외국인 유입):   10년에 1~2회
+          내수 소비 붐:                         10년에 2~3회
+        """
+        cur = self.s.current_date
+
+        # 진행 중인 호재 tick
+        boom = getattr(self.s, 'boom_event', {})
+        if boom.get('phase') == '진행중':
+            boom['timer'] = boom.get('timer', 0) - 1
+            if boom['timer'] <= 0:
+                self.s.boom_event       = {}
+                self.s.current_scenario = "정상 성장"
+                self.s._last_boom_year  = cur.year
+                if not silent:
+                    self.s.daily_news.append("📊 [호황 종료] 경기 호황이 마무리됩니다.")
+            return
+
+        # ── 발생 조건 ─────────────────────────────
+        # 악재/재건 중엔 호재 없음
+        scenario = self.s.current_scenario
+        if any(x in scenario for x in ["전쟁", "분쟁", "대공황", "팬데믹", "외부충격"]):
+            return
+
+        # 시장 형성 전엔 없음
+        if not getattr(self.s, '_market_fully_formed', False):
+            return
+
+        # 악재 쿨다운: 최근 위기 후 1년
+        last_crisis = getattr(self.s, '_last_crisis_year', 0)
+        if last_crisis and cur.year - last_crisis < 1:
+            return
+
+        # 호재 쿨다운: 최근 호재 후 2년
+        last_boom = getattr(self.s, '_last_boom_year', 0)
+        if last_boom and cur.year - last_boom < 2:
+            return
+
+        # ★ 매달 1일 체크 (기존: 1월만 → 매달로 확대)
+        if cur.day != 1:
+            return
+
+        # ★ 월별 발생 확률 (연간으로 보면 현실적)
+        # 수출호황: 월 1.2% → 연 약 14% (10년에 1.4회)
+        # 유동성장세: 월 0.8% → 연 약 10% (10년에 1회, 금리 조건 포함)
+        # 내수붐: 월 1.0% → 연 약 12% (10년에 1.2회)
+        roll = random.random()
+
+        if roll < 0.012:  # 수출 호황
+            duration = random.randint(252, 756)
+            self.s.boom_event = {
+                'type':  '수출호황',
+                'phase': '진행중',
+                'timer': duration,
+            }
+            self.s.current_scenario = "📈 수출 호황 (반도체/수출 슈퍼사이클)"
+            self.s.scenario_timer   = duration
+            if not silent:
+                self.s.daily_news.append(
+                    f"📈 [수출 호황] {cur.year}년, 반도체·수출 슈퍼사이클 진입! "
+                    f"IT/산업재/소재 섹터 강세 예상"
+                )
+
+        elif roll < 0.020:  # 유동성 장세 (금리 3.5% 이하 조건)
+            if self.s.macro.get('interest_rate', 4.0) <= 3.5:
+                duration = random.randint(252, 504)
+                self.s.boom_event = {
+                    'type':  '유동성장세',
+                    'phase': '진행중',
+                    'timer': duration,
+                }
+                self.s.current_scenario = "💰 유동성 장세 (저금리 + 외국인 유입)"
+                self.s.scenario_timer   = duration
+                if not silent:
+                    self.s.daily_news.append(
+                        f"💰 [유동성 장세] {cur.year}년, 저금리 환경에 외국인 자금 유입! "
+                        f"전 섹터 상승 모멘텀"
+                    )
+
+        elif roll < 0.030:  # 내수 소비 붐
+            duration = random.randint(126, 378)
+            self.s.boom_event = {
+                'type':  '내수붐',
+                'phase': '진행중',
+                'timer': duration,
+            }
+            self.s.current_scenario = "🛒 내수 소비 붐"
+            self.s.scenario_timer   = duration
+            if not silent:
+                self.s.daily_news.append(
+                    f"🛒 [내수 붐] {cur.year}년, 내수 소비 호황! "
+                    f"필수소비재/자유소비재/커뮤니케이션 강세"
+                )
+
+
+    # ─────────────────────────────────────────────
+    # ★ 수출 규제 이벤트
+    # ─────────────────────────────────────────────
+    def _check_export_sanction(self, silent: bool):
+        """
+        수출 규제 이벤트 체크 및 진행.
+        현실 기준:
+          반도체 수출 규제: 10년에 1~2회
+          배터리 소재 제한: 10년에 1회
+          방산/콘텐츠 규제: 산발적
+        구조: 단기충격(6~12개월) → 중장기수혜(1~2년) → 종료
+        """
+        import random
+        from engine.constants import EXPORT_SANCTION_TYPES
+
+        cur = self.s.current_date
+        if not getattr(self.s, '_market_fully_formed', False):
+            return
+
+        # 초기화
+        if not hasattr(self.s, 'export_sanctions'):
+            self.s.export_sanctions = {}
+
+        # 진행 중인 규제 tick
+        for sid in list(self.s.export_sanctions.keys()):
+            state = self.s.export_sanctions[sid]
+            s_def = EXPORT_SANCTION_TYPES.get(sid, {})
+            state['timer'] = state.get('timer', 0) - 1
+
+            if state['timer'] <= 0:
+                phase = state.get('phase', '')
+                if phase == '단기충격':
+                    # 단기충격 종료 → 중장기수혜 시작
+                    state['phase'] = '중장기수혜'
+                    state['timer'] = s_def.get('duration_long', 378)
+                    if not silent:
+                        targets = '/'.join(s_def.get('target_inds', []))
+                        self.s.daily_news.append(
+                            f"🔄 [{s_def['emoji']} 공급망 재편] {s_def['name']} 충격 완화 — "
+                            f"{targets} 섹터 대체 공급망 수혜 시작"
+                        )
+                elif phase == '중장기수혜':
+                    # 완전 종료
+                    del self.s.export_sanctions[sid]
+                    if not silent:
+                        self.s.daily_news.append(
+                            f"✅ [{s_def['emoji']} 규제 종료] {s_def['name']} 효과 완전 소멸"
+                        )
+            continue
+
+        # 매달 1일 신규 발동 체크
+        if cur.day != 1:
+            return
+
+        # 전쟁/대공황/팬데믹 중엔 추가 규제 없음 (이미 충분한 충격)
+        scenario = self.s.current_scenario
+        if any(x in scenario for x in ["대공황", "팬데믹", "전쟁"]):
+            return
+
+        # 수출 호황 후 1~3년 내 규제 확률 상승 (현실: 호황 → 견제)
+        last_boom = getattr(self.s, '_last_boom_year', 0)
+        years_since_boom = cur.year - last_boom if last_boom else 99
+        boom_factor = 2.0 if 1 <= years_since_boom <= 3 else 1.0
+
+        # 이미 진행 중인 규제가 있으면 신규 발동 억제
+        if len(self.s.export_sanctions) >= 2:
+            return
+
+        # 규제 쿨다운: 직전 규제 후 2년
+        last_sanction = getattr(self.s, '_last_sanction_year', 0)
+        if last_sanction and cur.year - last_sanction < 2:
+            return
+
+        # 각 규제 유형별 월 발동 확률
+        _SANCTION_PROB = {
+            "semiconductor":     0.008,   # 월 0.8% → 연 약 9%
+            "battery_material":  0.005,   # 월 0.5% → 연 약 6%
+            "defense_restriction": 0.003,
+            "content_ban":       0.004,
+        }
+
+        for sid, base_prob in _SANCTION_PROB.items():
+            if sid in self.s.export_sanctions:
+                continue  # 이미 진행 중
+
+            prob = base_prob * boom_factor
+            if random.random() < prob:
+                s_def = EXPORT_SANCTION_TYPES[sid]
+                self.s.export_sanctions[sid] = {
+                    'phase': '단기충격',
+                    'timer': s_def['duration_short'],
+                }
+                self.s._last_sanction_year = cur.year
+
+                targets = '/'.join(s_def['target_inds'])
+                if not silent:
+                    self.s.daily_news.append(
+                        f"{s_def['emoji']} [{s_def['name']}] 해외 주요국이 한국 {targets} 산업에 "
+                        f"수출 규제를 발동했습니다. 단기 실적 타격 예상 — "
+                        f"중장기적으로는 공급망 재편 수혜 가능"
+                    )
+                    # 시나리오 뉴스에도 추가
+                    self.s.daily_news.append(
+                        f"📊 [산업 영향] {targets} 섹터 수출 규제 단기 충격 "
+                        f"({s_def['duration_short']//21}주) → "
+                        f"이후 공급망 재편 수혜 ({s_def['duration_long']//21}주)"
+                    )
+                break  # 한 번에 하나씩만
+
+    # ─────────────────────────────────────────────
+    # ★ 대공황 자연 발생 트리거 (신규)
+    # ─────────────────────────────────────────────
+    def _check_depression(self, silent: bool):
+        """
+        복합 경제 지표가 임계값을 30일 이상 초과하면 대공황 자연 발생.
+        기존 forced 방식 대체.
+        """
+        # 이미 대공황이면 회복 조건 체크
+        if "대공황" in self.s.current_scenario and "극복" not in self.s.current_scenario:
+            self._tick_depression_recovery(silent)
+            return
+
+        # 대공황 진입 불가 조건
+        if not getattr(self.s, '_market_fully_formed', False):
+            return
+        if self.s.boom_event.get('phase') == '진행중':
+            return
+
+        # 트리거 조건 점수 계산
+        bi        = self.s.bubble_index
+        threshold = getattr(self.s, '_depression_threshold', 200)
+        rate      = self.s.macro.get('interest_rate', 4.0)
+        cpi       = self.s.macro.get('cpi', 2.0)
+        ff        = getattr(self.s, 'foreign_flow_index', 0.0)
+
+        # 시장 통계에서 PER 참조
+        stats   = getattr(self.s, '_last_market_stats', {})
+        per_l   = stats.get('per_large', 0)
+
+        trigger_score = 0
+        if bi >= threshold:           trigger_score += 3   # 핵심 조건
+        if bi >= threshold * 0.75:    trigger_score += 1
+        if per_l >= 60:               trigger_score += 1
+        if rate >= 6.0:               trigger_score += 1
+        if cpi >= 5.0:                trigger_score += 1
+        if ff <= -60:                 trigger_score += 1
+        # GRI 고점 대비 -30% 이상
+        peak = getattr(self.s, 'peak_gri', self.s.gri)
+        if self.s.gri < peak * 0.70:  trigger_score += 2
+
+        # 누적 카운터 관리
+        if trigger_score >= 3:
+            self.s.depression_trigger_count = getattr(self.s, 'depression_trigger_count', 0) + 1
+        else:
+            self.s.depression_trigger_count = max(
+                0, getattr(self.s, 'depression_trigger_count', 0) - 1
+            )
+
+        # 30일 이상 조건 지속 시 대공황 발동
+        if getattr(self.s, 'depression_trigger_count', 0) >= 30:
+            self.s.depression_active         = True
+            self.s.depression_trigger_count  = 0
+            self.s.current_scenario          = "💀 대공황 (시스템 붕괴)"
+            # ★ 자연 발생 대공황: 2~4년 (현실적)
+            # 분기점 대공황(10년)과 구분
+            self.s.scenario_timer            = 252 * random.randint(2, 4)
+            self.s._last_crisis_year         = self.s.current_date.year
+
+            # ★ 대공황 진입 시 버블 지수 강제 붕괴
+            # 버블이 터져서 대공황이 오는 것 — 버블은 폭락해야 함
+            # 직전 버블의 20~30% 수준으로 강제 하락
+            _prev_bubble = getattr(self.s, 'bubble_index', 100.0)
+            self.s.bubble_index = max(10.0, _prev_bubble * random.uniform(0.20, 0.30))
+
+            if not silent:
+                self.s.daily_news.append(
+                    "💀 [대공황 발생] 복합 경제 위기가 임계점을 돌파했습니다! "
+                    "버블 붕괴, 금리, 외국인 이탈이 동시에 폭발했습니다."
+                )
+
+    def _tick_depression_recovery(self, silent: bool):
+        """대공황 중 회복 조건 체크 — 조건 충족 시 대공황V 전환"""
+        bi   = self.s.bubble_index
+        rate = self.s.macro.get('interest_rate', 4.0)
+        ff   = getattr(self.s, 'foreign_flow_index', 0.0)
+        peak = getattr(self.s, 'peak_gri', self.s.gri)
+        gri_drop = self.s.gri / max(1, peak)
+
+        # ★ 타이머 기반 강제 회복 (현실: 대공황도 결국 끝남)
+        # scenario_timer가 0 이하면 조건 무관 강제 회복
+        timer = getattr(self.s, 'scenario_timer', 0)
+        if timer <= 0:
+            self.s.depression_active      = False
+            self.s.recovery_trigger_count = 0
+            self.s.current_scenario       = "✨ 대공황V (고난과 부활)"
+            if not silent:
+                self.s.daily_news.append(
+                    "🌅 [대공황 종료] 긴 침체 끝에 경제가 회복 국면에 접어들었습니다."
+                )
+            return
+
+        recovery_score = 0
+        if bi <= 60:          recovery_score += 1   # 거품 해소 (50→60 완화)
+        if rate <= 3.5:       recovery_score += 1   # 금리 인하(부양) (3.0→3.5 완화)
+        if ff >= 10:          recovery_score += 1   # 외국인 복귀 (20→10 완화)
+        if gri_drop <= 0.65:  recovery_score += 1   # -35% 바닥 확인 (-60%→-35% 완화)
+
+        self.s.recovery_trigger_count = getattr(self.s, 'recovery_trigger_count', 0)
+        if recovery_score >= 2:  # 3개→2개 완화
+            self.s.recovery_trigger_count += 1
+        else:
+            self.s.recovery_trigger_count = max(0, self.s.recovery_trigger_count - 1)
+
+        # 30일 이상 회복 조건 유지 시 대공황V 전환
+        if self.s.recovery_trigger_count >= 30:
+            self.s.depression_active       = False
+            self.s.recovery_trigger_count  = 0
+            self.s.current_scenario        = "✨ 대공황V (고난과 부활)"
+            if not silent:
+                self.s.daily_news.append(
+                    "🌅 [회복 신호] 경제 지표가 바닥을 확인했습니다. "
+                    "대공황 극복 국면에 진입합니다!"
+                )
+    # ─────────────────────────────────────────────
+    # ★ 페이즈 전환 체크 (신규)
+    # 페이즈가 바뀌었을 때 각 종목의 사업 전환/도태 처리
+    # ─────────────────────────────────────────────
+    def _check_phase_transition(self, silent: bool):
+        """
+        현재 페이즈와 _last_processed_phase를 비교해
+        페이즈가 바뀐 경우에만 사업 전환/도태 처리 실행.
+        """
+        from engine.constants import (
+            INDUSTRY_LEVELS, TIER_BUSINESS_SPEC, TECH_PHASE
+        )
+
+        cur_phase = self.eco.get_current_phase()
+        last_phase = getattr(self.s, '_last_processed_phase', '1A')
+
+        if cur_phase == last_phase:
+            return  # 페이즈 변화 없음 → 스킵
+
+        # ── 페이즈 전환 확정 ──────────────────────
+        self.s._last_processed_phase = cur_phase
+        cy = self.s.current_date.year
+
+        if not silent:
+            lv = self.s.max_tech_reached
+            phase_name = next(
+                (p["name"] for p in TECH_PHASE.get(lv, []) if p["id"] == cur_phase),
+                cur_phase
+            )
+            self.s.daily_news.append(
+                f"🔄 [시대 전환] {cy}년, 경제 패러다임이 [{last_phase}] → [{cur_phase} {phase_name}]로 전환됩니다!"
+            )
+
+        # ── 각 종목 사업 전환/도태 처리 ──────────
+        transition_log = []  # 뉴스용 로그
+
+        for stock in self.s.stocks:
+            meta = stock['meta']
+            ind  = meta.get('ind', '')
+            tier_raw = meta.get('tier_raw', '소')
+
+            # tier_raw 없으면 tier 문자열에서 추출
+            if not tier_raw:
+                t = meta.get('tier', '소형주')
+                if '대형주' == t:
+                    # group_id 있으면 대1, 없으면 대
+                    tier_raw = '대1' if meta.get('group_id') else '대'
+                elif '중형주' == t:
+                    tier_raw = '중'
+                else:
+                    tier_raw = '소'
+
+            spec = TIER_BUSINESS_SPEC.get(tier_raw, TIER_BUSINESS_SPEC['소'])
+            ind_data = INDUSTRY_LEVELS.get(ind, {})
+
+            # 현재 페이즈 풀 (대/중/소 전체 합산)
+            cur_phase_data = ind_data.get(cur_phase, {})
+            cur_all_subs = set()
+            for t_list in cur_phase_data.values():
+                cur_all_subs.update(t_list)
+
+            # common 풀
+            common_data = ind_data.get('common', {})
+            common_all = set()
+            for t_list in common_data.values():
+                common_all.update(t_list)
+
+            # 현재 sub_list
+            sub_list = meta.get('sub_list', [meta.get('sub', '')])
+            if not sub_list:
+                sub_list = [meta.get('sub', '')]
+
+            new_sub_list = []
+            dropped = []
+            added = []
+
+            for sub in sub_list:
+                is_common   = sub in common_all
+                is_current  = sub in cur_all_subs
+
+                if is_common or is_current:
+                    # 유지 가능한 사업
+                    new_sub_list.append(sub)
+                else:
+                    # 도태 사업
+                    roll = random.random()
+                    if roll < spec['follow_prob']:
+                        # 새 사업으로 교체
+                        new_sub = self._pick_new_sub(ind, tier_raw, cur_phase, new_sub_list, ind_data)
+                        if new_sub:
+                            new_sub_list.append(new_sub)
+                            dropped.append(sub)
+                            added.append(new_sub)
+                        else:
+                            new_sub_list.append(sub)  # 교체 실패 시 유지
+                    elif roll < spec['follow_prob'] + spec['survive_prob']:
+                        # 낮은 효율로 버팀 — efficiency 패널티
+                        meta['efficiency'] = max(
+                            0.005,
+                            meta.get('efficiency', 0.05) * (1.0 - spec['obsolete_penalty'])
+                        )
+                        new_sub_list.append(sub)
+                    else:
+                        # 상폐 경로 — efficiency 강한 패널티
+                        meta['efficiency'] = max(
+                            0.005,
+                            meta.get('efficiency', 0.05) * (1.0 - spec['obsolete_penalty'] * 3)
+                        )
+                        new_sub_list.append(sub)  # 아직 버리진 않음, 패널티만
+
+            # 사업 추가 (max_subs 미만이고 add_prob 충족 시)
+            if (len(new_sub_list) < spec['max_subs']
+                    and random.random() < spec['add_prob']):
+                new_sub = self._pick_new_sub(ind, tier_raw, cur_phase, new_sub_list, ind_data)
+                if new_sub:
+                    new_sub_list.append(new_sub)
+                    added.append(new_sub)
+
+            # sub_list 업데이트
+            meta['sub_list'] = new_sub_list[:spec['max_subs']]
+            # 주력 사업(sub)은 sub_list 첫 번째로
+            if new_sub_list:
+                meta['sub'] = new_sub_list[0]
+
+            # 뉴스 로그 (대형주만, 조용하지 않을 때)
+            if not silent and tier_raw in ('대1', '대') and (dropped or added):
+                name = meta.get('c_name', '')
+                if dropped:
+                    transition_log.append(f"{name}: {', '.join(dropped[:2])} 사업 철수")
+                if added:
+                    transition_log.append(f"{name}: {', '.join(added[:2])} 신규 진출")
+
+        # 전환 요약 뉴스 (최대 5개)
+        if not silent and transition_log:
+            for msg in transition_log[:5]:
+                self.s.daily_news.append(f"🏭 [사업 재편] {msg}")
+
+    def _pick_new_sub(self, ind: str, tier_raw: str,
+                       phase: str, existing: list, ind_data: dict) -> str:
+        """
+        현재 페이즈 + 티어에서 기존 sub_list에 없는 새 사업 하나 선택.
+        없으면 인접 티어, 그래도 없으면 common에서 선택.
+        """
+        # 티어 매핑
+        tier_key = "대" if tier_raw in ('대1', '대') else tier_raw
+
+        candidates = []
+        # 1순위: 현재 페이즈 해당 티어
+        candidates = [
+            s for s in ind_data.get(phase, {}).get(tier_key, [])
+            if s not in existing
+        ]
+        # 2순위: 현재 페이즈 인접 티어
+        if not candidates:
+            for t in ['중', '소', '대']:
+                if t == tier_key:
+                    continue
+                candidates = [
+                    s for s in ind_data.get(phase, {}).get(t, [])
+                    if s not in existing
+                ]
+                if candidates:
+                    break
+        # 3순위: common
+        if not candidates:
+            for t_list in ind_data.get('common', {}).values():
+                candidates += [s for s in t_list if s not in existing]
+
+        return random.choice(candidates) if candidates else ""

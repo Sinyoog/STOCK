@@ -82,6 +82,19 @@ def _build_event_html(s) -> str:
     if getattr(s, 'qt_active', False):
         events.append("🏛️ QT 진행중")
 
+    # 수출 규제
+    sanctions = getattr(s, 'export_sanctions', {})
+    for sid, state in sanctions.items():
+        from engine.constants import EXPORT_SANCTION_TYPES
+        s_def = EXPORT_SANCTION_TYPES.get(sid, {})
+        phase = state.get('phase', '')
+        timer = state.get('timer', 0)
+        weeks = timer // 21
+        if phase == '단기충격':
+            events.append(f"{s_def.get('emoji','🚫')} {s_def.get('name','')} 단기충격 (잔여 {weeks}주)")
+        elif phase == '중장기수혜':
+            events.append(f"🔄 {s_def.get('name','')} 공급망재편 수혜 (잔여 {weeks}주)")
+
     if not events:
         return ""
 
@@ -229,11 +242,13 @@ class StockHTS(QMainWindow):
         industry_row.addWidget(self.industry_label)
         dash_lay.addLayout(industry_row)
 
-        # 최근 검색 종목 (최대 5개)
-        recent_lay = QHBoxLayout()
+        # ── 최근 검색 + 상위 종목 행 ─────────────────
+        bottom_row = QHBoxLayout()
+
+        # 좌측: 최근 검색
         recent_lbl = QLabel("최근:")
         recent_lbl.setStyleSheet("color: #555; font-size: 12px; min-width: 35px;")
-        recent_lay.addWidget(recent_lbl)
+        bottom_row.addWidget(recent_lbl)
         self.recent_btns = []
         recent_btn_style = "QPushButton { background: #1a1a1a; color: #00BFFF; border: 1px solid #333; padding: 2px 8px; border-radius: 3px; font-size: 12px; } QPushButton:hover { border: 1px solid #00BFFF; }"
         for i in range(5):
@@ -241,10 +256,73 @@ class StockHTS(QMainWindow):
             btn.setVisible(False)
             btn.setStyleSheet(recent_btn_style)
             btn.clicked.connect(lambda _, idx=i: self._on_recent_clicked(idx))
-            recent_lay.addWidget(btn)
+            bottom_row.addWidget(btn)
             self.recent_btns.append(btn)
-        recent_lay.addStretch()
-        dash_lay.addLayout(recent_lay)
+
+        bottom_row.addStretch()
+
+        # 우측: 오늘/전체 토글 + 상위 종목 버튼
+        self._top_mode = "오늘"  # "오늘" or "전체"
+
+        _toggle_base = """
+            QPushButton {{
+                background: {bg}; color: {fg};
+                border: 1px solid {bd}; padding: 2px 10px;
+                border-radius: 3px; font-size: 12px; font-weight: bold;
+            }}
+            QPushButton:hover {{ border: 1px solid #00FF00; }}
+        """
+        self.btn_top_today = QPushButton("오늘")
+        self.btn_top_today.setFixedSize(48, 22)
+        self.btn_top_total = QPushButton("전체")
+        self.btn_top_total.setFixedSize(48, 22)
+
+        def _refresh_toggle_style():
+            if self._top_mode == "오늘":
+                self.btn_top_today.setStyleSheet(_toggle_base.format(bg="#003300", fg="#00FF00", bd="#00FF00"))
+                self.btn_top_total.setStyleSheet(_toggle_base.format(bg="#1a1a1a", fg="#555", bd="#333"))
+            else:
+                self.btn_top_today.setStyleSheet(_toggle_base.format(bg="#1a1a1a", fg="#555", bd="#333"))
+                self.btn_top_total.setStyleSheet(_toggle_base.format(bg="#003300", fg="#00FF00", bd="#00FF00"))
+
+        def _on_top_today():
+            self._top_mode = "오늘"
+            _refresh_toggle_style()
+            self._refresh_top_stocks()
+
+        def _on_top_total():
+            self._top_mode = "전체"
+            _refresh_toggle_style()
+            self._refresh_top_stocks()
+
+        self.btn_top_today.clicked.connect(_on_top_today)
+        self.btn_top_total.clicked.connect(_on_top_total)
+        self._refresh_toggle_style = _refresh_toggle_style
+        _refresh_toggle_style()
+
+        bottom_row.addWidget(self.btn_top_today)
+        bottom_row.addWidget(self.btn_top_total)
+
+        # 상위 종목 버튼 5개
+        self.top_stock_btns = []
+        top_btn_style = """
+            QPushButton {{
+                background: #0d1a0d; color: {fg};
+                border: 1px solid #1a3a1a; padding: 2px 8px;
+                border-radius: 3px; font-size: 12px;
+            }}
+            QPushButton:hover {{ border: 1px solid #00FF00; color: #00FF00; }}
+        """
+        for i in range(5):
+            btn = QPushButton("")
+            btn.setVisible(False)
+            btn.setFixedHeight(22)
+            btn.setStyleSheet(top_btn_style.format(fg="#39FF14"))
+            btn.clicked.connect(lambda _, idx=i: self._on_top_stock_clicked(idx))
+            bottom_row.addWidget(btn)
+            self.top_stock_btns.append(btn)
+
+        dash_lay.addLayout(bottom_row)
         main_layout.addWidget(self.dashboard)
 
         # ── 중앙 콘텐츠 ──────────────────────────
@@ -610,6 +688,11 @@ class StockHTS(QMainWindow):
         self._market_stats   = None
         self._prev_stats_txt = None
         self._prev_ind_txt   = None
+        # ★ 상위 종목 캐시 초기화 — 이전 게임 수치 잔류 방지
+        self._first_price_cache = {}
+        self._top_stock_names   = []
+        for btn in self.top_stock_btns:
+            btn.setVisible(False)
         self.market_stats_label.setText("")
         self.industry_label.setText("")
         self.sync_ui_with_engine()
@@ -693,15 +776,23 @@ class StockHTS(QMainWindow):
             "Growth":    [0.0, 0],
             "Value":     [0.0, 0],
             "Defensive": [0.0, 0],
-            "Theme":     [0.0, 0],
+            "Cyclical":  [0.0, 0],
         }
-        # 산업별 수익률 — MAIN_INDUSTRIES 12개 키로 초기화
+        # 산업별 수익률 — 시가총액 가중 평균
+        # {ind: [가중합, 시총합]}
         from engine.constants import MAIN_INDUSTRIES
-        industry_rate = {ind: [0.0, 0] for ind in MAIN_INDUSTRIES}
+        industry_rate = {ind: [0.0, 0.0] for ind in MAIN_INDUSTRIES}
+        # 섹터별도 시총 가중 평균으로
+        sector_rate = {
+            "Growth":    [0.0, 0.0],
+            "Value":     [0.0, 0.0],
+            "Defensive": [0.0, 0.0],
+            "Cyclical":  [0.0, 0.0],
+        }
         deficit_count = 0
 
         for stock in s.stocks:
-            meta    = stock["meta"]           # dict 1회 접근
+            meta    = stock["meta"]
             tier    = meta["tier"]
             ind     = meta.get("ind", "")
             mc      = stock["market_cap"]
@@ -711,18 +802,17 @@ class StockHTS(QMainWindow):
             initial = meta.get("initial_price", 0)
             cumul   = ((price / initial) - 1) * 100 if initial > 0 else 0.0
 
-            # 섹터 누적 수익률 누산
+            # ★ 시가총액 가중 누산
             sector = SECTOR_MAP.get(ind, "Value")
             sr = sector_rate.get(sector)
             if sr:
-                sr[0] += cumul
-                sr[1] += 1
+                sr[0] += cumul * mc   # 가중합
+                sr[1] += mc           # 시총합
 
-            # 산업별 누적 수익률 누산 (같은 루프, 추가 비용 최소)
             ir = industry_rate.get(ind)
             if ir:
-                ir[0] += cumul
-                ir[1] += 1
+                ir[0] += cumul * mc
+                ir[1] += mc
 
             # PER: 실적 없으면 즉시 스킵 (조기 탈출)
             c_name = meta.get("c_name", "")
@@ -768,7 +858,7 @@ class StockHTS(QMainWindow):
             "rate_growth": _avg(sector_rate, "Growth"),
             "rate_value":  _avg(sector_rate, "Value"),
             "rate_def":    _avg(sector_rate, "Defensive"),
-            "rate_theme":  _avg(sector_rate, "Theme"),
+            "rate_cyclical": _avg(sector_rate, "Cyclical"),
             "deficit_pct": deficit_count / total * 100,
             # 산업별 평균 수익률 — 약어 키로 저장
             "ind": {k: _avg(industry_rate, k) for k in industry_rate},
@@ -816,7 +906,7 @@ class StockHTS(QMainWindow):
             "PER대", "PER중", "PER소",
             "성장섹", "가치섹",
             "IT", "건강", "에너지", "금융",
-            "산업재", "소재", "부동산", "재건",
+            "산업재", "소재", "부동산",
             "유틸", "자유소비", "필수소비", "커뮤",
             "시나리오", "전쟁/이벤트"
         ]
@@ -859,7 +949,6 @@ class StockHTS(QMainWindow):
                 f"{r.get('ind_industry', 0):+.2f}%",
                 f"{r.get('ind_material', 0):+.2f}%",
                 f"{r.get('ind_realestate', 0):+.2f}%",
-                f"{r.get('ind_rebuild', 0):+.2f}%",
                 f"{r.get('ind_util', 0):+.2f}%",
                 f"{r.get('ind_consumer', 0):+.2f}%",
                 f"{r.get('ind_staple', 0):+.2f}%",
@@ -909,9 +998,7 @@ class StockHTS(QMainWindow):
             if path:
                 saved = db.export_scenario_log_txt(path)
                 from PyQt6.QtWidgets import QMessageBox
-                if saved:
-                    QMessageBox.information(dlg, "저장 완료", f"저장되었습니다:\n{saved}")
-                else:
+                if not saved:
                     QMessageBox.warning(dlg, "저장 실패", "저장할 데이터가 없거나 오류가 발생했습니다.")
 
         btn_dl.clicked.connect(_download)
@@ -974,7 +1061,19 @@ class StockHTS(QMainWindow):
         elif bubble >= 150: b_str = f"🟡 버블 {bubble:.0f}"
         elif bubble >= 50:  b_str = f"🟢 버블 {bubble:.0f}"
         else:               b_str = f"버블 {bubble:.0f}"
-        self.index_label.setText(f"📊 GRI: {s.gri:,.0f} | {b_str} | LV.{s.max_tech_reached}")
+        # 페이즈 표시 (1A/1B/2A 등 + 페이즈 이름)
+        try:
+            phase = self.game_service.eco.get_current_phase()
+            from engine.constants import TECH_PHASE
+            lv = s.max_tech_reached
+            phase_name = next(
+                (p["name"] for p in TECH_PHASE.get(lv, []) if p["id"] == phase),
+                ""
+            )
+            phase_str = f"{phase} {phase_name}" if phase_name else phase
+        except Exception:
+            phase_str = str(s.max_tech_reached)
+        self.index_label.setText(f"📊 GRI: {s.gri:,.0f} | {b_str} | LV.{s.max_tech_reached} [{phase_str}]")
         # ★ 원자재 (현실 단위)
         grain = m.get('grain_price')
         metal = m.get('metal_price')
@@ -1000,17 +1099,20 @@ class StockHTS(QMainWindow):
                 # 숫자 색상: 양수=빨강, 음수=파랑, 0=회색
                 return "#FF4444" if v > 0 else ("#4488FF" if v < 0 else "#888888")
 
-            # 변동성 강조: abs(값) 상위 N개 → 형광 글자색
-            # 글자(레이블명)만 형광, 숫자는 _rc 그대로
+            # 형광 강조: 양수 중 상위 N개만 (음수 큰 값은 제외)
             def _highlight_top(values: dict, top_n: int = 2) -> set:
-                """abs 기준 상위 top_n 키 반환"""
-                sorted_keys = sorted(values, key=lambda k: abs(values[k]), reverse=True)
+                """양수 값 중 상위 top_n 키 반환 (양수가 없으면 전체 abs 기준)"""
+                pos = {k: v for k, v in values.items() if v > 0}
+                if pos:
+                    sorted_keys = sorted(pos, key=lambda k: pos[k], reverse=True)
+                else:
+                    sorted_keys = sorted(values, key=lambda k: abs(values[k]), reverse=True)
                 return set(sorted_keys[:top_n])
 
             pl, pm, ps = ms["per_large"], ms["per_mid"], ms["per_small"]
             sec_vals = {
                 "성장": ms["rate_growth"], "가치": ms["rate_value"],
-                "방어": ms["rate_def"],    "테마": ms["rate_theme"],
+                "방어": ms["rate_def"],    "테마": ms["rate_cyclical"],
             }
             sec_hot = _highlight_top(sec_vals, 2)
             sep = "<span style='color:#444;'> | </span>"
@@ -1040,7 +1142,7 @@ class StockHTS(QMainWindow):
                 "IT": "IT", "에너지": "에너지", "건강관리": "건강",
                 "산업재": "산업재", "소재": "소재", "자유소비재": "자유소비",
                 "커뮤니케이션": "커뮤", "금융": "금융", "필수소비재": "필수소비",
-                "유틸리티": "유틸", "부동산": "부동산", "재건": "재건",
+                "유틸리티": "유틸", "부동산": "부동산",
             }
             ind_map  = ms.get("ind", {})
             ind_vals = {short: ind_map.get(full, 0.0) for full, short in IND_SHORT.items()}
@@ -1060,6 +1162,7 @@ class StockHTS(QMainWindow):
 
         self.filter_stocks()
         self.refresh_chart()
+        self._refresh_top_stocks()
 
         selected = self._get_selected_stock()
         if self.selected_stock_name == "GRI":
@@ -1156,7 +1259,7 @@ class StockHTS(QMainWindow):
                         f_dialog.sec_grow.isChecked()      and s_name == "Growth",
                         f_dialog.sec_val.isChecked()       and s_name == "Value",
                         f_dialog.sec_defensive.isChecked() and s_name == "Defensive",
-                        f_dialog.sec_theme.isChecked()     and s_name == "Theme",
+                        f_dialog.sec_cyclical.isChecked()  and s_name == "Cyclical",
                     ]): continue
 
             if query not in snap['name'].lower(): continue
@@ -1456,41 +1559,13 @@ class StockHTS(QMainWindow):
         self.chart_widget.setYRange(mn - pad, mx + pad)
         self.baseline.setPos(float(disp[0]))
 
-        # 기존 마커 제거 후 새로 추가
+        # _gri_* 전용 마커 제거 (이전 방식 잔재 정리)
         for attr in ['_gri_max_scatter','_gri_min_scatter','_gri_max_text','_gri_min_text']:
             if hasattr(self, attr):
                 try: self.chart_widget.removeItem(getattr(self, attr)); delattr(self, attr)
                 except: pass
 
-        n       = len(disp)
-        # ★ 최고/최저값과 X위치를 모두 disp 기준으로 통일
-        # prices 기준으로 뽑으면 disp에 없는 값이 나와서 마커가 엉뚱한 곳에 찍힘
-        mx      = max(disp)
-        mn      = min(disp)
-        max_idx = max(range(n), key=lambda i: disp[i])
-        min_idx = min(range(n), key=lambda i: disp[i])
-
-        self._gri_max_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#FF4444'), symbol='o')
-        self._gri_max_scatter.addPoints([{'pos': (max_idx, mx)}])
-        self.chart_widget.addItem(self._gri_max_scatter)
-
-        self._gri_min_scatter = pg.ScatterPlotItem(size=10, brush=pg.mkBrush('#4444FF'), symbol='o')
-        self._gri_min_scatter.addPoints([{'pos': (min_idx, mn)}])
-        self.chart_widget.addItem(self._gri_min_scatter)
-
-        max_anchor = (1.0, 1.0) if max_idx > n * 0.75 else (0.0, 1.0)
-        self._gri_max_text = pg.TextItem(
-            html=f"<span style='color:#FF4444;font-weight:bold;background-color:#000;'>최고: {mx:,.0f}</span>",
-            anchor=max_anchor)
-        self._gri_max_text.setPos(max_idx, mx)
-        self.chart_widget.addItem(self._gri_max_text)
-
-        min_anchor = (1.0, 0.0) if min_idx > n * 0.75 else (0.0, 0.0)
-        self._gri_min_text = pg.TextItem(
-            html=f"<span style='color:#4444FF;font-weight:bold;background-color:#000;'>최저: {mn:,.0f}</span>",
-            anchor=min_anchor)
-        self._gri_min_text.setPos(min_idx, mn)
-        self.chart_widget.addItem(self._gri_min_text)
+        self._update_chart_markers(disp, prices)
 
         rate  = ((disp[-1] / max(1.0, disp[0])) - 1.0) * 100
         sign  = "▲" if rate > 0 else ("▼" if rate < 0 else "─")
@@ -1521,11 +1596,12 @@ class StockHTS(QMainWindow):
     # 차트
     # ─────────────────────────────────────────────
     def refresh_chart(self):
-        # GRI ↔ 주식 전환 시 ticks 초기화 (setAxisItems 절대 금지)
         self.chart_widget.getAxis('bottom').setTicks(None)
-        for attr in ['_gri_max_scatter', '_gri_min_scatter', '_gri_max_text', '_gri_min_text']:
+        # GRI용 + 주식용 마커 모두 제거
+        for attr in ['_gri_max_scatter', '_gri_min_scatter', '_gri_max_text', '_gri_min_text',
+                     'max_scatter', 'min_scatter', 'max_text', 'min_text']:
             if hasattr(self, attr):
-                try: self.chart_widget.removeItem(getattr(self, attr))
+                try: self.chart_widget.removeItem(getattr(self, attr)); delattr(self, attr)
                 except: pass
 
         if self.selected_stock_name == "GRI":
@@ -1603,35 +1679,6 @@ class StockHTS(QMainWindow):
             y_pad = max(1.0, (y_max - y_min) * 0.05) if y_min != y_max else y_min * 0.01
             self.chart_widget.setYRange(y_min - y_pad, y_max + y_pad)
 
-        self._update_chart_markers(smoothed, prices if self.current_tf != "1일" else None)
-        self.change_summary_label.setText(
-            f"<span style='color:#ffffff;'>{self.current_tf} 기준: </span>"
-            f"<span style='color:#aaaaaa;'>{int(base_p):,}원</span>"
-            f"<span style='color:#ffffff;'> → </span>"
-            f"<span style='color:{c_hex}; font-weight:bold;'>{int(smoothed[-1]):,}원 </span>"
-            f"<span style='color:{c_hex};'>({sign}{int(abs(diff)):,}원, {period_r:+.2f}%)</span>"
-        )
-
-        smoothed = disp[:]
-        diff     = smoothed[-1] - smoothed[0]
-        period_r = (diff / base_p * 100) if base_p != 0 else 0
-
-        c_hex = "#FF4444" if diff > 0 else ("#4444FF" if diff < 0 else "#e0e0e0")
-        sign  = "▲" if diff > 0 else ("▼" if diff < 0 else "─")
-
-        self.curve.setPen(pg.mkPen(color=c_hex, width=2))
-        self.baseline.setPos(base_p)
-        self.curve.setData(smoothed)
-
-        # Y축 범위는 raw prices 전체 기준 (압축된 disp가 아닌 실제 데이터)
-        raw_for_range = prices if self.current_tf != "1일" else smoothed
-        if raw_for_range:
-            y_min = min(raw_for_range)
-            y_max = max(raw_for_range)
-            y_pad = max(1.0, (y_max - y_min) * 0.05) if y_min != y_max else y_min * 0.01
-            self.chart_widget.setYRange(y_min - y_pad, y_max + y_pad)
-
-        # 마커에 raw prices 전달 → 실제 최고/최저 표시
         self._update_chart_markers(smoothed, prices if self.current_tf != "1일" else None)
         self.change_summary_label.setText(
             f"<span style='color:#ffffff;'>{self.current_tf} 기준: </span>"
@@ -1848,6 +1895,7 @@ class StockHTS(QMainWindow):
             그룹: {m.get('group','단독기업')}<br/>
             규모: <b style='color:#FFD700;'>{size}</b><br/>
             산업: {m['ind']} ({m['sub']})<br/>
+            {f"<span style='color:#00BFFF;font-size:12px;'>📋 사업: {' / '.join(m.get('sub_list', [m['sub']]))}</span><br/>" if len(m.get('sub_list', [])) > 1 else ""}
             상태: <b style='color:#00FF00;'>{char}</b></p>
             <p style='font-size:13px;'><b>[발행 정보]</b><br/>
             주식수: {stock['shares']:,} 주<br/>
@@ -1891,6 +1939,101 @@ class StockHTS(QMainWindow):
         self.recent_stocks.insert(0, name)
         self.recent_stocks = self.recent_stocks[:5]
         self._refresh_recent_btns()
+
+    def _refresh_top_stocks(self):
+        """오늘/전체 모드에 따라 상위 5개 종목 버튼 갱신"""
+        stocks = self.game_service.s.stocks
+        if not stocks:
+            for btn in self.top_stock_btns:
+                btn.setVisible(False)
+            return
+
+        if self._top_mode == "오늘":
+            ranked = sorted(stocks, key=lambda x: x.get('rate', 0.0), reverse=True)[:5]
+            def label(s):
+                r = s.get('rate', 0.0)
+                col = "#FF4444" if r >= 0 else "#4488FF"
+                return s['meta']['c_name'], f"{r:+.1f}%", col
+        else:
+            db = self.game_service.db
+
+            def get_first_price(name):
+                """차트 전체 기준과 완전히 동일한 방식으로 첫 가격 조회"""
+                try:
+                    cur = db.conn.cursor()
+                    cur.execute(
+                        "SELECT price FROM stock_history WHERE company_name=? ORDER BY date ASC LIMIT 1",
+                        (name,)
+                    )
+                    row = cur.fetchone()
+                    return float(row[0]) if row else 0.0
+                except Exception:
+                    return 0.0
+
+            # ★ 캐시 없이 매번 정확히 계산 (전체 버튼 클릭 시만 실행)
+            cumul_map = {}
+            for s in stocks:
+                name = s['meta']['c_name']
+                p    = s.get('price', 0)
+                first = get_first_price(name)
+                # DB에 기록 없으면 initial_price 폴백
+                if first <= 0:
+                    first = s['meta'].get('initial_price', 0)
+                cumul_map[name] = ((p / first) - 1) * 100 if first > 0 else 0.0
+
+            ranked = sorted(stocks, key=lambda s: cumul_map[s['meta']['c_name']], reverse=True)[:5]
+
+            def label(s):
+                c = cumul_map[s['meta']['c_name']]
+                col = "#FF4444" if c >= 0 else "#4488FF"
+                return s['meta']['c_name'], f"{c:+.0f}%", col
+
+            ranked = sorted(stocks, key=lambda s: cumul_map[s['meta']['c_name']], reverse=True)[:5]
+
+            def label(s):
+                c = cumul_map[s['meta']['c_name']]
+                col = "#FF4444" if c >= 0 else "#4488FF"
+                return s['meta']['c_name'], f"{c:+.0f}%", col
+
+        self._top_stock_names = [s['meta']['c_name'] for s in ranked]
+
+        _btn_style = """
+            QPushButton {{
+                background: #0d1a0d; color: {col};
+                border: 1px solid #1a3a1a; padding: 2px 8px;
+                border-radius: 3px; font-size: 12px; font-weight: bold;
+            }}
+            QPushButton:hover {{ border: 1px solid #555; }}
+        """
+        for i, btn in enumerate(self.top_stock_btns):
+            if i < len(ranked):
+                name, pct, col = label(ranked[i])
+                btn.setText(f"{name} {pct}")
+                # ★ hover 시 색상 변경 없음 (클릭해도 형광색 안 됨)
+                btn.setStyleSheet(_btn_style.format(col=col))
+                btn.setVisible(True)
+            else:
+                btn.setVisible(False)
+
+    def _on_top_stock_clicked(self, idx: int):
+        """상위 종목 버튼 클릭 → 종목 선택 + 차트 이동"""
+        names = getattr(self, '_top_stock_names', [])
+        if idx < len(names):
+            name = names[idx]
+            self.selected_stock_name = name
+            self._add_recent_stock(name)
+            # 테이블에서 해당 종목으로 스크롤
+            for i in range(self.stock_table.rowCount()):
+                it = self.stock_table.item(i, 1)
+                if it:
+                    raw = it.text()
+                    for prefix in ["☠️ ", "🚨 ", "⚠️ ", "💀 "]:
+                        if raw.startswith(prefix): raw = raw[len(prefix):]; break
+                    if raw == name:
+                        self.stock_table.setCurrentCell(i, 1)
+                        self.stock_table.scrollToItem(it)
+                        break
+            self.sync_ui_with_engine()
 
     def _refresh_recent_btns(self):
         for i, btn in enumerate(self.recent_btns):
