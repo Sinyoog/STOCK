@@ -154,6 +154,8 @@ class StockHTS(QMainWindow):
         self.current_loop        = 0
         self.is_auto_running     = False
         self.recent_stocks       = []
+        self.current_macro_key   = "GRI"   # ★ 거시경제 탭 현재 선택 키
+        self._macro_chart_cache  = {}      # ★ 차트 데이터 캐시
 
         # 저장 데이터 불러오기
         saved = game_service.load_game()
@@ -382,6 +384,47 @@ class StockHTS(QMainWindow):
 
         # 중앙 차트
         chart_lay = QVBoxLayout()
+
+        # ── ★ 거시경제 지표 탭 버튼 ────────────────────────────
+        macro_tab_lay = QHBoxLayout()
+        macro_tab_lay.setSpacing(4)
+        macro_tab_lay.setContentsMargins(0, 2, 0, 2)
+        _MACRO_TABS = [
+            ("GRI",           "GRI"),
+            ("buffett_index", "버핏"),
+            ("interest_rate", "금리"),
+            ("oil_price",     "유가"),
+            ("exchange_rate", "환율"),
+            ("cpi",           "CPI"),
+            ("metal_price",   "구리"),
+            ("grain_price",   "밀"),
+            ("semi_index",    "SOX"),
+        ]
+        self._macro_tab_btns = {}
+        _mt_style = (
+            "QPushButton {"
+            "  background: #1a1a1a; color: #888;"
+            "  border: 1px solid #333; padding: 3px 12px;"
+            "  border-radius: 3px; font-size: 12px;"
+            "}"
+            "QPushButton:checked {"
+            "  background: #001a00; color: #00FF00;"
+            "  font-weight: bold; border: 1px solid #00FF00;"
+            "}"
+        )
+        for _key, _lbl in _MACRO_TABS:
+            _btn = QPushButton(_lbl)
+            _btn.setCheckable(True)
+            _btn.setFixedHeight(24)
+            _btn.setStyleSheet(_mt_style)
+            _btn.setChecked(_key == "GRI")
+            _btn.clicked.connect(lambda _ch, k=_key: self._set_macro_tab(k))
+            macro_tab_lay.addWidget(_btn)
+            self._macro_tab_btns[_key] = _btn
+        macro_tab_lay.addStretch()
+        chart_lay.addLayout(macro_tab_lay)
+        # ────────────────────────────────────────────────────────
+
         self.chart_widget = pg.PlotWidget()
         self.chart_widget.setBackground('#000000')
         self.chart_widget.setMouseEnabled(x=False, y=False)
@@ -706,6 +749,12 @@ class StockHTS(QMainWindow):
         self._market_stats   = None
         self._prev_stats_txt = None
         self._prev_ind_txt   = None
+        # ★ 거시경제 탭 초기화
+        self.current_macro_key  = "GRI"
+        self._macro_chart_cache = {}
+        if hasattr(self, '_macro_tab_btns'):
+            for k, btn in self._macro_tab_btns.items():
+                btn.setChecked(k == "GRI")
         # ★ 상위 종목 캐시 초기화 — 이전 게임 수치 잔류 방지
         self._first_price_cache = {}
         self._top_stock_names   = []
@@ -1103,8 +1152,10 @@ class StockHTS(QMainWindow):
         except Exception:
             phase_str = str(s.max_tech_reached)
         total_mc = sum(st.get('market_cap', 0) for st in s.stocks)
+        buffett  = getattr(s, 'buffett_index', 0.0)
+        b_icon   = "🟢" if buffett < 80 else ("🟡" if buffett < 100 else ("🟠" if buffett < 130 else "🔴"))
         self.index_label.setText(
-            f"📊 GRI: {s.gri:,.0f} | {b_str} | LV.{s.max_tech_reached} [{phase_str}] | 🏦 시총: {_fmt_mc(total_mc)}"
+            f"📊 GRI: {s.gri:,.0f} | {b_str} | {b_icon} 버핏 {buffett:.1f}% | LV.{s.max_tech_reached} [{phase_str}] | 🏦 시총: {_fmt_mc(total_mc)}"
         )
         # ★ 원자재 (현실 단위)
         grain = m.get('grain_price')
@@ -1299,6 +1350,7 @@ class StockHTS(QMainWindow):
 
         # rank 순으로 정렬 (필터 후에도 시총 순위 유지)
         filtered.sort(key=lambda x: x.get('rank', 9999))
+        self._last_snaps = filtered   # ★ macro 탭 전환 시 재사용
         self._update_table(filtered)
         total    = len(self.game_service.s.stocks)
         filtered_count = len(filtered)
@@ -1314,35 +1366,111 @@ class StockHTS(QMainWindow):
     def _update_table(self, snaps: list):
         self.stock_table.setRowCount(len(snaps) + 1)  # GRI 고정 행 +1
 
-        # ── GRI 고정 행 (0번 행) ──────────────────────────────
-        s = self.game_service.s
-        gri_now  = s.gri
-        gri_prev = getattr(s, 'prev_gri', gri_now)
-        gri_rate = ((gri_now / max(1.0, gri_prev)) - 1.0) * 100
+        # ── ★ 지표 고정 행 (0번 행) — 현재 macro_tab에 따라 동적 표시 ──
+        s   = self.game_service.s
+        key = getattr(self, 'current_macro_key', 'GRI')
 
-        gri_rank_it = QTableWidgetItem("GRI")
-        gri_rank_it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        gri_rank_it.setForeground(QColor("#888888"))
-        gri_rank_it.setFont(QFont("Malgun Gothic", 8, QFont.Weight.Bold))
+        _MACRO_ROW_META = {
+            "GRI": (
+                "GRI", "GRI 지수",
+                lambda: s.gri,
+                lambda: getattr(s, 'prev_gri', s.gri),
+                lambda v: f"{v:,.0f}",
+            ),
+            "buffett_index": (
+                "버핏", "버핏 지수",
+                lambda: getattr(s, 'buffett_index', 0.0),
+                lambda: getattr(s, '_ui_prev_macro', {}).get(
+                            'buffett_index', getattr(s, 'buffett_index', 0.0)),
+                lambda v: f"{v:.1f}%",
+            ),
+            "interest_rate": (
+                "금리", "기준 금리",
+                lambda: s.macro.get("interest_rate", 0.0),
+                lambda: getattr(s, "_ui_prev_macro", s._prev_macro_snapshot).get("interest_rate",
+                            s.macro.get("interest_rate", 0.0)),
+                lambda v: f"{v:.2f}%",
+            ),
+            "oil_price": (
+                "유가", "WTI 유가",
+                lambda: s.macro.get("oil_price", 0.0),
+                lambda: getattr(s, "_ui_prev_macro", s._prev_macro_snapshot).get("oil_price",
+                            s.macro.get("oil_price", 0.0)),
+                lambda v: f"${v:.2f}",
+            ),
+            "exchange_rate": (
+                "환율", "원/달러",
+                lambda: s.macro.get("exchange_rate", 0.0),
+                lambda: getattr(s, "_ui_prev_macro", s._prev_macro_snapshot).get("exchange_rate",
+                            s.macro.get("exchange_rate", 0.0)),
+                lambda v: f"₩{v:,.0f}",
+            ),
+            "cpi": (
+                "CPI", "소비자물가",
+                lambda: s.macro.get("cpi", 0.0),
+                lambda: getattr(s, "_ui_prev_macro", s._prev_macro_snapshot).get("cpi",
+                            s.macro.get("cpi", 0.0)),
+                lambda v: f"{v:.2f}%",
+            ),
+            "metal_price": (
+                "구리", "구리($/톤)",
+                lambda: s.macro.get("metal_price", 0.0),
+                lambda: getattr(s, "_ui_prev_macro", s._prev_macro_snapshot).get("metal_price",
+                            s.macro.get("metal_price", 0.0)),
+                lambda v: f"${v:,.0f}",
+            ),
+            "grain_price": (
+                "밀", "밀($/부셸)",
+                lambda: s.macro.get("grain_price", 0.0),
+                lambda: getattr(s, "_ui_prev_macro", s._prev_macro_snapshot).get("grain_price",
+                            s.macro.get("grain_price", 0.0)),
+                lambda v: f"${v:.0f}",
+            ),
+            "semi_index": (
+                "SOX", "SOX 반도체",
+                lambda: s.macro.get("semi_index", 0.0),
+                lambda: getattr(s, "_ui_prev_macro", s._prev_macro_snapshot).get("semi_index",
+                            s.macro.get("semi_index", 0.0)),
+                lambda v: f"{v:,.0f}",
+            ),
+        }
+        _meta   = _MACRO_ROW_META.get(key, _MACRO_ROW_META["GRI"])
+        _ind_lbl, _name_lbl, _cur_fn, _prev_fn, _fmt_fn = _meta
+        _cur_v  = _cur_fn()
+        _prev_v = _prev_fn()
+        # 금리/CPI는 절대값 차이, 환율은 원 차이, 나머지는 비율
+        _ABS_DIFF = {"interest_rate", "cpi", "buffett_index"}
+        if key in _ABS_DIFF:
+            _chg    = _cur_v - _prev_v        # %p 단위
+            _chg_str = f"{_chg:+.2f}%p"
+        elif key == "exchange_rate":
+            _chg    = _cur_v - _prev_v
+            _chg_str = f"{_chg:+.0f}원"
+        else:
+            _chg    = ((_cur_v / max(1e-9, _prev_v)) - 1.0) * 100 if _prev_v != 0 else 0.0
+            _chg_str = f"{_chg:+.2f}%"
+        _r0col  = rate_color(_chg)
 
-        gri_name_it = QTableWidgetItem("GRI 지수")
-        gri_name_it.setForeground(QColor("#AAAAAA"))
-        gri_name_it.setFont(QFont("Malgun Gothic", 9))
+        r0_ind = QTableWidgetItem(_ind_lbl)
+        r0_ind.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        r0_ind.setForeground(QColor("#888888"))
+        r0_ind.setFont(QFont("Malgun Gothic", 8, QFont.Weight.Bold))
 
-        gri_price_it = QTableWidgetItem(f"{gri_now:,.0f}")
-        gri_rate_it  = QTableWidgetItem(f"{gri_rate:+.2f}%")
-        gri_col = rate_color(gri_rate)
+        r0_name = QTableWidgetItem(_name_lbl)
+        r0_name.setForeground(QColor("#AAAAAA"))
+        r0_name.setFont(QFont("Malgun Gothic", 9))
 
-        # 숫자 색상만 (배경색 없음 - 다른 종목과 동일)
-        gri_price_it.setForeground(QColor(gri_col))
-        gri_rate_it.setForeground(QColor(gri_col))
-        gri_price_it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        gri_rate_it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        r0_price = QTableWidgetItem(_fmt_fn(_cur_v))
+        r0_rate  = QTableWidgetItem(_chg_str)
+        r0_price.setForeground(QColor(_r0col))
+        r0_rate.setForeground(QColor(_r0col))
+        r0_price.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        r0_rate.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
-        self.stock_table.setItem(0, 0, gri_rank_it)
-        self.stock_table.setItem(0, 1, gri_name_it)
-        self.stock_table.setItem(0, 2, gri_price_it)
-        self.stock_table.setItem(0, 3, gri_rate_it)
+        self.stock_table.setItem(0, 0, r0_ind)
+        self.stock_table.setItem(0, 1, r0_name)
+        self.stock_table.setItem(0, 2, r0_price)
+        self.stock_table.setItem(0, 3, r0_rate)
 
         for i, st in enumerate(snaps):
             i += 1  # GRI 행 때문에 +1
@@ -1510,7 +1638,16 @@ class StockHTS(QMainWindow):
             금리: {s.macro['interest_rate']:.2f}%<br/>
             유가: ${s.macro['oil_price']:.1f}<br/>
             환율: ₩{s.macro['exchange_rate']:,.0f}<br/>
-            CPI: {s.macro['cpi']:.2f}%
+            CPI: {s.macro['cpi']:.2f}%<br/>
+            버핏지수: <b style='color:{
+                "#00FF00" if buffett < 80 else
+                ("#FFD700" if buffett < 100 else
+                ("#FFA500" if buffett < 130 else "#FF4444"))
+            };'>{buffett:.1f}%</b> ({
+                "저평가" if buffett < 80 else
+                ("적정" if buffett < 100 else
+                ("고평가" if buffett < 130 else "버블"))
+            })
             {_build_commodity_html(s.macro)}
             </p>
             {_build_event_html(s)}
@@ -1685,10 +1822,171 @@ class StockHTS(QMainWindow):
         self.refresh_chart()
 
     # ─────────────────────────────────────────────
+    # ★ 거시경제 탭 전환
+    # ─────────────────────────────────────────────
+    def _set_macro_tab(self, key: str):
+        """거시경제 탭 버튼 클릭 처리 — 0번 행 선택 상태일 때만 차트 갱신"""
+        self.current_macro_key = key
+        self._macro_chart_cache = {}
+        for k, btn in self._macro_tab_btns.items():
+            btn.setChecked(k == key)
+        if key == "GRI":
+            self.selected_stock_name = "GRI"
+        else:
+            # 종목 선택 중이면 0번 행으로 강제 전환 후 차트 표시
+            self.selected_stock_name = "GRI"
+        self.refresh_chart()
+        if hasattr(self, '_last_snaps'):
+            self._update_table(self._last_snaps)
+
+    # ─────────────────────────────────────────────
+    # ★ 거시경제 지표 차트
+    # ─────────────────────────────────────────────
+    def _refresh_macro_chart(self, key: str):
+        """macro_history DB에서 지표를 읽어 차트 표시 (GRI 차트와 동일 구조)"""
+        _FMT = {
+            "buffett_index": lambda v: f"{v:.1f}%",
+            "interest_rate": lambda v: f"{v:.2f}%",
+            "oil_price":     lambda v: f"${v:.2f}",
+            "exchange_rate": lambda v: f"₩{v:,.0f}",
+            "cpi":           lambda v: f"{v:.2f}%",
+            "metal_price":   lambda v: f"${v:,.0f}",
+            "grain_price":   lambda v: f"${v:.2f}",
+            "semi_index":    lambda v: f"{v:,.1f}",
+        }
+        # 등락 표시 방식: 절대값 차이(%p) vs 비율(%)
+        # 금리/CPI/버핏 → 절대값 차이 (0.07%p), 나머지 → 비율 (3.18%)
+        _ABS_DIFF_KEYS = {"interest_rate", "cpi", "buffett_index"}
+
+        def _change_str(cur, prev, k):
+            diff = cur - prev
+            sign = "▲" if diff > 0 else ("▼" if diff < 0 else "─")
+            c    = "#FF4444" if diff > 0 else ("#4444FF" if diff < 0 else "#e0e0e0")
+            if k in _ABS_DIFF_KEYS:
+                txt = f"{sign}{abs(diff):.2f}%p"
+            elif k == "exchange_rate":
+                txt = f"{sign}{abs(diff):,.0f}원"
+            else:
+                pct = ((cur / max(1e-9, prev)) - 1.0) * 100 if prev != 0 else 0.0
+                txt = f"{sign}{abs(pct):.2f}%"
+            return c, txt
+
+        fmt = _FMT.get(key, lambda v: f"{v:.2f}")
+        lim = self.TF_LIMITS.get(self.current_tf, 1)
+        s   = self.game_service.s
+
+        # ── 1일: 전일값 → 현재값 2포인트 ────────────────────────
+        if lim == 1:
+            self.chart_widget.getAxis('bottom').setTicks(None)
+            if key == "buffett_index":
+                cur_v  = getattr(s, 'buffett_index', 0.0)
+                prev_v = getattr(s, '_ui_prev_macro', {}).get('buffett_index', cur_v)
+            else:
+                cur_v  = s.macro.get(key, 0.0)
+                prev_v = getattr(s, "_ui_prev_macro", s._prev_macro_snapshot).get(key, cur_v)
+            disp   = [prev_v, cur_v]
+
+            for attr in ['_gri_max_scatter','_gri_min_scatter','_gri_max_text','_gri_min_text',
+                         'max_scatter','min_scatter','max_text','min_text']:
+                if hasattr(self, attr):
+                    try: self.chart_widget.removeItem(getattr(self, attr))
+                    except: pass
+
+            col = "#FF4444" if cur_v >= prev_v else "#4444FF"
+            self.curve.setPen(pg.mkPen(color=col, width=2))
+            self.curve.setData(disp)
+            pad = max(1e-6, abs(cur_v - prev_v) * 0.5) if cur_v != prev_v \
+                  else max(abs(cur_v) * 0.001, 0.01)
+            self.chart_widget.setYRange(min(disp) - pad, max(disp) + pad)
+            self.baseline.setPos(float(prev_v))
+            self.chart_widget.getAxis('bottom').setTicks([[(0, "전일"), (1, "현재")]])
+
+            rate  = ((cur_v / max(1e-9, prev_v)) - 1.0) * 100 if prev_v != 0 else 0.0
+            sign  = "▲" if rate > 0 else ("▼" if rate < 0 else "─")
+            c_hex = "#FF4444" if rate > 0 else ("#4444FF" if rate < 0 else "#e0e0e0")
+            c_hex, chg_txt = _change_str(cur_v, prev_v, key)
+            self.change_summary_label.setText(
+                f"<span style='color:#aaa;'>1일 기준: </span>"
+                f"<span style='color:#fff;'>{fmt(prev_v)}</span>"
+                f" → <span style='color:{c_hex};font-weight:bold;'>{fmt(cur_v)} "
+                f"({chg_txt})</span>"
+            )
+            return
+
+        # ── 1일 외: DB 조회 (메모리 캐시 활용) ──────────────────
+        cache_id = (key, lim)
+        cache    = getattr(self, '_macro_chart_cache', {})
+        if cache.get('id') == cache_id:
+            rows = cache['rows']
+        else:
+            rows = self.game_service.db.get_macro_history(
+                key, 0 if lim > 900_000 else lim
+            )
+            self._macro_chart_cache = {'id': cache_id, 'rows': rows}
+
+        if not rows:
+            return
+
+        dates  = [r[0] for r in rows]
+        values = [float(r[1]) for r in rows]
+        if len(values) == 1:
+            values = [values[0], values[0]]
+            dates  = [dates[0], dates[0]]
+
+        count = len(values)
+        step  = self._get_chart_step(count, self.current_tf)
+
+        disp       = values[::step]
+        disp_dates = dates[::step]
+        if values[-1] not in disp:
+            disp.append(values[-1])
+            disp_dates.append(dates[-1])
+        if len(disp) < 2:
+            disp       = [values[0], values[-1]]
+            disp_dates = [dates[0], dates[-1]]
+
+        # X축 날짜 레이블
+        x_ticks = []
+        n_ticks = min(6, len(disp_dates))
+        t_idx   = [int(i * (len(disp_dates)-1) / max(1, n_ticks-1)) for i in range(n_ticks)]
+        seen    = set()
+        for idx in t_idx:
+            if idx < len(disp_dates):
+                d = disp_dates[idx]
+                lbl = d[2:7] if len(d) >= 7 else d
+                if lbl not in seen:
+                    x_ticks.append((idx, lbl))
+                    seen.add(lbl)
+        self.chart_widget.getAxis('bottom').setTicks([x_ticks])
+
+        col = "#FF4444" if disp[-1] >= disp[0] else "#4444FF"
+        self.curve.setPen(pg.mkPen(color=col, width=2))
+        self.curve.setData(disp)
+
+        mn, mx = min(values), max(values)
+        pad = max(1e-6, (mx - mn) * 0.05) if mx != mn else max(abs(mx) * 0.01, 0.01)
+        self.chart_widget.setYRange(mn - pad, mx + pad)
+        self.baseline.setPos(float(disp[0]))
+
+        # 최고/최저 마커 — fmt 전달로 소수점 표시
+        self._update_chart_markers(disp, values, fmt=fmt)
+
+        c_hex, chg_txt = _change_str(disp[-1], disp[0], key)
+        self.change_summary_label.setText(
+            f"<span style='color:#aaa;'>{self.current_tf} 기준: </span>"
+            f"<span style='color:#fff;'>{fmt(disp[0])}</span>"
+            f" → <span style='color:{c_hex};font-weight:bold;'>{fmt(disp[-1])} "
+            f"({chg_txt})</span>"
+        )
+
+    # ─────────────────────────────────────────────
     # 차트
     # ─────────────────────────────────────────────
     def refresh_chart(self):
         self.chart_widget.getAxis('bottom').setTicks(None)
+        # ★ macro 차트 캐시 무효화 — 1일 뷰는 state 직접 읽으므로 제외
+        if self.current_tf != "1일":
+            self._macro_chart_cache = {}
         # GRI용 + 주식용 마커 모두 제거
         for attr in ['_gri_max_scatter', '_gri_min_scatter', '_gri_max_text', '_gri_min_text',
                      'max_scatter', 'min_scatter', 'max_text', 'min_text']:
@@ -1696,8 +1994,14 @@ class StockHTS(QMainWindow):
                 try: self.chart_widget.removeItem(getattr(self, attr)); delattr(self, attr)
                 except: pass
 
+        # ★ 0번 행(지표 행) 선택 시에만 macro 탭 작동
+        # 일반 종목 선택 시 macro_key 상태와 무관하게 종목 차트 표시
         if self.selected_stock_name == "GRI":
-            self._refresh_gri_chart()
+            key = getattr(self, 'current_macro_key', 'GRI')
+            if key == "GRI":
+                self._refresh_gri_chart()
+            else:
+                self._refresh_macro_chart(key)
             return
 
         s = self._get_selected_stock()
@@ -1780,7 +2084,7 @@ class StockHTS(QMainWindow):
             f"<span style='color:{c_hex};'>({sign}{int(abs(diff)):,}원, {period_r:+.2f}%)</span>"
         )
 
-    def _update_chart_markers(self, smoothed: list, raw_prices: list = None):
+    def _update_chart_markers(self, smoothed: list, raw_prices: list = None, fmt=None):
         for attr in ['max_scatter', 'min_scatter', 'max_text', 'min_text']:
             if hasattr(self, attr):
                 try: self.chart_widget.removeItem(getattr(self, attr))
@@ -1788,11 +2092,14 @@ class StockHTS(QMainWindow):
 
         if self.current_tf == "1일" or not smoothed or len(smoothed) < 2: return
 
+        # fmt 없으면 주가용 int 포맷 (기존 동작 유지)
+        if fmt is None:
+            fmt = lambda v: f"{int(v):,}"
+
         # raw_prices가 있으면 실제 최고/최저 사용, 없으면 smoothed 기준
         if raw_prices and len(raw_prices) > 0:
             real_max = max(raw_prices)
             real_min = min(raw_prices)
-            # smoothed에서 가장 가까운 인덱스 위치 찾기 (마커 x 좌표)
             max_idx = min(range(len(smoothed)), key=lambda i: abs(smoothed[i] - real_max))
             min_idx = min(range(len(smoothed)), key=lambda i: abs(smoothed[i] - real_min))
             max_val = real_max
@@ -1812,7 +2119,6 @@ class StockHTS(QMainWindow):
 
         def get_pos_and_anchor(idx, is_max):
             y_anchor = 1.0 if is_max else 0.0
-            # 우측 절반이면 텍스트를 왼쪽에, 좌측 절반이면 오른쪽에
             if idx >= n // 2:
                 return idx, (1.0, y_anchor)
             else:
@@ -1822,13 +2128,13 @@ class StockHTS(QMainWindow):
         min_x, min_anchor = get_pos_and_anchor(min_idx, False)
 
         self.max_text = pg.TextItem(
-            html=f"<span style='color:#FF4444;font-weight:bold;background-color:#000;'>최고: {int(max_val):,}</span>",
+            html=f"<span style='color:#FF4444;font-weight:bold;background-color:#000;'>최고: {fmt(max_val)}</span>",
             anchor=max_anchor)
         self.max_text.setPos(max_x, max_val)
         self.chart_widget.addItem(self.max_text)
 
         self.min_text = pg.TextItem(
-            html=f"<span style='color:#4444FF;font-weight:bold;background-color:#000;'>최저: {int(min_val):,}</span>",
+            html=f"<span style='color:#4444FF;font-weight:bold;background-color:#000;'>최저: {fmt(min_val)}</span>",
             anchor=min_anchor)
         self.min_text.setPos(min_x, min_val)
         self.chart_widget.addItem(self.min_text)

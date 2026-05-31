@@ -197,10 +197,30 @@ class SaveManager:
                     credit_grade  TEXT
                 )
             """)
+            # ★ 거시경제 지표 히스토리 테이블
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS macro_history (
+                    date          TEXT PRIMARY KEY,
+                    interest_rate REAL,
+                    oil_price     REAL,
+                    exchange_rate REAL,
+                    cpi           REAL,
+                    metal_price   REAL,
+                    grain_price   REAL,
+                    semi_index    REAL,
+                    buffett_index REAL
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_macro_history_date
+                ON macro_history (date ASC)
+            """)
             self.conn.commit()
 
             # ★ scenario_log 컬럼 마이그레이션 (구버전 DB 호환)
             self._migrate_scenario_log()
+            # ★ macro_history 컬럼 마이그레이션 (구버전 DB 호환)
+            self._migrate_macro_history()
 
         except Exception as e:
             print(f"❌ DB 테이블 생성 실패: {e}")
@@ -246,6 +266,18 @@ class SaveManager:
             self.conn.commit()
         except Exception as e:
             print(f"❌ scenario_log 마이그레이션 오류: {e}")
+
+    def _migrate_macro_history(self):
+        """macro_history 테이블에 누락된 컬럼 자동 추가 (구버전 DB 호환)"""
+        try:
+            cur = self.conn.cursor()
+            cur.execute("PRAGMA table_info(macro_history)")
+            existing = {row[1] for row in cur.fetchall()}
+            if "buffett_index" not in existing:
+                cur.execute("ALTER TABLE macro_history ADD COLUMN buffett_index REAL DEFAULT 0")
+            self.conn.commit()
+        except Exception as e:
+            print(f"❌ macro_history 마이그레이션 오류: {e}")
 
     def insert_investor_volume(self, date_str: str, name: str,
                                foreign_vol: int, inst_vol: int, retail_vol: int):
@@ -313,6 +345,63 @@ class SaveManager:
             )
         except Exception as e:
             print(f"❌ GRI DB 저장 오류: {e}")
+
+    def insert_macro_record(self, date_str: str, macro: dict, buffett_index: float = 0.0):
+        """거시경제 지표 일별 저장 (commit 없음 — flush_daily_db 에서 일괄 커밋)"""
+        try:
+            self.conn.execute(
+                """INSERT OR REPLACE INTO macro_history
+                   (date, interest_rate, oil_price, exchange_rate,
+                    cpi, metal_price, grain_price, semi_index, buffett_index)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (
+                    date_str,
+                    round(macro.get("interest_rate", 0.0), 4),
+                    round(macro.get("oil_price",     0.0), 4),
+                    round(macro.get("exchange_rate", 0.0), 2),
+                    round(macro.get("cpi",           0.0), 4),
+                    round(macro.get("metal_price",   0.0), 2),
+                    round(macro.get("grain_price",   0.0), 4),
+                    round(macro.get("semi_index",    0.0), 2),
+                    round(buffett_index,             2),
+                )
+            )
+        except Exception as e:
+            print(f"❌ macro_history DB 저장 오류: {e}")
+
+    def get_macro_history(self, key: str, days: int = 0) -> list:
+        """
+        거시경제 지표 히스토리 조회.
+        key  : 'interest_rate' | 'oil_price' | 'exchange_rate' |
+               'cpi' | 'metal_price' | 'grain_price' | 'semi_index'
+        days : 0 = 전체, N = 최근 N일
+        반환 : [(date_str, value), ...]  오래된 순
+        """
+        _VALID = {
+            "interest_rate", "oil_price", "exchange_rate",
+            "cpi", "metal_price", "grain_price", "semi_index",
+            "buffett_index",
+        }
+        if key not in _VALID:
+            return []
+        try:
+            cur = self.conn.cursor()
+            if days == 0:
+                cur.execute(
+                    f"SELECT date, {key} FROM macro_history ORDER BY date ASC"
+                )
+                return cur.fetchall()
+            else:
+                cur.execute(
+                    f"SELECT date, {key} FROM macro_history "
+                    f"ORDER BY date DESC LIMIT ?",
+                    (days,)
+                )
+                rows = cur.fetchall()
+                return list(reversed(rows)) if rows else []
+        except Exception as e:
+            print(f"❌ macro_history 조회 오류: {e}")
+            return []
 
     def save_delisted_stock(self, stock: dict):
         """상폐 종목 1개를 SQLite에 저장 — 상폐 발생 시 즉시 호출"""

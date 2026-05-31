@@ -73,6 +73,10 @@ class EventDispatcher:
         # 5. 장이 열린 날에만 경제 연산
         if self.s.is_market_open:
             self.mkt.handle_group_expansion(silent)
+            # ★ update_macro_logic 전에 전일 값 보존 — UI 등락률 표시 전용
+            # (_prev_macro_snapshot은 economy.py 내부에서 덮어쓰므로 별도 키 사용)
+            self.s._ui_prev_macro = {k: v for k, v in self.s.macro.items()}
+            self.s._ui_prev_macro["buffett_index"] = getattr(self.s, 'buffett_index', 0.0)
             self.eco.update_macro_logic()
             # ★ 6순위: 공급망 패널티 적용
             self.eco.apply_supply_chain_penalty()
@@ -116,6 +120,10 @@ class EventDispatcher:
                 self.s.gri,
                 getattr(self.s, 'bubble_index', 0.0)
             )
+            self.db.insert_macro_record(
+                date_str, self.s.macro,
+                getattr(self.s, 'buffett_index', 0.0)
+            )   # ★ 거시경제 + 버핏지수 일별 저장
             db_records    = []
             vol_records   = []
             for stock in self.s.stocks:
@@ -1201,6 +1209,9 @@ class EventDispatcher:
         cur_phase = getattr(self.s, '_last_processed_phase', '1A')
         prev_snap = getattr(self.s, '_prev_macro_snapshot', {})
         prev_rate = prev_snap.get('interest_rate', rate)
+        metal     = macro.get('metal_price', 2000.0)   
+        grain     = macro.get('grain_price', 300.0)
+        oil_now  = macro.get('oil_price', 30.0)
 
         # anchor 계산
         lv  = self.s.max_tech_reached
@@ -1344,7 +1355,6 @@ class EventDispatcher:
 
         # ⑧ 원자재 슈퍼사이클 — 금속/곡물 동반 강세 + 에너지 상승
         # 신흥국 인프라 투자 붐 or 공급 부족으로 원자재 전반 강세
-        oil_now  = macro.get('oil_price', 30.0)
         commodity_boom = (metal >= 3000.0 and oil_now >= 80.0 and grain >= 400.0)
         if commodity_boom and cycle == '확장' and \
            roll < (export_prob + 0.040 + domestic_prob + 0.020 + 0.025 + 0.040 + 0.015 + 0.015):
