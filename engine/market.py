@@ -67,11 +67,11 @@ class StockMarket:
             market_drift = +0.0006
         else:
             market_drift = {
-                "확장": +0.00060,   # 상향: 변동성 드래그 상쇄
-                "정점": +0.00025,
-                "수축": -0.00005,   # 완화: 거의 횡보
-                "저점": +0.00010,
-            }.get(cycle, +0.00035)
+                "확장": +0.00080,   # 0.00060 → 0.00080 (연 20%)
+                "정점": +0.00030,   # 0.00025 → 0.00030
+                "수축": -0.00005,
+                "저점": +0.00015,   # 0.00010 → 0.00015
+            }.get(cycle, +0.00040)
 
         # ★ 초반 성장률 억제 — 연도 하드코딩 제거, 게임 시작 기준 상대 연수로
         _start_year = getattr(self.s, 'start_date', cur_date).year
@@ -106,7 +106,7 @@ class StockMarket:
         if self.s.macro.get("fear_index", 10) >= 50 and is_depression:
             fear_mult = 1.3
 
-        tech_upgrade_year = getattr(self.s, '_tech_upgrade_years', {1: 1999}).get(lv, 1999)
+        tech_upgrade_year = getattr(self.s, '_tech_upgrade_years', {1: 1999}).get(lv) or 1999
 
         # ★ 산업별 경쟁도 갱신
         self._update_industry_competition()
@@ -129,6 +129,32 @@ class StockMarket:
             _gri_daily_chg = (self.s.gri - _prev_gri_for_cb) / _prev_gri_for_cb
             if _gri_daily_chg <= -0.05:
                 _circuit_breaker = True
+
+        # ★ 테마 모멘텀 — 루프 전 갱신 (elapsed +1, 만료 제거)
+        # 루프 밖에서 1회만 갱신해야 함 (종목별로 중복 갱신 방지)
+        _themes_to_remove = []
+        for _t in self.s.active_themes:
+            _t['elapsed'] += 1
+            if _t['elapsed'] >= _t['duration']:
+                _themes_to_remove.append(_t)
+                # bull 테마 종료 시 쿨다운 기록
+                if _t['type'] == 'bull':
+                    self.s._theme_cooldown[_t['ind']] = cur_date.year
+        for _t in _themes_to_remove:
+            self.s.active_themes.remove(_t)
+
+        # 테마 강도 계산 함수 (루프 안에서 재사용)
+        def _calc_theme_intensity(theme: dict) -> float:
+            """테마 진행 단계에 따라 강도 반환 (사인 곡선 기반)"""
+            import math
+            ratio = theme['elapsed'] / max(1, theme['duration'])
+            # 초기 30% 상승, 중기 40% 피크 유지, 후기 30% 하락
+            if ratio < 0.30:
+                return theme['peak'] * (ratio / 0.30)
+            elif ratio < 0.70:
+                return theme['peak']
+            else:
+                return theme['peak'] * (1.0 - (ratio - 0.70) / 0.30)
 
         # ★ PER 계산은 메인 루프 안에서 함께 처리 (O(n) 루프 1회 절약)
         for stock in self.s.stocks:
@@ -173,18 +199,22 @@ class StockMarket:
             # ★ 섹터 기본 베이스 (레벨/사이클 무관 장기 추세)
             # cycle_sector는 사이클마다 등락하므로 이 베이스가 장기 우상향의 핵심
             sector_adj = {
-                "Growth":    0.05 / 252,
+                "Growth":    0.07 / 252,   # 5% → 7%
                 "Value":     0.05 / 252,
                 "Defensive": 0.040 / 252,
-                "Cyclical":  0.04 / 252,
+                "Cyclical":  0.05 / 252,   # 4% → 5%
             }.get(sector, 0.03 / 252)
 
-            # ★ 레벨별 섹터 보너스
-            if lv >= 2 and sector == "Growth":
-                sector_adj += 0.03 / 252
+            # ★ 레벨별 섹터 보너스 (LV가 높을수록 Growth 가속)
+            if lv >= 4 and sector == "Growth":
+                sector_adj += 0.05 / 252   # LV4: +5%
+            elif lv >= 3 and sector == "Growth":
+                sector_adj += 0.03 / 252   # LV3: +3%
+            elif lv >= 2 and sector == "Growth":
+                sector_adj += 0.03 / 252   # LV2: +3% (기존과 동일)
             elif lv >= 2 and sector == "Cyclical":
                 sector_adj += 0.02 / 252
-            elif lv >= 3 and sector == "Value":
+            if lv >= 3 and sector == "Value":
                 sector_adj -= 0.02 / 252
 
             years_since_lv_up = cur_date.year - tech_upgrade_year
@@ -240,17 +270,22 @@ class StockMarket:
                     assets   = max(1.0, meta.get('assets', 1.0))
                     loss_cnt = meta.get('continuous_loss_count', 0)
                     if last_ni > 0:
-                        # ★ 흑자 상한 상향 (0.0003 → 0.0008) — 비대칭 해소
-                        earnings_adj = min(0.0008, (last_ni / assets) * 0.5) / 252
+                        # ★ earnings_adj: 실적이 시나리오에 따라 주가에 반영
+                        # earn_cap = 연간 기준 상한 (LV별 차등)
+                        # 평시 ROE 5~7% → 연 2~4% / 호황 ROE 15% → 연 7.5%
+                        # 역대급 ROE 25%+ → 최대 연 12% (상한)
+                        _earn_cap = {1: 0.08, 2: 0.12, 3: 0.16, 4: 0.20}.get(lv, 0.08)
+                        roe_annual = (last_ni / assets) * 0.5
+                        earnings_adj = min(_earn_cap, roe_annual) / 252
                     else:
                         hist_q_count = sum(len(qd) for qd in hist.values())
                         if hist_q_count >= 4:
                             revenue      = max(1.0, last_q_data[last_q].get('revenue', assets * 0.05))
                             loss_ratio   = abs(last_ni) / revenue
-                            # ★ 적자 하한 완화 (-0.0005 → -0.0004) — 비대칭 해소
-                            earnings_adj = max(-0.0004, -loss_ratio * 0.3) / 252
+                            _loss_cap = {1: -0.08, 2: -0.10, 3: -0.12, 4: -0.12}.get(lv, -0.08)
+                            earnings_adj = max(_loss_cap, -loss_ratio * 0.3) / 252
                             if loss_cnt >= 3:
-                                earnings_adj *= 1.3  # 1.5 → 1.3 완화
+                                earnings_adj *= 1.3
 
             # HP 패닉 + HP → 주가 하락 압력
             hp       = meta.get('hp', 50.0)
@@ -309,6 +344,47 @@ class StockMarket:
 
             pump = meta.pop('_hp_overflow_pump', 0.0)
             daily_return += pump
+
+            # ★ 테마 모멘텀 adj
+            # 해당 종목 산업의 활성 테마 강도 합산
+            _theme_adj = 0.0
+            _theme_vol_mult = 1.0
+            _tier_theme_mult = {'대형주': 1.0, '중형주': 1.8, '소형주': 3.5}.get(tier, 1.0)
+            _tier_vol_boost  = {'대형주': 0.3, '중형주': 0.8, '소형주': 1.8}.get(tier, 0.5)
+
+            for _t in self.s.active_themes:
+                if _t['ind'] != ind:
+                    continue
+                _intensity = _calc_theme_intensity(_t)
+                if _intensity <= 0:
+                    continue
+
+                # 테마 방향별 일별 조정값
+                # base_effect: 연간 기준, /252로 일별 변환
+                # 대형주 bull: 연 최대 30%, 소형주 bull: 연 최대 150%
+                if _t['type'] == 'bull':
+                    _base = 0.30 * _tier_theme_mult  # 대형주 30%, 소형 105%
+                    _theme_adj += _intensity * _base / 252
+                else:  # bear
+                    _base = 0.20 * _tier_theme_mult
+                    _theme_adj -= _intensity * _base / 252
+
+                # vol 동적 상향 (테마 강도 * 체급 배율)
+                _theme_vol_mult = max(_theme_vol_mult,
+                                      1.0 + _intensity * _tier_vol_boost)
+
+            daily_return += _theme_adj
+
+            # ★ 테마 반영 vol 재조정 (noise 재계산)
+            if _theme_vol_mult > 1.0:
+                # 기존 noise를 테마 vol로 보정
+                # 이미 noise가 적용된 daily_return에서 원래 noise 제거 후 재적용
+                daily_return -= noise
+                noise = random.gauss(0, vol * _theme_vol_mult)
+                daily_return += noise
+
+            # ★ 상하한가 캡 ±30%
+            daily_return = max(-0.30, min(0.30, daily_return))
 
             # ★ PER/PBR 밸류에이션 압력 + 적자 압력
             market_cap = stock['price'] * stock['shares']
@@ -648,15 +724,15 @@ class StockMarket:
 
         # ★ GDP 연간 성장 (매년 1월 1일) — 경기 사이클 연동
         if cur_date.month == 1 and cur_date.day == 1:
-            # 기술 레벨별 기본 성장률 (선진국일수록 낮아짐)
-            lv_base_growth = {1: 0.05, 2: 0.06, 3: 0.04, 4: 0.025}.get(lv, 0.05)
+            # 기술 레벨별 기본 성장률 상향 (현실 한국 GDP 연 4~5% 수준)
+            lv_base_growth = {1: 0.065, 2: 0.075, 3: 0.050, 4: 0.030}.get(lv, 0.065)
 
-            # 경기 사이클별 보정 (현실 반영)
+            # 경기 사이클별 보정 — 현실화 (저점 -4% → -1.5%로 완화)
             cycle_gdp_mult = {
-                "확장": random.uniform(0.04, 0.06),    # 확장기: +4~6%
-                "정점": random.uniform(0.02, 0.03),    # 정점기: +2~3% (성장 둔화)
-                "수축": random.uniform(-0.01, -0.005), # 수축기: -0.5~-1% (역성장)
-                "저점": random.uniform(-0.04, -0.02),  # 저점기: -2~-4%
+                "확장": random.uniform(0.05, 0.08),    # 기존 4~6% → 5~8%
+                "정점": random.uniform(0.02, 0.04),    # 기존 2~3% → 2~4%
+                "수축": random.uniform(-0.005, 0.005), # 기존 -1~-0.5% → 거의 횡보
+                "저점": random.uniform(-0.015, -0.005),# 기존 -4~-2% → -0.5~-1.5%
             }.get(cycle, lv_base_growth)
 
             # 대공황: GDP 급격히 역성장
@@ -988,7 +1064,7 @@ class StockMarket:
         if cm in [3, 6, 9, 12] and cd >= 25:
             inst_delta += -0.004 if meta.get('continuous_loss_count', 0) > 0 else +0.002
         tech_upgrade_year = getattr(self.s, '_tech_upgrade_years', {1: 1999}).get(
-            self.s.max_tech_reached, 1999)
+            self.s.max_tech_reached) or 1999
         if 0 <= self.s.current_date.year - tech_upgrade_year <= 2 and sector == "Growth":
             inst_delta += 0.003
 
@@ -1532,7 +1608,10 @@ class StockMarket:
                 # ★ 승격 시 계열사 추가도 limit 체크
                 if limit > 1:
                     new_ind = random.choice([i for i in MAIN_INDUSTRIES if i != target_stock['meta']['ind']])
-                    self.s.stocks.append(self.cm.create_stock_data(None, new_ind, "중", gid))
+                    new_s = self.cm.create_stock_data(None, new_ind, "중", gid)
+                    self.s.stocks.append(new_s)
+                    if self._db:
+                        self._db.save_listing_snapshot(new_s)
                 if not silent:
                     self.s.daily_news.append(f"🏢 [그룹승격] {parent_name}이 지주사 체제로 전환합니다!")
 
@@ -1556,7 +1635,10 @@ class StockMarket:
                 avail = [i for i in MAIN_INDUSTRIES if i not in used_inds]
                 if avail:
                     new_ind = random.choice(avail)
-                    self.s.stocks.append(self.cm.create_stock_data(None, new_ind, "중", gid))
+                    new_s = self.cm.create_stock_data(None, new_ind, "중", gid)
+                    self.s.stocks.append(new_s)
+                    if self._db:
+                        self._db.save_listing_snapshot(new_s)
                     if not silent:
                         self.s.daily_news.append(f"📢 [그룹확장] {ginfo['name']}그룹이 {new_ind} 계열사를 추가했습니다.")
 
@@ -1579,6 +1661,9 @@ class StockMarket:
             if stock['meta']['listed_date'] <= today_str:
                 self.s.stocks.append(stock)
                 self.s.pending_listings.remove(stock)
+                # ★ 상장 시점 스냅샷 저장
+                if self._db:
+                    self._db.save_listing_snapshot(stock)
                 if not silent:
                     self.s.daily_news.append(f"🚀 [신규상장] {stock['meta']['c_name']}이 거래를 시작합니다!")
 

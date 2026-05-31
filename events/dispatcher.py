@@ -64,10 +64,7 @@ class EventDispatcher:
         # → 주말 포함 매일 실행 (테크 도약 뉴스는 주말에도 발송)
         lv = self.eco.get_tech_level()
 
-        # 3-1. 테크3 도달 후 분기점 시나리오 결정 뉴스
-        self._check_branching_point_news(silent)
-
-        # 3-2. 대공황 극복 예고 뉴스
+        # 3-1. 대공황 극복 예고 뉴스
         self._check_recovery_news(silent)
 
         # 4. 실적 스케줄 처리 (장 열림 여부와 무관하게 수치 확정은 매일 실행)
@@ -89,6 +86,12 @@ class EventDispatcher:
             self._check_war_event(silent)
             # ★ 10순위: 팬데믹 이벤트 체크
             self._check_pandemic_event(silent)
+            # ★ 10.5순위: 구조적 경제 충격 (긴축/스태그/기술버블)
+            self._check_structural_shift(silent)
+            # ★ 10.7순위: 환율 위기 체크
+            self._check_exchange_crisis(silent)
+            # ★ 10.9순위: 박스권 횡보 감지
+            self._check_boxrange(silent)
             # ★ 11순위: 대공황 자연 발생 트리거 체크 (신규)
             self._check_depression(silent)
             # ★ 12순위: 페이즈 전환 체크 (신규)
@@ -255,46 +258,6 @@ class EventDispatcher:
         self.s.history_records.append(snapshot)
         if len(self.s.history_records) > 5:
             self.s.history_records.pop(0)
-
-    # ─────────────────────────────────────────────
-    # 분기점 시나리오 뉴스 (테크3 도달 후)
-    # ★ 역할 변경: 결말 확정 → 대공황 임계값/강도 조정
-    # ─────────────────────────────────────────────
-    def _check_branching_point_news(self, silent: bool):
-        """
-        테크3 도달 이후 분기점이 결정됐을 때 프리미엄 예고 뉴스 발송.
-        ★ 변경: 시나리오 강제 설정 대신 대공황 트리거 임계값 조정.
-        """
-        if self.s.max_tech_reached < 3:
-            return
-        if self.s.world_line == "Decided":
-            return
-        if not self.s.reserved_scenario:
-            return
-        if getattr(self.s, '_branch_news_sent', False):
-            return
-
-        self.s._branch_news_sent = True
-        scenario = self.s.reserved_scenario
-        cy = self.s.current_date.year
-
-        # ★ 분기점에 따라 대공황 트리거 임계값 조정
-        if "낙관" in scenario or "T4" in scenario:
-            self.s._depression_threshold = 250   # 버블 임계 상향 → 대공황 어려워짐
-            branch_desc = "낙관적 분기 — 경제 안정성 강화"
-        elif "비관" in scenario or "대공황" in scenario:
-            self.s._depression_threshold = 150   # 버블 임계 하향 → 대공황 쉬워짐
-            branch_desc = "비관적 분기 — 경제 불안정성 증가"
-        else:
-            self.s._depression_threshold = 200   # 기본값
-            branch_desc = "중립적 분기"
-
-        # 프리미엄 전용 예고
-        if self.s.has_paid_news_access and not silent:
-            self.s.daily_news.append(
-                f"💎 [분기점 결정] {cy}년, {branch_desc}. "
-                f"경제 임계값이 조정되었습니다. (프리미엄 전용 정보)"
-            )
 
     # ─────────────────────────────────────────────
     # 대공황 극복 예고 뉴스
@@ -644,96 +607,83 @@ class EventDispatcher:
                         f"📉 [즉시강등] {name}: {old_tier} → {to_tier} ({reason})"
                     )
     # ─────────────────────────────────────────────
-    # ★ 외부 충격 이벤트 (8순위)
-    # 매년 1월 1일 확률 체크 — 무조건 발생하지 않음, 시드마다 다름
-    # 내부 버블과 무관하게 외부에서 오는 경제 충격
-    # 현실 사례: 닷컴버블(2000), 금융위기(2008), 코로나(2020)
+    # ★ 외부 충격 이벤트 (GRI 분산 충격으로 개선)
     # ─────────────────────────────────────────────
     def _check_external_shock(self, silent: bool):
+        """
+        [개선] GRI 즉시 충격 상한 -15%, 나머지 60%는 _scenario_drift_penalty로 분산
+        [개선] 버블지수 높을수록 확률 상승 (고평가 시장이 외부 충격에 취약)
+        """
         import random as _rnd
         cur = self.s.current_date
 
-        # 매년 1월 1~7일 중 한 번만 체크
         if cur.month != 1 or cur.day > 7:
             return
 
-        # 이미 대공황 진행 중이면 외부 충격 없음
-        if "대공황" in self.s.current_scenario and "극복" not in self.s.current_scenario:
+        scenario = self.s.current_scenario
+        if any(x in scenario for x in ["대공황", "전쟁", "분쟁", "팬데믹", "외부충격"]):
             return
 
-        # 이미 올해 외부 충격이 발생했으면 스킵
         last_shock_year = getattr(self.s, '_last_external_shock_year', 0)
         if last_shock_year == cur.year:
             return
 
-        # ★ 시장 형성 조건: 게임 시작 후 최소 3년 경과 + 종목 200개 이상
-        # (기존 400개 달성 조건은 너무 빠름 → 초반 팬데믹/전쟁 방지)
-        years_since_start = self.s.current_date.year - self.s.start_date.year
+        years_since_start = cur.year - self.s.start_date.year
         if years_since_start >= 3 and len(self.s.stocks) >= 200:
             self.s._market_fully_formed = True
         if not getattr(self.s, '_market_fully_formed', False):
             return
 
-        # ── 충격 유형별 확률 ──────────────────────
-        # 현실 기준:
-        #   금융위기:   100년에 2~3회 → 연 2~3%
-        #   글로벌 침체: 100년에 4~5회 → 연 4~5%
-        #   일시적 패닉: 100년에 6~8회 → 연 6~8%
-        # 직전 충격 후 최소 3년 쿨다운 적용
         years_since_shock = cur.year - last_shock_year if last_shock_year > 0 else 10
-
-        # 3년 미만이면 발생 안 함
         if years_since_shock < 3:
             return
 
-        # 경과 연수에 따라 확률 증가 (최대 15%)
-        base_prob = min(0.15, years_since_shock * 0.02)  # 최대 15%
+        base_prob   = min(0.15, years_since_shock * 0.02)
+        bubble      = getattr(self.s, 'bubble_index', 0.0)
+        # 버블 100 이상부터 확률 가중 (최대 1.5배)
+        bubble_mult = 1.0 + min(0.5, max(0.0, (bubble - 100) / 200))
+        final_prob  = min(0.20, base_prob * bubble_mult)
 
-        roll = _rnd.random()
-        if roll > base_prob:
+        if _rnd.random() > final_prob:
             return
 
-        # 충격 유형 결정
-        # 금융위기 < 침체 < 패닉 순으로 빈도
         shock_type = _rnd.choices(
             ["글로벌 금융위기", "글로벌 침체 동조", "일시적 패닉"],
             weights=[0.15, 0.35, 0.50]
         )[0]
 
         self.s._last_external_shock_year = cur.year
+        self.s._last_crisis_year         = cur.year
 
         if shock_type == "글로벌 금융위기":
-            # GRI -30~50%, 회복 2~5년
-            intensity      = _rnd.uniform(0.30, 0.50)
-            duration_days  = _rnd.randint(504, 1260)   # 2~5년
-            scenario_name  = "📉 글로벌 금융위기 (외부 충격)"
-            edu_text       = "(글로벌 경기 동조화 → 내부 버블 없어도 동반 하락 가능)"
-
+            intensity     = _rnd.uniform(0.30, 0.50)
+            duration_days = _rnd.randint(504, 1260)
+            scenario_name = "📉 글로벌 금융위기 (외부 충격)"
+            edu_text      = "(글로벌 경기 동조화 → 동반 하락)"
         elif shock_type == "글로벌 침체 동조":
-            # GRI -15~30%, 회복 1~2년
-            intensity      = _rnd.uniform(0.15, 0.30)
-            duration_days  = _rnd.randint(252, 504)    # 1~2년
-            scenario_name  = "📉 글로벌 침체 동조 (외부 충격)"
-            edu_text       = "(해외 경기침체 동조화 → 수출 감소 → 기업 실적 악화)"
+            intensity     = _rnd.uniform(0.15, 0.30)
+            duration_days = _rnd.randint(252, 504)
+            scenario_name = "📉 글로벌 침체 동조 (외부 충격)"
+            edu_text      = "(해외 경기침체 → 수출 감소 → 실적 악화)"
+        else:
+            intensity     = _rnd.uniform(0.08, 0.18)
+            duration_days = _rnd.randint(21, 63)
+            scenario_name = "📉 일시적 시장 패닉 (외부 충격)"
+            edu_text      = "(단기 패닉 → 빠른 회복 가능)"
 
-        else:   # 일시적 패닉
-            # GRI -10~20%, 회복 1~3개월
-            intensity      = _rnd.uniform(0.10, 0.20)
-            duration_days  = _rnd.randint(21, 63)      # 1~3개월
-            scenario_name  = "📉 일시적 시장 패닉 (외부 충격)"
-            edu_text       = "(단기 패닉 → 빠른 회복 가능 (코로나형))"
+        # ── GRI 충격 분산 적용 ────────────────────────
+        # 즉시 충격: 40%, 최대 -15% 상한
+        # 나머지 60%: _scenario_drift_penalty로 기간 분산
+        immediate    = min(0.15, intensity * 0.40)
+        deferred     = intensity * 0.60
+        daily_penalty = -(deferred / max(1, duration_days))
 
-        # GRI 즉시 충격 적용
-        shock_gri = self.s.gri * (1.0 - intensity)
-        self.s.gri = max(100.0, shock_gri)
+        self.s.gri = max(100.0, self.s.gri * (1.0 - immediate))
+        self.s._scenario_drift_penalty = daily_penalty
 
-        # 시나리오 전환 + 타이머
-        prev_scenario = self.s.current_scenario
         self.s.current_scenario = scenario_name
         self.s.scenario_timer   = duration_days
 
-        # 회복 이벤트 예약
-        from datetime import timedelta
         recovery_date = cur + timedelta(days=duration_days)
         self.s.pending_events["recovery"] = {
             "date":     recovery_date,
@@ -741,15 +691,15 @@ class EventDispatcher:
             "notified": False,
         }
 
-        # 뉴스
         if not silent:
             self.s.daily_news.append(
                 f"🌏 [외부 충격] {cur.year}년 {shock_type} 발생! "
-                f"GRI -{intensity*100:.0f}% 충격 예상 {edu_text}"
+                f"즉시 GRI -{immediate*100:.0f}% + {duration_days//252}년간 추가 하락 압력 "
+                f"{edu_text}"
             )
             self.s.daily_news.append(
-                f"  └ 예상 지속 기간: 약 {duration_days//252}년 {(duration_days%252)//21}개월 "
-                f"| 회복 예정: {recovery_date.strftime('%Y-%m-%d')}"
+                f"  └ 회복 예정: {recovery_date.strftime('%Y-%m-%d')} "
+                f"| 버블지수 {bubble:.0f} 반영"
             )
     # ─────────────────────────────────────────────
     # ★ 전쟁/분쟁 이벤트
@@ -787,8 +737,10 @@ class EventDispatcher:
                 self.s.war_event['recon_timer'] = recon_timer - 1
             return
 
-        # ★ 새 전쟁 발생 체크 — 매년 랜덤 월에만
-        if cur.month != random.randint(1, 7) or cur.day > 7:
+        # ★ 새 전쟁 발생 체크 — 매년 1월 1~7일 (연 1회 고정)
+        # [버그 수정] 기존: random.randint(1,7) 매 호출 → 월별 1/7 통과
+        # [수정] 1월에만 체크, 쿨다운/조건 기반 발동
+        if cur.month != 1 or cur.day > 7:
             return
 
         # 대공황 중엔 전쟁 없음
@@ -804,19 +756,34 @@ class EventDispatcher:
         if last_crisis and cur.year - last_crisis < 2:
             return
 
-        # ★ 발생 확률 하향 (기존: 대규모 3% + 지역 8% = 11% → 대규모 1.5% + 지역 3.5% = 5%)
+        # ── 지역별 긴장도 → 가중 확률 ────────────
+        macro = self.s.macro
+        oil   = macro.get('oil_price', 30.0)
+        grain = macro.get('grain_price', 250.0)
+        semi  = macro.get('semi_index', 1000.0)
+        metal = macro.get('metal_price', 1800.0)
+
+        region_weight = {
+            '중동':    1.0 + max(0.0, (oil   - 60)   / 60),
+            '동유럽':  1.0 + max(0.0, (grain - 300)  / 200),
+            '동남아':  1.0 + max(0.0, (1500  - semi)  / 1000),
+            '아프리카': 1.0 + max(0.0, (metal - 2500) / 2000),
+        }
+
         roll = random.random()
         if roll < 0.015:
             war_type = '대규모전쟁'
-            duration = random.randint(504, 1260)  # 2~5년
-        elif roll < 0.05:  # 0.015 + 0.035
+            duration = random.randint(504, 1260)
+        elif roll < 0.050:
             war_type = '지역분쟁'
-            duration = random.randint(126, 504)   # 6개월~2년
+            duration = random.randint(126, 504)
         else:
             return
 
-        # 지역 결정
-        region = random.choice(['중동', '동유럽', '동남아', '아프리카'])
+        region = random.choices(
+            list(region_weight.keys()),
+            weights=list(region_weight.values())
+        )[0]
 
         # 원자재 충격 즉시 적용
         COMMODITY_SHOCK = {
@@ -830,9 +797,13 @@ class EventDispatcher:
             if key in self.s.macro:
                 self.s.macro[key] *= mult
 
-        # GRI 즉시 충격
-        gri_impact = {'지역분쟁': 0.10, '대규모전쟁': 0.25}[war_type]
-        self.s.gri = max(100.0, self.s.gri * (1.0 - gri_impact))
+        # ── GRI 충격 분산 적용 ────────────────────────
+        # 즉시 충격 상한 -12%, 나머지 drift 패널티로 분산
+        raw_impact = {'지역분쟁': 0.10, '대규모전쟁': 0.25}[war_type]
+        immediate  = min(0.12, raw_impact * 0.50)
+        deferred   = raw_impact * 0.50
+        self.s.gri = max(100.0, self.s.gri * (1.0 - immediate))
+        self.s._scenario_drift_penalty = -(deferred / max(1, duration))
 
         # 전쟁 상태 저장
         self.s.war_event = {
@@ -898,6 +869,7 @@ class EventDispatcher:
 
         # 재건 시나리오로 전환
         self.s.current_scenario = f'🏗️ {region} 전후 재건 (산업재/소재 강세)'
+        self._trigger_scenario_themes('재건')
         self.s.scenario_timer   = recon_days
 
         if not silent:
@@ -977,14 +949,6 @@ class EventDispatcher:
         # GRI 즉시 충격
         self.s.gri = max(100.0, self.s.gri * (1.0 - intensity))
 
-        # ★ 팬데믹 금리/CPI 강제 인하 (코스피 현실 반영)
-        # 실제 2020년: 한국 기준금리 0.5%까지 인하, 초기 물가 하락
-        # 수요 위축 → CPI 하락 → 중앙은행 긴급 금리 인하
-        _cur_rate = self.s.macro.get('interest_rate', 4.0)
-        _cur_cpi  = self.s.macro.get('cpi', 2.0)
-        self.s.macro['interest_rate'] = max(0.5, _cur_rate * 0.30)   # 금리 → 30% 수준으로 급락
-        self.s.macro['cpi']           = max(0.5, min(1.5, _cur_cpi * 0.50))  # CPI → 0.5~1.5%로 하락
-
         # 팬데믹 상태 저장
         if not hasattr(self.s, 'pandemic_event'):
             self.s.pandemic_event = {}
@@ -997,6 +961,7 @@ class EventDispatcher:
         # 시나리오 전환
         self.s.current_scenario = '🦠 글로벌 팬데믹 (비대면 전환)'
         self.s.scenario_timer   = duration
+        self._trigger_scenario_themes('팬데믹')
 
         # 원자재 충격 (공급망 차질)
         self.s.macro['semi_index'] = self.s.macro.get('semi_index', 1000.0) * 0.75
@@ -1084,19 +1049,18 @@ class EventDispatcher:
         }
 
     # ─────────────────────────────────────────────
-    # ★ 호재 시나리오 (신규)
+    # ★ 호재 시나리오 (경제 지표 조건 기반으로 전면 개선)
     # ─────────────────────────────────────────────
     def _check_boom_event(self, silent: bool):
         """
-        호재 시나리오 체크 및 진행.
-        현실 기준:
-          수출 호황 (반도체/자동차 슈퍼사이클): 10년에 2~3회
-          유동성 장세 (저금리 + 외국인 유입):   10년에 1~2회
-          내수 소비 붐:                         10년에 2~3회
+        [개선] 매달 랜덤 → 경제 지표 조건 충족 시 확률 발동
+
+        기존 3종: 수출호황 / 유동성장세 / 내수붐
+        신규 3종: 혁신기술붐 / 외국인대규모유입 / 정부경기부양
         """
         cur = self.s.current_date
 
-        # 진행 중인 호재 tick
+        # ── 진행 중인 호재 tick ───────────────────────
         boom = getattr(self.s, 'boom_event', {})
         if boom.get('phase') == '진행중':
             boom['timer'] = boom.get('timer', 0) - 1
@@ -1108,80 +1072,153 @@ class EventDispatcher:
                     self.s.daily_news.append("📊 [호황 종료] 경기 호황이 마무리됩니다.")
             return
 
-        # ── 발생 조건 ─────────────────────────────
-        # 악재/재건 중엔 호재 없음
+        # ── 공통 차단 조건 ────────────────────────────
         scenario = self.s.current_scenario
-        if any(x in scenario for x in ["전쟁", "분쟁", "대공황", "팬데믹", "외부충격"]):
+        if any(x in scenario for x in ["전쟁", "분쟁", "대공황", "팬데믹", "외부충격",
+                                        "긴축", "스태그", "버블붕괴", "환율위기"]):
             return
-
-        # 시장 형성 전엔 없음
         if not getattr(self.s, '_market_fully_formed', False):
             return
-
-        # 악재 쿨다운: 최근 위기 후 1년
         last_crisis = getattr(self.s, '_last_crisis_year', 0)
         if last_crisis and cur.year - last_crisis < 1:
             return
-
-        # 호재 쿨다운: 최근 호재 후 2년
         last_boom = getattr(self.s, '_last_boom_year', 0)
         if last_boom and cur.year - last_boom < 2:
             return
-
-        # ★ 매달 1일 체크 (기존: 1월만 → 매달로 확대)
         if cur.day != 1:
             return
 
-        # ★ 월별 발생 확률 (연간으로 보면 현실적)
-        # 수출호황: 월 1.2% → 연 약 14% (10년에 1.4회)
-        # 유동성장세: 월 0.8% → 연 약 10% (10년에 1회, 금리 조건 포함)
-        # 내수붐: 월 1.0% → 연 약 12% (10년에 1.2회)
+        # ── 경제 지표 참조 ────────────────────────────
+        macro     = self.s.macro
+        rate      = macro.get('interest_rate', 4.0)
+        cpi       = macro.get('cpi', 2.0)
+        sox       = macro.get('semi_index', 1000.0)
+        exchange  = macro.get('exchange_rate', 1100.0)
+        ff        = getattr(self.s, 'foreign_flow_index', 0.0)
+        cycle     = getattr(self.s, 'cycle_stage', '확장')
+        cur_phase = getattr(self.s, '_last_processed_phase', '1A')
+        prev_snap = getattr(self.s, '_prev_macro_snapshot', {})
+        prev_rate = prev_snap.get('interest_rate', rate)
+
+        # anchor 계산
+        lv  = self.s.max_tech_reached
+        ye  = max(0, cur.year - 2000)
+        lv_base = {
+            1: 1000 * (1.075 ** ye),
+            2: 1000 * (1.075**15) * (1.090**max(0, ye-15)),
+            3: 1000 * (1.075**15) * (1.090**20) * (1.105**max(0, ye-35)),
+            4: 1000 * (1.075**15) * (1.090**20) * (1.105**25) * (1.080**max(0, ye-60)),
+        }.get(lv, 1000.0)
+        anchor = self.s.gri / max(1.0, lv_base)
+
         roll = random.random()
 
-        if roll < 0.012:  # 수출 호황
+        # ① 수출 호황 — SOX 강세 + 고환율 + 확장기
+        sox_strong  = sox >= 1200.0
+        high_fx     = exchange >= 1200.0
+        expanding   = (cycle == '확장')
+        export_prob = 0.030 if (sox_strong and high_fx and expanding) else 0.005
+
+        if roll < export_prob:
             duration = random.randint(252, 756)
-            self.s.boom_event = {
-                'type':  '수출호황',
-                'phase': '진행중',
-                'timer': duration,
-            }
+            self.s.boom_event = {'type': '수출호황', 'phase': '진행중', 'timer': duration}
             self.s.current_scenario = "📈 수출 호황 (반도체/수출 슈퍼사이클)"
-            self.s.scenario_timer   = duration
+            self._trigger_scenario_themes('수출호황')
+            self.s.scenario_timer = duration
             if not silent:
+                cond = []
+                if sox_strong: cond.append(f"SOX {sox:.0f}")
+                if high_fx:    cond.append(f"환율 {exchange:.0f}원")
                 self.s.daily_news.append(
-                    f"📈 [수출 호황] {cur.year}년, 반도체·수출 슈퍼사이클 진입! "
-                    f"IT/산업재/소재 섹터 강세 예상"
+                    f"📈 [수출 호황] {cur.year}년 반도체·수출 슈퍼사이클 진입! "
+                    f"({' / '.join(cond)}) IT/산업재/소재 강세 예상"
                 )
+            return
 
-        elif roll < 0.020:  # 유동성 장세 (금리 3.5% 이하 조건)
-            if self.s.macro.get('interest_rate', 4.0) <= 3.5:
-                duration = random.randint(252, 504)
-                self.s.boom_event = {
-                    'type':  '유동성장세',
-                    'phase': '진행중',
-                    'timer': duration,
-                }
-                self.s.current_scenario = "💰 유동성 장세 (저금리 + 외국인 유입)"
-                self.s.scenario_timer   = duration
-                if not silent:
-                    self.s.daily_news.append(
-                        f"💰 [유동성 장세] {cur.year}년, 저금리 환경에 외국인 자금 유입! "
-                        f"전 섹터 상승 모멘텀"
-                    )
-
-        elif roll < 0.030:  # 내수 소비 붐
-            duration = random.randint(126, 378)
-            self.s.boom_event = {
-                'type':  '내수붐',
-                'phase': '진행중',
-                'timer': duration,
-            }
-            self.s.current_scenario = "🛒 내수 소비 붐"
-            self.s.scenario_timer   = duration
+        # ② 유동성 장세 — 금리 인하 사이클 + 외국인 이탈 없음
+        rate_cutting = (rate < prev_rate) and (rate <= 3.5)
+        ff_ok        = ff >= -10.0
+        if rate_cutting and ff_ok and roll < (export_prob + 0.040):
+            duration = random.randint(252, 504)
+            self.s.boom_event = {'type': '유동성장세', 'phase': '진행중', 'timer': duration}
+            self.s.current_scenario = "💰 유동성 장세 (저금리 + 외국인 유입)"
+            self._trigger_scenario_themes('유동성장세')
+            self.s.scenario_timer = duration
             if not silent:
                 self.s.daily_news.append(
-                    f"🛒 [내수 붐] {cur.year}년, 내수 소비 호황! "
-                    f"필수소비재/자유소비재/커뮤니케이션 강세"
+                    f"💰 [유동성 장세] {cur.year}년 금리 인하 사이클({rate:.1f}%) + "
+                    f"외국인 자금 유입 — 전 섹터 상승 모멘텀"
+                )
+            return
+
+        # ③ 내수 소비 붐 — 저금리 + 확장기 + CPI 안정
+        domestic_prob = 0.025 if (rate <= 3.0 and cpi <= 3.0 and expanding) else 0.004
+        if roll < (export_prob + 0.040 + domestic_prob):
+            duration = random.randint(126, 378)
+            self.s.boom_event = {'type': '내수붐', 'phase': '진행중', 'timer': duration}
+            self.s.current_scenario = "🛒 내수 소비 붐"
+            self._trigger_scenario_themes('내수붐')
+            self.s.scenario_timer = duration
+            if not silent:
+                self.s.daily_news.append(
+                    f"🛒 [내수 붐] {cur.year}년 저금리({rate:.1f}%) + CPI 안정({cpi:.1f}%) "
+                    f"→ 소비 심리 회복! 필수소비재/자유소비재 강세"
+                )
+            return
+
+        # ④ 혁신 기술 붐 — 페이즈 2A~3B + SOX 급등 + 버블 과열 아님
+        tech_ok = cur_phase in ('2A', '2B', '3A', '3B')
+        if tech_ok and sox >= 1500.0 and anchor < 1.3 and \
+           roll < (export_prob + 0.040 + domestic_prob + 0.020):
+            duration = random.randint(252, 504)
+            self.s.boom_event = {'type': '혁신기술붐', 'phase': '진행중', 'timer': duration}
+            phase_nm = {'2A': '모바일', '2B': '클라우드/플랫폼',
+                        '3A': 'AI 상용화', '3B': '양자/바이오'}.get(cur_phase, cur_phase)
+            self.s.current_scenario = f"🤖 혁신 기술 붐 ({phase_nm})"
+            self._trigger_scenario_themes('혁신기술붐')
+            self.s.scenario_timer = duration
+            if not silent:
+                self.s.daily_news.append(
+                    f"🤖 [혁신 기술 붐] {cur.year}년 {phase_nm} 시대 기술 혁신 가속! "
+                    f"SOX {sox:.0f} — IT/건강관리 집중 강세"
+                )
+            return
+
+        # ⑤ 외국인 대규모 유입 — 외국인 반전 + 원화 강세 + 저평가
+        prev_ff      = getattr(self.s, '_prev_foreign_flow', ff)
+        ff_rebound   = (ff > prev_ff + 10) and (ff >= 20)
+        fx_falling   = exchange < prev_snap.get('exchange_rate', exchange) * 0.99
+        if ff_rebound and fx_falling and anchor < 1.0 and \
+           roll < (export_prob + 0.040 + domestic_prob + 0.020 + 0.025):
+            duration = random.randint(126, 378)
+            self.s.boom_event = {'type': '외국인유입', 'phase': '진행중', 'timer': duration}
+            self.s.current_scenario = "🌏 외국인 대규모 유입 (원화 강세 + 저평가)"
+            self._trigger_scenario_themes('외국인유입')
+            self.s.scenario_timer = duration
+            if not silent:
+                self.s.daily_news.append(
+                    f"🌏 [외국인 대규모 유입] {cur.year}년 원화 강세({exchange:.0f}원) + "
+                    f"저평가 인식 — 대형주 집중 수혜"
+                )
+            return
+
+        # ⑥ 정부 경기 부양 — 수축/저점 + GRI 저평가 + 위기 후 정책 여력
+        recession    = cycle in ('수축', '저점')
+        policy_ready = (cur.year - getattr(self.s, '_last_crisis_year', 0)) >= 1
+        if recession and anchor < 0.85 and policy_ready and \
+           roll < (export_prob + 0.040 + domestic_prob + 0.020 + 0.025 + 0.040):
+            duration = random.randint(126, 252)
+            self.s.boom_event = {'type': '정부부양', 'phase': '진행중', 'timer': duration}
+            self.s.current_scenario = "🏛️ 정부 경기 부양 (재정 확대)"
+            self._trigger_scenario_themes('정부부양')
+            self.s.scenario_timer = duration
+            boost = random.uniform(0.03, 0.05)
+            self.s.gri = self.s.gri * (1.0 + boost)
+            if not silent:
+                self.s.daily_news.append(
+                    f"🏛️ [정부 경기 부양] {cur.year}년 재정 확대 정책 발표! "
+                    f"경기 수축({cycle}) 대응 — 산업재/인프라 수혜 "
+                    f"(즉시 GRI +{boost*100:.1f}%)"
                 )
 
 
@@ -1326,39 +1363,32 @@ class EventDispatcher:
 
         trigger_score = 0
         if bi >= threshold:           trigger_score += 3   # 핵심 조건
-        if bi >= threshold * 0.75:    trigger_score += 1
-        if per_l >= 60:               trigger_score += 1
-        if rate >= 6.0:               trigger_score += 1
-        if cpi >= 5.0:                trigger_score += 1
-        if ff <= -60:                 trigger_score += 1
-        # GRI 고점 대비 -30% 이상
+        if bi >= threshold * 0.80:    trigger_score += 1   # 0.75 → 0.80
+        if per_l >= 70:               trigger_score += 1   # 60 → 70
+        if rate >= 7.0:               trigger_score += 1   # 6.0 → 7.0
+        if cpi >= 6.0:                trigger_score += 1   # 5.0 → 6.0
+        if ff <= -70:                 trigger_score += 1   # -60 → -70
+        # GRI 고점 대비 -35% 이상 (기존 -30%)
         peak = getattr(self.s, 'peak_gri', self.s.gri)
-        if self.s.gri < peak * 0.70:  trigger_score += 2
+        if self.s.gri < peak * 0.65:  trigger_score += 2   # 0.70 → 0.65
 
-        # 누적 카운터 관리
-        if trigger_score >= 3:
+        # 누적 카운터 관리 (임계 3→4)
+        if trigger_score >= 4:
             self.s.depression_trigger_count = getattr(self.s, 'depression_trigger_count', 0) + 1
         else:
             self.s.depression_trigger_count = max(
                 0, getattr(self.s, 'depression_trigger_count', 0) - 1
             )
 
-        # 30일 이상 조건 지속 시 대공황 발동
-        if getattr(self.s, 'depression_trigger_count', 0) >= 30:
+        # 40일 이상 조건 지속 시 대공황 발동 (30→40일)
+        if getattr(self.s, 'depression_trigger_count', 0) >= 40:
             self.s.depression_active         = True
             self.s.depression_trigger_count  = 0
             self.s.current_scenario          = "💀 대공황 (시스템 붕괴)"
-            # ★ 자연 발생 대공황: 2~4년 (현실적)
-            # 분기점 대공황(10년)과 구분
+            self._trigger_scenario_themes('대공황')
+            # 자연 발생 대공황: 2~4년
             self.s.scenario_timer            = 252 * random.randint(2, 4)
             self.s._last_crisis_year         = self.s.current_date.year
-
-            # ★ 대공황 진입 시 버블 지수 강제 붕괴
-            # 버블이 터져서 대공황이 오는 것 — 버블은 폭락해야 함
-            # 직전 버블의 20~30% 수준으로 강제 하락
-            _prev_bubble = getattr(self.s, 'bubble_index', 100.0)
-            self.s.bubble_index = max(10.0, _prev_bubble * random.uniform(0.20, 0.30))
-
             if not silent:
                 self.s.daily_news.append(
                     "💀 [대공황 발생] 복합 경제 위기가 임계점을 돌파했습니다! "
@@ -1440,6 +1470,44 @@ class EventDispatcher:
             self.s.daily_news.append(
                 f"🔄 [시대 전환] {cy}년, 경제 패러다임이 [{last_phase}] → [{cur_phase} {phase_name}]로 전환됩니다!"
             )
+
+        # ── ★ 페이즈 전환 호재 효과 ──────────────
+        # GRI 즉각 부양 + sentiment 상승 + foreign_flow 개선
+        _PHASE_BOOST = {
+            '1B': (0.03, 65,  0),   # 인터넷 성숙기
+            '2A': (0.05, 70, 20),   # 모바일 혁명
+            '2B': (0.04, 68, 15),   # 클라우드/플랫폼
+            '3A': (0.08, 75, 30),   # AI 상용화 ← 강력
+            '3B': (0.06, 73, 25),   # 양자/바이오
+            '4A': (0.12, 80, 40),   # 기술 특이점 ← 최강
+            '4B': (0.10, 78, 35),   # 포스트 휴먼
+        }
+        gri_boost, new_sentiment, ff_boost = _PHASE_BOOST.get(cur_phase, (0, 50, 0))
+
+        if gri_boost > 0:
+            # 버블 과열 시 효과 감소
+            bubble = getattr(self.s, 'bubble_index', 0.0)
+            if bubble >= 150:
+                gri_boost *= 0.3
+            elif bubble >= 100:
+                gri_boost *= 0.6
+
+            self.s.gri = self.s.gri * (1.0 + gri_boost)
+            self.s.sentiment = max(self.s.sentiment, float(new_sentiment))
+            if ff_boost > 0:
+                self.s.foreign_flow_index = min(
+                    100.0,
+                    getattr(self.s, 'foreign_flow_index', 0.0) + ff_boost
+                )
+            if not silent:
+                self.s.daily_news.append(
+                    f"📈 [기술 호재] {cur_phase} 시대 진입! "
+                    f"시장 즉각 반응 +{gri_boost*100:.0f}% "
+                    f"(심리지수 {new_sentiment}, 외국인 수급 +{ff_boost})"
+                )
+
+        # ★ 페이즈 전환 시 테마 쿨다운 무시하고 강제 발동
+        self._trigger_phase_themes(cur_phase, last_phase, ignore_cooldown=True)
 
         # ── 각 종목 사업 전환/도태 처리 ──────────
         transition_log = []  # 뉴스용 로그
@@ -1544,6 +1612,413 @@ class EventDispatcher:
         if not silent and transition_log:
             for msg in transition_log[:5]:
                 self.s.daily_news.append(f"🏭 [사업 재편] {msg}")
+
+    # ─────────────────────────────────────────────
+    # ★ 테마 모멘텀 시스템
+    # ─────────────────────────────────────────────
+
+    def _add_theme(self, ind: str, theme_type: str, peak: float,
+                   duration: int, source: str):
+        """
+        테마 추가. 이미 같은 산업의 같은 방향 테마가 있으면 스킵.
+        bull 테마는 쿨다운 체크.
+        """
+        cur_year = self.s.current_date.year
+
+        # bull 테마 쿨다운: 마지막 bull 테마 종료 후 3년 이내 재발생 금지
+        if theme_type == 'bull':
+            last_year = self.s._theme_cooldown.get(ind, 0)
+            if last_year and cur_year - last_year < 3:
+                return
+
+        # 이미 같은 산업+방향 테마 존재 시 스킵
+        for t in self.s.active_themes:
+            if t['ind'] == ind and t['type'] == theme_type:
+                return
+
+        self.s.active_themes.append({
+            'ind':      ind,
+            'type':     theme_type,
+            'peak':     peak,
+            'duration': duration,
+            'elapsed':  0,
+            'source':   source,
+        })
+
+    def _trigger_phase_themes(self, cur_phase: str, last_phase: str,
+                               ignore_cooldown: bool = False):
+        """
+        페이즈 전환 시 수혜/피해 산업 테마 발생.
+        ignore_cooldown=True 시 쿨다운 무시 (페이즈 전환은 특수 이벤트).
+        """
+        # 페이즈별 bull/bear 테마 정의
+        # peak: 테마 최고 강도 (0~1)
+        # duration: 영업일 기준 (252 = 1년)
+        _PHASE_THEMES = {
+            '1B': {  # 인터넷 성숙기
+                'bull': [('IT', 0.45, 504), ('커뮤니케이션', 0.35, 378)],
+                'bear': [],
+            },
+            '2A': {  # 모바일 전성기
+                'bull': [('IT', 0.55, 504), ('건강관리', 0.35, 378),
+                         ('자유소비재', 0.30, 252)],
+                'bear': [('에너지', 0.25, 252)],
+            },
+            '2B': {  # 클라우드/플랫폼
+                'bull': [('IT', 0.60, 630), ('산업재', 0.40, 378),
+                         ('소재', 0.35, 378)],
+                'bear': [],
+            },
+            '3A': {  # AI 상용화
+                'bull': [('IT', 0.70, 756), ('건강관리', 0.50, 504),
+                         ('금융', 0.35, 378)],
+                'bear': [('산업재', 0.30, 252)],
+            },
+            '3B': {  # 양자/바이오
+                'bull': [('건강관리', 0.75, 756), ('소재', 0.50, 504),
+                         ('에너지', 0.45, 504)],
+                'bear': [('커뮤니케이션', 0.25, 252)],
+            },
+            '4A': {  # 특이점
+                'bull': [('IT', 0.80, 1008), ('에너지', 0.70, 756)],
+                'bear': [('금융', 0.40, 504), ('산업재', 0.35, 378)],
+            },
+            '4B': {  # 포스트 휴먼
+                'bull': [('IT', 0.90, 1260), ('에너지', 0.80, 1008),
+                         ('건강관리', 0.70, 756)],
+                'bear': [('금융', 0.50, 630), ('부동산', 0.40, 504)],
+            },
+        }
+
+        themes = _PHASE_THEMES.get(cur_phase, {})
+        for ind, peak, duration in themes.get('bull', []):
+            if ignore_cooldown:
+                # 페이즈 전환 시 쿨다운 무시하고 강제 발동
+                self.s._theme_cooldown.pop(ind, None)
+            self._add_theme(ind, 'bull', peak, duration, 'phase')
+        for ind, peak, duration in themes.get('bear', []):
+            self._add_theme(ind, 'bear', peak, duration, 'phase')
+
+    def _trigger_scenario_themes(self, scenario_type: str):
+        """
+        시나리오 발생 시 연동 테마 발생.
+        dispatcher의 각 이벤트 체크 메서드에서 호출.
+        """
+        _SCENARIO_THEMES = {
+            '수출호황': {
+                'bull': [('IT', 0.50, 378), ('소재', 0.40, 378),
+                         ('산업재', 0.35, 252)],
+                'bear': [],
+            },
+            '유동성장세': {
+                'bull': [('IT', 0.45, 252), ('자유소비재', 0.40, 252),
+                         ('부동산', 0.35, 252)],
+                'bear': [],
+            },
+            '내수붐': {
+                'bull': [('필수소비재', 0.45, 252), ('자유소비재', 0.50, 252),
+                         ('커뮤니케이션', 0.35, 252)],
+                'bear': [],
+            },
+            '팬데믹': {
+                'bull': [('IT', 0.50, 504), ('건강관리', 0.55, 378),
+                         ('필수소비재', 0.30, 252)],
+                'bear': [('자유소비재', 0.45, 378), ('부동산', 0.30, 252)],
+            },
+            '전쟁': {
+                'bull': [('에너지', 0.55, 252), ('소재', 0.40, 252)],
+                'bear': [('IT', 0.25, 252)],
+            },
+            '재건': {
+                'bull': [('산업재', 0.50, 378), ('소재', 0.45, 378)],
+                'bear': [],
+            },
+            '대공황': {
+                'bull': [],
+                # 대공황: 모든 섹터 bear 테마 (강도 낮게 — 시장 자체가 하락)
+                'bear': [('IT', 0.35, 504), ('금융', 0.40, 504),
+                         ('자유소비재', 0.35, 378)],
+            },
+            # ── 신규 호재 ─────────────────────────────
+            '혁신기술붐': {
+                'bull': [('IT', 0.65, 504), ('건강관리', 0.50, 378),
+                         ('커뮤니케이션', 0.35, 252)],
+                'bear': [('에너지', 0.20, 252), ('유틸리티', 0.15, 126)],
+            },
+            '외국인유입': {
+                'bull': [('IT', 0.40, 252), ('금융', 0.35, 252),
+                         ('자유소비재', 0.30, 252)],
+                'bear': [],
+            },
+            '정부부양': {
+                'bull': [('산업재', 0.55, 252), ('소재', 0.40, 252),
+                         ('IT', 0.30, 126)],
+                'bear': [],
+            },
+            # ── 신규 악재 ─────────────────────────────
+            '기술버블붕괴': {
+                # IT/성장주 폭락, Value/Defensive 자금 유입
+                'bull': [('필수소비재', 0.35, 378), ('유틸리티', 0.30, 378),
+                         ('에너지', 0.25, 252)],
+                'bear': [('IT', 0.60, 504), ('건강관리', 0.45, 378),
+                         ('커뮤니케이션', 0.40, 378)],
+            },
+            '스태그플레이션': {
+                'bull': [('에너지', 0.40, 504), ('소재', 0.35, 378)],
+                'bear': [('자유소비재', 0.50, 504), ('IT', 0.35, 378),
+                         ('부동산', 0.40, 504)],
+            },
+            '긴축쇼크': {
+                'bull': [('금융', 0.35, 252), ('필수소비재', 0.25, 252)],
+                'bear': [('IT', 0.45, 378), ('자유소비재', 0.35, 252),
+                         ('부동산', 0.40, 378)],
+            },
+            '환율위기': {
+                # 수출주 단기 수혜, 내수/소비재 타격
+                'bull': [('IT', 0.35, 252), ('산업재', 0.30, 252)],
+                'bear': [('필수소비재', 0.40, 378), ('자유소비재', 0.45, 378),
+                         ('유틸리티', 0.30, 252)],
+            },
+        }
+
+        # 대공황 중엔 bull 테마 강제 소멸
+        if scenario_type == '대공황':
+            self.s.active_themes = [
+                t for t in self.s.active_themes if t['type'] != 'bull'
+            ]
+
+        themes = _SCENARIO_THEMES.get(scenario_type, {})
+        for ind, peak, duration in themes.get('bull', []):
+            self._add_theme(ind, 'bull', peak, duration, 'scenario')
+        for ind, peak, duration in themes.get('bear', []):
+            self._add_theme(ind, 'bear', peak, duration, 'scenario')
+
+    # ─────────────────────────────────────────────
+    # ★ 10.5순위: 구조적 경제 충격
+    # 긴축 쇼크 / 스태그플레이션 / 기술 버블 붕괴
+    # ─────────────────────────────────────────────
+    def _check_structural_shift(self, silent: bool):
+        """
+        외생 충격이 아닌 내생적 경제 지표에서 발생하는 악재.
+        GRI 즉시 충격 없음 — drift 패널티로 서서히 반영.
+
+        ③ 기술 버블 붕괴: Growth PER 80배+ + 버블 150+ + 금리 인상
+        ② 스태그플레이션: CPI 5%+ + GDP 역성장 동시 3개월 이상
+        ① 긴축 쇼크: CPI 4%+ + 금리 인상 사이클 2개월 이상
+        """
+        cur      = self.s.current_date
+        scenario = self.s.current_scenario
+
+        if any(x in scenario for x in ["전쟁", "분쟁", "대공황", "팬데믹",
+                                        "긴축", "스태그", "버블붕괴", "환율위기",
+                                        "외부충격"]):
+            return
+        if not getattr(self.s, '_market_fully_formed', False):
+            return
+        if cur.day != 1:
+            return
+
+        macro     = self.s.macro
+        cpi       = macro.get('cpi', 2.0)
+        rate      = macro.get('interest_rate', 4.0)
+        prev_snap = getattr(self.s, '_prev_macro_snapshot', {})
+        prev_rate = prev_snap.get('interest_rate', rate)
+        rate_rising = rate > prev_rate
+        stats    = getattr(self.s, '_last_market_stats', {})
+        per_l    = stats.get('per_large', 0.0)
+        bubble   = getattr(self.s, 'bubble_index', 0.0)
+        gdp_gr   = getattr(self.s, 'gdp_growth_rate', 0.03)
+        cycle    = getattr(self.s, 'cycle_stage', '확장')
+
+        # ③ 기술 버블 붕괴
+        if per_l >= 80 and bubble >= 150 and rate_rising and random.random() < 0.15:
+            duration = random.randint(252, 504)
+            gri_drop = random.uniform(0.10, 0.20)
+            immediate = gri_drop * 0.30
+            self.s.gri = max(100.0, self.s.gri * (1.0 - immediate))
+            self.s._scenario_drift_penalty = -(gri_drop * 0.70 / max(1, duration))
+            self.s.current_scenario = "💻 기술 버블 붕괴 (성장주 디레이팅)"
+            self.s.scenario_timer   = duration
+            self.s._last_crisis_year = cur.year
+            self._trigger_scenario_themes('기술버블붕괴')
+            if not silent:
+                self.s.daily_news.append(
+                    f"💻 [기술 버블 붕괴] {cur.year}년 성장주 밸류에이션 붕괴! "
+                    f"PER {per_l:.0f}배 + 버블지수 {bubble:.0f} + 금리 인상 → "
+                    f"IT/성장주 집중 하락 (Value/Defensive 상대적 수혜)"
+                )
+            return
+
+        # ② 스태그플레이션
+        stag_cnt = getattr(self.s, '_stagflation_counter', 0)
+        if cpi >= 5.0 and gdp_gr <= 0.01:
+            self.s._stagflation_counter = stag_cnt + 1
+        else:
+            self.s._stagflation_counter = max(0, stag_cnt - 1)
+
+        if getattr(self.s, '_stagflation_counter', 0) >= 3 and random.random() < 0.25:
+            duration = random.randint(252, 756)
+            gri_drop = random.uniform(0.05, 0.15)
+            self.s._scenario_drift_penalty = -(gri_drop / max(1, duration))
+            self.s.current_scenario = "🔥 스태그플레이션 (물가↑ 성장↓)"
+            self.s.scenario_timer   = duration
+            self.s._stagflation_counter = 0
+            self.s._last_crisis_year    = cur.year
+            self._trigger_scenario_themes('스태그플레이션')
+            if not silent:
+                self.s.daily_news.append(
+                    f"🔥 [스태그플레이션] {cur.year}년 물가({cpi:.1f}%) + "
+                    f"GDP 역성장({gdp_gr*100:.1f}%) 동시 발생! "
+                    f"전 섹터 장기 부진 — 에너지/소재 상대적 방어"
+                )
+            return
+
+        # ① 긴축 쇼크
+        tight_cnt = getattr(self.s, '_tightening_counter', 0)
+        if cpi >= 4.0 and rate_rising and cycle == '확장':
+            self.s._tightening_counter = tight_cnt + 1
+        else:
+            self.s._tightening_counter = max(0, tight_cnt - 2)
+
+        if getattr(self.s, '_tightening_counter', 0) >= 2 and random.random() < 0.20:
+            duration = random.randint(126, 378)
+            gri_drop = random.uniform(0.05, 0.12)
+            self.s._scenario_drift_penalty = -(gri_drop / max(1, duration))
+            self.s.current_scenario = f"📊 긴축 쇼크 (금리 {rate:.1f}% / CPI {cpi:.1f}%)"
+            self.s.scenario_timer   = duration
+            self.s._tightening_counter = 0
+            self._trigger_scenario_themes('긴축쇼크')
+            if not silent:
+                self.s.daily_news.append(
+                    f"📊 [긴축 쇼크] {cur.year}년 금리 인상({rate:.1f}%) + "
+                    f"물가({cpi:.1f}%) 압박 → 성장주 밸류에이션 하락 "
+                    f"(Value/Defensive 상대적 방어)"
+                )
+
+    # ─────────────────────────────────────────────
+    # ★ 10.7순위: 환율 위기
+    # ─────────────────────────────────────────────
+    def _check_exchange_crisis(self, silent: bool):
+        """
+        외국인 자금 이탈(-60 이하) + 환율 1400원+ 조건 3개월 지속 시 발동.
+        수입 원가 급등 → 내수 타격, 수출주 단기 수혜.
+        금리 강제 인상 압력 동반.
+        """
+        cur      = self.s.current_date
+        scenario = self.s.current_scenario
+
+        if any(x in scenario for x in ["환율위기", "대공황", "전쟁", "팬데믹"]):
+            return
+        if not getattr(self.s, '_market_fully_formed', False):
+            return
+        if cur.day != 1:
+            return
+
+        macro    = self.s.macro
+        exchange = macro.get('exchange_rate', 1100.0)
+        ff       = getattr(self.s, 'foreign_flow_index', 0.0)
+
+        fx_cnt = getattr(self.s, '_fx_crisis_counter', 0)
+        if ff <= -60 and exchange >= 1400.0:
+            self.s._fx_crisis_counter = fx_cnt + 1
+        else:
+            self.s._fx_crisis_counter = max(0, fx_cnt - 1)
+            return
+
+        if getattr(self.s, '_fx_crisis_counter', 0) < 3:
+            return
+        if random.random() > 0.40:
+            return
+
+        duration = random.randint(126, 378)
+        gri_drop = random.uniform(0.08, 0.18)
+        self.s._scenario_drift_penalty = -(gri_drop / max(1, duration))
+        self.s.current_scenario = f"💱 환율 위기 (원/달러 {exchange:.0f}원)"
+        self.s.scenario_timer   = duration
+        self.s._fx_crisis_counter = 0
+        self.s._last_crisis_year  = cur.year
+
+        # 환율 방어 긴급 금리 인상
+        macro['interest_rate'] = min(8.0, macro['interest_rate'] + random.uniform(0.5, 1.5))
+        self._trigger_scenario_themes('환율위기')
+
+        if not silent:
+            self.s.daily_news.append(
+                f"💱 [환율 위기] {cur.year}년 원/달러 {exchange:.0f}원! "
+                f"외국인 이탈(수급 {ff:.0f}) 지속 — "
+                f"금리 {macro['interest_rate']:.1f}%로 긴급 인상"
+            )
+            self.s.daily_news.append(
+                f"  └ 수입 원가 급등 → 내수/소비재 타격 "
+                f"| IT/수출주 단기 환율 수혜"
+            )
+
+    # ─────────────────────────────────────────────
+    # ★ 10.9순위: 박스권 횡보
+    # ─────────────────────────────────────────────
+    def _check_boxrange(self, silent: bool):
+        """
+        GRI anchor 0.85~1.15 구간에서 60일 이상 머물 때 횡보 진입.
+        drift를 ±0.00003으로 수렴 → 자연스러운 장기 횡보 구현.
+        강한 시나리오 발생 시 자동 해제.
+        """
+        cur      = self.s.current_date
+        scenario = self.s.current_scenario
+
+        # 강한 시나리오 진행 중엔 박스권 없음
+        if any(x in scenario for x in ["전쟁", "분쟁", "대공황", "팬데믹",
+                                        "수출 호황", "유동성 장세", "혁신 기술",
+                                        "외부충격", "긴축", "스태그", "버블붕괴"]):
+            self.s._boxrange_counter = 0
+            if getattr(self.s, '_in_boxrange', False):
+                self.s._in_boxrange   = False
+                self.s._boxrange_active = False
+                if scenario == "📦 박스권 횡보":
+                    self.s.current_scenario = "정상 성장"
+            return
+
+        lv  = self.s.max_tech_reached
+        ye  = max(0, cur.year - 2000)
+        lv_base = {
+            1: 1000 * (1.075 ** ye),
+            2: 1000 * (1.075**15) * (1.090**max(0, ye-15)),
+            3: 1000 * (1.075**15) * (1.090**20) * (1.105**max(0, ye-35)),
+            4: 1000 * (1.075**15) * (1.090**20) * (1.105**25) * (1.080**max(0, ye-60)),
+        }.get(lv, 1000.0)
+        anchor = self.s.gri / max(1.0, lv_base)
+        in_range = (0.85 <= anchor <= 1.15)
+
+        box_cnt = getattr(self.s, '_boxrange_counter', 0)
+        if in_range:
+            self.s._boxrange_counter = box_cnt + 1
+        else:
+            self.s._boxrange_counter = max(0, box_cnt - 5)
+            if getattr(self.s, '_in_boxrange', False):
+                self.s._in_boxrange     = False
+                self.s._boxrange_active = False
+                if scenario == "📦 박스권 횡보":
+                    self.s.current_scenario = "정상 성장"
+                if not silent:
+                    self.s.daily_news.append(
+                        f"📊 [박스권 탈출] GRI가 횡보 구간을 벗어났습니다. "
+                        f"(anchor {anchor:.2f})"
+                    )
+            return
+
+        if getattr(self.s, '_boxrange_counter', 0) >= 60 and \
+           not getattr(self.s, '_in_boxrange', False):
+            self.s._in_boxrange     = True
+            self.s._boxrange_active = True
+            self.s.current_scenario = "📦 박스권 횡보"
+            if not silent:
+                gri_lo = lv_base * 0.85
+                gri_hi = lv_base * 1.15
+                self.s.daily_news.append(
+                    f"📦 [박스권 진입] 시장이 GRI {gri_lo:.0f}~{gri_hi:.0f} "
+                    f"구간에서 장기 횡보 중 — 개별 종목 선별 중요."
+                )
+        elif getattr(self.s, '_in_boxrange', False):
+            self.s._boxrange_active = True
 
     def _pick_new_sub(self, ind: str, tier_raw: str,
                        phase: str, existing: list, ind_data: dict) -> str:

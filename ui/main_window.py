@@ -40,6 +40,24 @@ def _get_tick(price: int) -> int:
     else:                  return 1
 
 
+def _fmt_mc(v: float) -> str:
+    """시가총액 한국 단위 포맷: 억 → 조 → 경(10^16) → 해(10^20) → 자(10^24)"""
+    v = int(v)
+    _자  = 10 ** 24
+    _해  = 10 ** 20
+    _경  = 10 ** 16
+    _조  = 10 ** 12
+    _억  = 10 ** 8
+    if   v >= _자:         return f"{v / _자:.2f}자"
+    elif v >= _해:         return f"{v / _해:.2f}해"
+    elif v >= _경:         return f"{v / _경:.2f}경"
+    elif v >= 100 * _조:   return f"{v // _조:,}조"
+    elif v >= 10  * _조:   return f"{v / _조:.0f}조"
+    elif v >= _조:         return f"{v / _조:.1f}조"
+    elif v >= _억:         return f"{v / _억:.0f}억"
+    else:                  return f"{v:,}원"
+
+
 def _build_commodity_html(macro: dict) -> str:
     """원자재 현실 가격 HTML — 값이 있을 때만 표시"""
     lines = []
@@ -1073,7 +1091,10 @@ class StockHTS(QMainWindow):
             phase_str = f"{phase} {phase_name}" if phase_name else phase
         except Exception:
             phase_str = str(s.max_tech_reached)
-        self.index_label.setText(f"📊 GRI: {s.gri:,.0f} | {b_str} | LV.{s.max_tech_reached} [{phase_str}]")
+        total_mc = sum(st.get('market_cap', 0) for st in s.stocks)
+        self.index_label.setText(
+            f"📊 GRI: {s.gri:,.0f} | {b_str} | LV.{s.max_tech_reached} [{phase_str}] | 🏦 시총: {_fmt_mc(total_mc)}"
+        )
         # ★ 원자재 (현실 단위)
         grain = m.get('grain_price')
         metal = m.get('metal_price')
@@ -1391,6 +1412,10 @@ class StockHTS(QMainWindow):
         sign = "▲" if rate > 0 else ("▼" if rate < 0 else "─")
         bubble = getattr(s, 'bubble_index', 0.0)
 
+        # 스크롤 위치 저장
+        _sb = self.report_panel.verticalScrollBar()
+        _prev_scroll = _sb.value()
+
         if   bubble >= 300: b_color = "#FF0000"; b_label = "🔴 위험"
         elif bubble >= 200: b_color = "#FF6600"; b_label = "🟠 경고"
         elif bubble >= 150: b_color = "#FFD700"; b_label = "🟡 주의"
@@ -1401,6 +1426,17 @@ class StockHTS(QMainWindow):
                     3: "3단계 (AI/양자)", 4: "4단계 (기술 특이점)"}
         lv_name = lv_names.get(s.max_tech_reached, f"Lv.{s.max_tech_reached}")
 
+        # ── 전체 시가총액 계산 ────────────────────
+        stocks    = s.stocks
+        total_mc  = sum(st.get('market_cap', 0) for st in stocks)
+        stock_cnt = len(stocks)
+        large_cnt = sum(1 for st in stocks if st['meta'].get('tier') == '대형주')
+        mid_cnt   = sum(1 for st in stocks if st['meta'].get('tier') == '중형주')
+        small_cnt = stock_cnt - large_cnt - mid_cnt
+        top1_mc   = max((st.get('market_cap', 0) for st in stocks), default=0)
+        top1_ratio = (top1_mc / total_mc * 100) if total_mc > 0 else 0
+        buffett   = getattr(s, 'buffett_index', 0.0)
+
         self.report_panel.setHtml(f"""
         <div style='font-family: Malgun Gothic; padding: 10px;'>
             <p style='font-size:28px; font-weight:bold; color:#00FF00;'>GRI 지수</p>
@@ -1409,6 +1445,15 @@ class StockHTS(QMainWindow):
                 <span style='font-size:18px;'> {sign}{abs(rate):.2f}%</span>
             </p>
             <hr style='border:0.5px solid #333;'/>
+            <p><b style='color:#FFD700;'>🏦 전체 시가총액</b><br/>
+            <span style='font-size:22px; font-weight:bold; color:#00FFFF;'>{_fmt_mc(total_mc)}</span><br/>
+            <span style='color:#aaa; font-size:12px;'>
+            상장 종목 {stock_cnt}개 &nbsp;|&nbsp;
+            대형 {large_cnt} · 중형 {mid_cnt} · 소형 {small_cnt}<br/>
+            1위 집중도: {top1_ratio:.1f}% ({_fmt_mc(top1_mc)}) &nbsp;|&nbsp;
+            버핏지수: {buffett:.1f}%
+            </span></p>
+            <hr style='border:0.5px solid #222;'/>
             <p><b style='color:#FFD700;'>기술 레벨</b><br/>
             {lv_name}</p>
             <p><b style='color:#FFD700;'>버블 지수</b><br/>
@@ -1431,6 +1476,8 @@ class StockHTS(QMainWindow):
         # 매수/매도 버튼 비활성화
         self.btn_buy.setEnabled(False)
         self.btn_sell.setEnabled(False)
+        # 스크롤 위치 복원
+        _sb.setValue(_prev_scroll)
 
     @staticmethod
     def _get_chart_step(count: int, tf: str = "전체") -> int:

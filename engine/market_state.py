@@ -32,10 +32,8 @@ class MarketState:
 
         # ── 시나리오 ──────────────────────────────
         self.current_scenario: str = "정상 성장"
-        self.world_line: str = "Normal"
         self.scenario_timer: int = 0
         self.is_recovering: bool = False
-        self.reserved_scenario: str = ""
 
         # ── 거시경제 ──────────────────────────────
         self.macro: dict = {
@@ -97,7 +95,6 @@ class MarketState:
             "recovery":  None,
             "crash":     None,
         }
-        self._branch_news_sent: bool = False
         self.pre_reflection_events: list = []
 
         # ── 실적 히스토리 ─────────────────────────
@@ -138,8 +135,9 @@ class MarketState:
         self._branch_activation_date = None
         self._depression_warning_sent_lv: int = 0
         self._prev_macro_snapshot: dict = {}
-        # 분기점에 따른 대공황 버블 임계값 (기본 200)
-        self._depression_threshold: int = 200
+        # 대공황 버블 임계값: 250 고정 (분기점 시스템 제거로 단일값)
+        # 현실 버핏지수 기준: 200%+ = 역대급 과열 → 버블지수 250 수준
+        self._depression_threshold: int = 250
 
         # ── 외국인 수급 지수 ──────────────────────
         self.foreign_flow_index: float = 0.0   # -100 ~ +100
@@ -214,3 +212,25 @@ class MarketState:
         # ── ★ 신규: 페이즈 전환 추적 ─────────────────────────────
         # 페이즈 전환 감지용 — 마지막으로 처리된 페이즈 ID
         self._last_processed_phase: str = "1A"
+
+        # ── ★ 테마 모멘텀 시스템 ──────────────────────────────────
+        # 활성 테마 리스트
+        # 각 테마: {
+        #   'ind': str,          # 대상 산업
+        #   'type': 'bull'/'bear', # 방향
+        #   'peak': float,       # 최고 강도 (0~1)
+        #   'duration': int,     # 전체 기간 (영업일)
+        #   'elapsed': int,      # 경과 영업일
+        #   'source': str,       # 발생 원인 ('phase'/'scenario'/'cycle')
+        # }
+        self.active_themes: list = []
+
+        # 산업별 마지막 bull 테마 종료 연도 (쿨다운용)
+        # {ind: year}
+        self._theme_cooldown: dict = {}
+
+        # ── A→B 페이즈 전환 보너스 ───────────────
+        # 호재 시나리오 → 음수(가속), 악재 → 양수(지연)
+        # get_current_phase()에서 elapsed에 더해 전환 시점 조정
+        # 예: -2 → 기본 7년에서 5년으로 단축
+        self._phase_offset_bonus: int = 0

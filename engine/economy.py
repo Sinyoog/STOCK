@@ -99,17 +99,63 @@ class MacroEngine:
         """
         현재 테크 레벨과 진입 후 경과 년수를 기반으로
         페이즈 ID를 반환합니다. (예: "1A", "2B", "3A" 등)
+
+        [개선] _phase_offset_bonus로 A→B 전환 시점 유동화
+        - 호재 시나리오(수출호황/혁신기술붐) → bonus 음수 → 조기 전환
+        - 악재(대공황/전쟁) → bonus 양수 → 전환 지연
+        - 경계값: 최소 3년, 최대 기본값+5년
         """
         lv = self.s.max_tech_reached
         upgrade_years = getattr(self.s, '_tech_upgrade_years', {1: 2000})
         lv_start = upgrade_years.get(lv) or 2000
-        elapsed = self.s.current_date.year - lv_start
+        elapsed  = self.s.current_date.year - lv_start
+
+        # ── phase_offset_bonus 실시간 계산 ────────
+        # 매번 현재 경제 상태를 보고 보너스 산출
+        bonus = 0
+        macro   = self.s.macro
+        sox     = macro.get('semi_index', 1000.0)
+        scenario = self.s.current_scenario
+        cycle   = getattr(self.s, 'cycle_stage', '확장')
+        anchor  = self.s.gri / max(1.0, self.s.gri)  # 간이 계산
+
+        # 가속 조건 (elapsed를 늘려서 더 빨리 B에 도달하게)
+        if any(x in scenario for x in ["수출 호황", "혁신 기술 붐", "팬데믹 극복"]):
+            bonus -= 2   # 최대 2년 앞당김
+        elif any(x in scenario for x in ["유동성 장세", "외국인 대규모 유입", "내수 소비 붐"]):
+            bonus -= 1
+
+        # SOX 급성장 시 가속
+        if lv == 1 and sox >= 3000:
+            bonus -= 1
+        elif lv == 2 and sox >= 20000:
+            bonus -= 1
+        elif lv >= 3 and sox >= 100000:
+            bonus -= 1
+
+        # GRI 목표 초과(호황) 시 가속
+        lv_gri_targets = {1: 2500, 2: 7000, 3: 15000, 4: 30000}
+        if self.s.gri >= lv_gri_targets.get(lv, 2500) * 1.3:
+            bonus -= 1
+
+        # 지연 조건
+        if any(x in scenario for x in ["대공황", "전쟁", "팬데믹"]) and "극복" not in scenario:
+            bonus += 3
+        elif any(x in scenario for x in ["외부충격", "스태그플레이션", "환율위기"]):
+            bonus += 2
+        elif cycle in ('수축', '저점') and "극복" not in scenario:
+            bonus += 1
+
+        # 보너스 클램프: 최대 앞당김 -3년, 최대 지연 +5년
+        bonus = max(-3, min(5, bonus))
+
+        # elapsed에 bonus 반영 (bonus 음수면 elapsed 증가 → 더 빨리 B 도달)
+        adjusted_elapsed = elapsed - bonus
 
         for phase in TECH_PHASE.get(lv, []):
-            if phase["offset_start"] <= elapsed < phase["offset_end"]:
+            if phase["offset_start"] <= adjusted_elapsed < phase["offset_end"]:
                 return phase["id"]
 
-        # fallback: 마지막 페이즈
         phases = TECH_PHASE.get(lv, [])
         return phases[-1]["id"] if phases else str(lv)
 
@@ -249,19 +295,29 @@ class MacroEngine:
         return self.s.max_tech_reached
 
     def _apply_tech_shock(self, new_lv: int):
-        """테크 전환 시 섹터별 efficiency 영구 조정"""
+        """테크 전환 시 섹터별 efficiency 영구 조정 + GRI 즉각 부양"""
         if new_lv == 2:
             boost   = {"IT": 0.20, "커뮤니케이션": 0.15, "자유소비재": 0.10, "금융": 0.08}
             penalty = {"에너지": -0.10}
+            gri_boost   = 0.10   # GRI +10%
+            new_sentiment = 75
+            ff_boost    = 30
         elif new_lv == 3:
             boost   = {"건강관리": 0.25, "IT": 0.20, "산업재": 0.15, "소재": 0.10}
             penalty = {"필수소비재": -0.05, "유틸리티": -0.10}
+            gri_boost   = 0.15   # GRI +15%
+            new_sentiment = 80
+            ff_boost    = 35
         elif new_lv == 4:
             boost   = {"IT": 0.30, "건강관리": 0.25, "금융": 0.15}
             penalty = {"에너지": -0.15, "부동산": -0.05}
+            gri_boost   = 0.20   # GRI +20%
+            new_sentiment = 85
+            ff_boost    = 40
         else:
             return
 
+        # ── efficiency 조정 ────────────────────────
         for stock in self.s.stocks:
             meta   = stock['meta']
             ind    = meta.get('ind', '')
@@ -271,9 +327,26 @@ class MacroEngine:
                     meta['efficiency'] = max(0.005, min(0.30, old_eff + old_eff * delta))
                     break
 
+        # ── ★ GRI 즉각 부양 ───────────────────────
+        # 버블 상태에서는 효과 감소 (과열 방지)
+        bubble = getattr(self.s, 'bubble_index', 0.0)
+        if bubble >= 150:
+            gri_boost *= 0.3    # 버블 과열 시 30%만 적용
+        elif bubble >= 100:
+            gri_boost *= 0.6    # 주의 구간 60%
+
+        self.s.gri = self.s.gri * (1.0 + gri_boost)
+        self.s.sentiment = max(getattr(self.s, 'sentiment', 50.0), float(new_sentiment))
+        self.s.foreign_flow_index = min(
+            100.0,
+            getattr(self.s, 'foreign_flow_index', 0.0) + ff_boost
+        )
+
         lv_name = {2: "모바일·클라우드", 3: "AI·양자", 4: "기술 특이점"}.get(new_lv, "")
         self.s.daily_news.append(
-            f"📊 [테크 충격] {lv_name} 혁명 — 수혜 섹터 효율 상승, 구시대 산업 타격"
+            f"📊 [테크 충격] {lv_name} 혁명 — "
+            f"GRI +{gri_boost*100:.0f}% 즉각 상승! "
+            f"수혜 섹터 효율 상승, 구시대 산업 타격"
         )
 
     # ─────────────────────────────────────────────

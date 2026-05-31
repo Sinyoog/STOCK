@@ -60,42 +60,43 @@ class EarningsManager:
         _cur_phase = getattr(self.s, '_last_processed_phase', '1A')
 
         _PHASE_REVENUE_MULT = {
-            # Growth 섹터: IT/건강/커뮤 — 현실 기준 (삼성전자급 26년 10배)
+            # Growth 섹터: IT/건강/커뮤
+            # 목표: 26년간 최상위 기업 10~15배 성장 (현실 삼성전자 수준)
             ("1A", "Growth"):    1.00,
-            ("1B", "Growth"):    1.30,
-            ("2A", "Growth"):    2.00,
-            ("2B", "Growth"):    3.20,
-            ("3A", "Growth"):    5.00,
-            ("3B", "Growth"):    7.50,
-            ("4A", "Growth"):   11.00,
-            ("4B", "Growth"):   16.00,
-            # Cyclical: 자유소비재 — 소비시장 성장
+            ("1B", "Growth"):    1.50,   # 1.30 → 1.50
+            ("2A", "Growth"):    2.50,   # 2.00 → 2.50
+            ("2B", "Growth"):    4.00,   # 3.20 → 4.00
+            ("3A", "Growth"):    7.00,   # 5.00 → 7.00  ★ AI 상용화 붐
+            ("3B", "Growth"):   12.00,   # 7.50 → 12.0  ★ 양자/바이오 폭발
+            ("4A", "Growth"):   18.00,   # 11.0 → 18.0
+            ("4B", "Growth"):   28.00,   # 16.0 → 28.0
+            # Cyclical: 자유소비재
             ("1A", "Cyclical"):  1.00,
-            ("1B", "Cyclical"):  1.20,
-            ("2A", "Cyclical"):  1.70,
-            ("2B", "Cyclical"):  2.50,
-            ("3A", "Cyclical"):  3.50,
-            ("3B", "Cyclical"):  5.00,
-            ("4A", "Cyclical"):  7.00,
-            ("4B", "Cyclical"): 10.00,
-            # Value: 에너지/금융/산업재/소재/부동산 — 안정 성장
+            ("1B", "Cyclical"):  1.25,   # 1.20 → 1.25
+            ("2A", "Cyclical"):  1.80,   # 1.70 → 1.80
+            ("2B", "Cyclical"):  2.80,   # 2.50 → 2.80
+            ("3A", "Cyclical"):  4.20,   # 3.50 → 4.20
+            ("3B", "Cyclical"):  6.00,   # 5.00 → 6.00
+            ("4A", "Cyclical"):  8.50,   # 7.00 → 8.50
+            ("4B", "Cyclical"): 12.00,   # 10.0 → 12.0
+            # Value: 에너지/금융/산업재/소재/부동산
             ("1A", "Value"):     1.00,
-            ("1B", "Value"):     1.15,
-            ("2A", "Value"):     1.40,
-            ("2B", "Value"):     1.80,
-            ("3A", "Value"):     2.30,
-            ("3B", "Value"):     3.00,
-            ("4A", "Value"):     3.80,
-            ("4B", "Value"):     5.00,
-            # Defensive: 필수소비재/유틸 — 완만
+            ("1B", "Value"):     1.20,   # 1.15 → 1.20
+            ("2A", "Value"):     1.50,   # 1.40 → 1.50
+            ("2B", "Value"):     2.00,   # 1.80 → 2.00
+            ("3A", "Value"):     2.80,   # 2.30 → 2.80
+            ("3B", "Value"):     3.80,   # 3.00 → 3.80
+            ("4A", "Value"):     5.00,   # 3.80 → 5.00
+            ("4B", "Value"):     7.00,   # 5.00 → 7.00
+            # Defensive: 필수소비재/유틸 — 완만 (큰 변화 없음)
             ("1A", "Defensive"): 1.00,
             ("1B", "Defensive"): 1.08,
             ("2A", "Defensive"): 1.20,
-            ("2B", "Defensive"): 1.38,
-            ("3A", "Defensive"): 1.60,
-            ("3B", "Defensive"): 1.85,
-            ("4A", "Defensive"): 2.15,
-            ("4B", "Defensive"): 2.50,
+            ("2B", "Defensive"): 1.40,   # 1.38 → 1.40
+            ("3A", "Defensive"): 1.65,   # 1.60 → 1.65
+            ("3B", "Defensive"): 1.90,   # 1.85 → 1.90
+            ("4A", "Defensive"): 2.20,   # 2.15 → 2.20
+            ("4B", "Defensive"): 2.60,   # 2.50 → 2.60
         }
         phase_rev_mult = _PHASE_REVENUE_MULT.get((_cur_phase, _sector), 1.0)
 

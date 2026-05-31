@@ -39,14 +39,39 @@ class GameService:
         self.cm.used_all_time = self.s.used_all_time
 
         # ── 그룹사 생성 ──────────────────────────────────────────
-        # 최상위 3개 그룹 ("대1" 티어: 시총 30~50조)
+        # 최상위 3개 그룹 ("대1" 티어)
+        # ★ IT/커뮤/건강관리/산업재/소재 중 3개를 중복 없이 랜덤 배정
+        # 각 산업의 1B/2A 핵심 사업을 sub_list에 포함 → 페이즈 전환 시 자연 수혜
+        _ELITE_INDS = ["IT", "커뮤니케이션", "건강관리", "산업재", "소재"]
+        _elite_pool = random.sample(_ELITE_INDS, 3)  # 중복 없이 3개 선택
+
+        # 산업별 페이즈 선행 사업 (1B/2A 대형 핵심 sub)
+        _ELITE_SUBS = {
+            "IT":           ["PC용D램", "모바일AP", "팹리스파운드리"],
+            "커뮤니케이션": ["이동통신사", "종합포털서비스", "모바일메신저"],
+            "건강관리":     ["MRI부품제조", "mRNA백신", "바이오시밀러"],
+            "산업재":       ["고속철도차량", "이차전지셀제조", "전기차부품"],
+            "소재":         ["정밀화학", "양극재소재", "리튬정제"],
+        }
+
         top3_groups = ["제니스", "서한", "가온"]
-        for gn in top3_groups:
-            gid = f"GROUP_{gn}"
+        for i, gn in enumerate(top3_groups):
+            gid      = f"GROUP_{gn}"
+            elite_ind = _elite_pool[i]
             self.s.groups[gid] = {"name": gn, "active": True}
-            # 대표 계열사 1개는 최상위 티어
-            ind1, ind2 = random.sample(MAIN_INDUSTRIES, 2)
-            self.s.stocks.append(self.cm.create_stock_data(None, ind1, "대1", gid))
+
+            # 대1 종목: 엘리트 산업 + 선행 사업 sub_list
+            stock_d1 = self.cm.create_stock_data(None, elite_ind, "대1", gid)
+            # sub_list를 해당 산업의 핵심 사업으로 덮어씀
+            elite_subs = _ELITE_SUBS.get(elite_ind, [])
+            if elite_subs:
+                stock_d1['meta']['sub_list'] = elite_subs[:]
+                stock_d1['meta']['sub']      = elite_subs[0]
+            self.s.stocks.append(stock_d1)
+
+            # 계열사 1개: 나머지 산업 중 랜덤
+            remaining_inds = [x for x in MAIN_INDUSTRIES if x != elite_ind]
+            ind2 = random.choice(remaining_inds)
             self.s.stocks.append(self.cm.create_stock_data(None, ind2, "대", gid))
 
         # 일반 그룹사 2개 ("대" 티어: 시총 1조~20조)

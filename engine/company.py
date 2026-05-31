@@ -201,28 +201,30 @@ class CompanyManager:
         # 중견("중"): 1000억~1조
         # 중소("소"): 100억~3000억
         if tier == "대1":
+            # 현실 2000년 기준: KT 37조, 삼성전자 32조, SKT 28조
+            # 목표 평균 30조 → 26년 성장배수 7~8배 → 200~240조 도달
             case = random.randint(1, 3)
-            if case == 1:   # 발행주 많고 주가 낮음 (KT형)
-                p       = random.randint(20_000, 60_000)
-                s_count = random.randint(500, 1_000) * 1_000_000
-            elif case == 2: # 주가/주식수 균형 (삼성전자형)
-                p       = random.randint(80_000, 200_000)
+            if case == 1:   # KT형: 발행주 많고 주가 낮음
+                p       = random.randint(30_000, 50_000)
+                s_count = random.randint(300, 800) * 1_000_000
+            elif case == 2: # 삼성전자형: 주가/주식수 균형 ← 상향
+                p       = random.randint(70_000, 150_000)
                 s_count = random.randint(300, 600) * 1_000_000
-            else:           # 주가 높고 발행주 적음 (SKT형)
-                p       = random.randint(500_000, 2_000_000)
-                s_count = random.randint(15, 40) * 1_000_000
+            else:           # SKT형: 고주가 소량 ← 상향
+                p       = random.randint(300_000, 700_000)
+                s_count = random.randint(20, 50) * 1_000_000
         elif tier == "대":
-            # 일반 대기업: 5000억~5조
-            p       = random.randint(15_000, 50_000)
-            s_count = random.randint(200, 700) * 1_000_000
+            # 현실 2000년 포항제철/현대전자급: 1조~8조
+            p       = random.randint(10_000, 30_000)
+            s_count = random.randint(100, 300) * 1_000_000
         elif tier == "중":
-            # 중견: 1000억~1조
-            p       = random.randint(5_000, 25_000)
-            s_count = random.randint(30, 200) * 1_000_000
+            # 중견: 500억~5000억
+            p       = random.randint(3_000, 15_000)
+            s_count = random.randint(20, 100) * 1_000_000
         else:
-            # 중소: 100억~3000억
-            p       = random.randint(1_000, 10_000)
-            s_count = random.randint(10, 80) * 1_000_000
+            # 중소: 50억~500억
+            p       = random.randint(500, 5_000)
+            s_count = random.randint(5, 30) * 1_000_000
 
         # 5. 이름
         is_group  = (group_id is not None)

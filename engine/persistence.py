@@ -631,8 +631,8 @@ class SaveManager:
                     "max_tech_reached":      self.s.max_tech_reached,
                     "delisted_stocks":       [],  # SQLite delisted_stocks 테이블로 이관
                     "current_scenario":      self.s.current_scenario,
-                    "world_line":            self.s.world_line,
-                    "reserved_scenario":     self.s.reserved_scenario,
+                    "world_line":            getattr(self.s, 'world_line', 'Normal'),
+                    "reserved_scenario":     getattr(self.s, 'reserved_scenario', ''),
                     "branch_activation_date": getattr(self.s, '_branch_activation_date', None) and
                                               self.s._branch_activation_date.strftime("%Y-%m-%d")
                                               if hasattr(getattr(self.s, '_branch_activation_date', None), 'strftime')
@@ -668,6 +668,9 @@ class SaveManager:
                     "pandemic_event":        getattr(self.s, 'pandemic_event', {}),
                     "market_fully_formed":   getattr(self.s, '_market_fully_formed', False),
                     "last_external_shock_year": getattr(self.s, '_last_external_shock_year', 0),
+                    # ★ 테마 모멘텀
+                    "active_themes":         getattr(self.s, 'active_themes', []),
+                    "theme_cooldown":        getattr(self.s, '_theme_cooldown', {}),
                     # daily_volume: SQLite investor_volume으로 관리 — JSON 제외
                     "pending_delist":        {
                         k: {"date": v["date"].strftime("%Y-%m-%d") if hasattr(v.get("date"), "strftime") else str(v.get("date", "")), "reason": v.get("reason", "")}
@@ -720,8 +723,10 @@ class SaveManager:
             self.migrate_delisted_to_db(json_delisted)
             self.s.delisted_stocks = self.get_delisted_stocks()
             self.s.current_scenario      = eng["current_scenario"]
-            self.s.world_line            = eng["world_line"]
-            self.s.reserved_scenario     = eng.get("reserved_scenario", "")
+            # world_line/reserved_scenario는 분기점 시스템 제거로 deprecated
+            # 구버전 세이브 파일 호환성 유지 (있으면 무시, 없어도 무시)
+            _ = eng.get("world_line", "Normal")
+            _ = eng.get("reserved_scenario", "")
             branch_date_str = eng.get("branch_activation_date")
             if branch_date_str:
                 try:
@@ -764,6 +769,9 @@ class SaveManager:
             self.s.pandemic_event         = eng.get("pandemic_event", {})
             self.s._market_fully_formed   = eng.get("market_fully_formed", False)
             self.s._last_external_shock_year = eng.get("last_external_shock_year", 0)
+            # ★ 테마 모멘텀 복원
+            self.s.active_themes    = eng.get("active_themes", [])
+            self.s._theme_cooldown  = eng.get("theme_cooldown", {})
 
             # ★ macro 신규 원자재 필드 — 구버전 세이브 호환
             macro = self.s.macro
