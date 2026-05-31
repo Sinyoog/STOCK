@@ -234,3 +234,51 @@ class MarketState:
         # get_current_phase()에서 elapsed에 더해 전환 시점 조정
         # 예: -2 → 기본 7년에서 5년으로 단축
         self._phase_offset_bonus: int = 0
+
+        # ══════════════════════════════════════════
+        # ★ 생산성 파급 시차 시스템
+        # ══════════════════════════════════════════
+        # 기술 도약 후 실제 실적 반영까지의 시차를 관리
+        # {산업: {"boost": float, "expire_year": int, "lag_remaining_years": int}}
+        # lag_remaining_years가 0이 되면 efficiency boost 실제 반영
+        self._productivity_lag_queue: dict = {}
+
+        # ══════════════════════════════════════════
+        # ★ 시장 광기 지수 (Market Mania Index)
+        # ══════════════════════════════════════════
+        # 실제 EPS 대비 주가가 얼마나 앞서가는가 (PER 괴리 기반)
+        # 1.0 = 정상 / 1.5 = 과열 / 2.0 = 버블 / 3.0+ = 붕괴 직전
+        # 매 분기 실적 발표 시 업데이트
+        self.market_mania_index: float = 1.0
+
+        # 광기 지수 히스토리 (20개 유지)
+        self._mania_history: list = []
+
+        # ══════════════════════════════════════════
+        # ★ 산업 패권 시스템
+        # ══════════════════════════════════════════
+        # 현재 패권 산업 (None = 분산형 시장)
+        self.dominant_industry: str = None
+        # 패권 강도: "약"/"중"/"강"/None
+        self.dominance_level: str = None
+        # 패권 지속 기간 (년)
+        self.dominance_years: int = 0
+        # 패권 후보 연속 충족 년수 {산업: 년수}
+        self._dominance_counter: dict = {}
+        # 버블 사이클 경험 횟수 (LV4 조건용)
+        self._bubble_cycle_count: int = 0
+        # 마지막 버블 붕괴 연도
+        self._last_bubble_burst_year: int = 0
+
+        # ══════════════════════════════════════════
+        # ★ LV4 복합 조건 추적
+        # ══════════════════════════════════════════
+        # LV4_UNLOCK_CONDITIONS 조건 충족 연속 일수
+        self._lv4_condition_days: int = 0
+        # 각 조건별 충족 여부 캐시
+        self._lv4_condition_status: dict = {}
+
+        # ══════════════════════════════════════════
+        # ★ 시나리오 드리프트 패널티 (명시화)
+        # ══════════════════════════════════════════
+        self._scenario_drift_penalty: float = 0.0

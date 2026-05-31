@@ -722,6 +722,18 @@ class StockMarket:
         if not _math.isfinite(raw_gri): raw_gri = self.s.gri
         self.s.gri = max(100.0, raw_gri)
 
+        # ★ 시나리오 드리프트 패널티 적용 (기간 분산 충격)
+        drift_penalty = getattr(self.s, '_scenario_drift_penalty', 0.0)
+        if drift_penalty != 0.0:
+            self.s.gri = max(100.0, self.s.gri * (1.0 + drift_penalty))
+            # 드리프트가 양수(충격 소멸 중)면 서서히 0으로 수렴
+            if drift_penalty < 0:
+                # 충격: 매일 적용 (dispatcher에서 설정한 일별값 그대로 사용)
+                pass
+            else:
+                # 회복 패널티: 사용 후 소폭 감소
+                self.s._scenario_drift_penalty = max(0.0, drift_penalty * 0.995)
+
         # ★ GDP 연간 성장 (매년 1월 1일) — 경기 사이클 연동
         if cur_date.month == 1 and cur_date.day == 1:
             # 기술 레벨별 기본 성장률 상향 (현실 한국 GDP 연 4~5% 수준)

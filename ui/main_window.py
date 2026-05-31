@@ -572,7 +572,7 @@ class StockHTS(QMainWindow):
                 cn = dialog.__class__.__name__
                 if cn == "GroupInfoDialog":        dialog.update_all_info()
                 elif cn == "InfoTableDialog":      dialog.refresh_data()
-                elif cn == "EarningsDialog":       dialog.load_cur()
+                elif cn == "EarningsDialog":       dialog.refresh()
                 elif cn == "InvestorVolumeDialog": dialog.refresh_data()
                 elif cn in ("MyInvestmentDialog", "TradeDialog"): dialog.update_info()
             except Exception as e:
@@ -713,6 +713,17 @@ class StockHTS(QMainWindow):
             btn.setVisible(False)
         self.market_stats_label.setText("")
         self.industry_label.setText("")
+        if hasattr(self, 'sector_count_label'): self.sector_count_label.setText("")
+        if hasattr(self, 'ind_count_label'):    self.ind_count_label.setText("")
+
+        # ★ NEXT DAY 버튼 복구
+        self.btn_nxt.setEnabled(True)
+        self.btn_nxt.setText("▶ NEXT DAY")
+
+        # ★ 뉴스창 재생성 (None 상태 해소)
+        self.news_window = NewsWindow(self, self.game_service, self.news_service, self)
+        self.news_window.hide()
+
         self.sync_ui_with_engine()
         self.report_panel.clear()
         # 차트 명시적 초기화 — 빈 데이터로 0~1 축 뜨는 문제 방지
@@ -738,38 +749,38 @@ class StockHTS(QMainWindow):
         event.accept()
 
     def reset_game_logic(self):
-        if hasattr(self, 'news_window') and self.news_window:
-            try:
-                self.news_window.hts = None
-                if self.news_window in self.active_dialogs:
-                    self.active_dialogs.remove(self.news_window)
-                self.news_window.close()
-                self.news_window.deleteLater()
-            except Exception:
-                pass
-        self.news_window = None
-
-        # DB DROP/재생성이 무거우므로 백그라운드 스레드에서 실행
-        import threading
-        def _do_reset():
-            self.game_service.reset_game(self.my_cash, self.my_portfolio)
-            # 완료 후 UI 갱신은 메인 스레드에서 (QTimer.singleShot 사용)
-            from PyQt6.QtCore import QTimer
-            QTimer.singleShot(0, self._post_reset_ui)
-        threading.Thread(target=_do_reset, daemon=True).start()
-        self.my_cash         = 1_000_000
-        self.my_portfolio    = {}
-        self.selected_stock_name = ""
-        self.recent_stocks   = []
-        self._refresh_recent_btns()
-
-        self.report_panel.clear()
-        self.curve.setData([])
+        # ── 1. UI 정리 (메인 스레드에서 먼저) ──────────────
         for d in self.active_dialogs[:]:
             try: d.close()
             except Exception: pass
         self.active_dialogs.clear()
-        self.sync_ui_with_engine()
+
+        if hasattr(self, 'news_window') and self.news_window:
+            try:
+                self.news_window.hts = None
+                self.news_window.close()
+            except Exception:
+                pass
+        self.news_window = None
+
+        self.my_cash             = 1_000_000
+        self.my_portfolio        = {}
+        self.selected_stock_name = ""
+        self.recent_stocks       = []
+        self._refresh_recent_btns()
+        self.report_panel.clear()
+        self.curve.setData([])
+
+        # ── 2. NEXT DAY 버튼 비활성화 (리셋 중 조작 방지) ──
+        self.btn_nxt.setEnabled(False)
+        self.btn_nxt.setText("⏳ 초기화 중...")
+
+        # ── 3. DB 리셋은 백그라운드, UI 갱신은 완료 후 메인 스레드 ──
+        def _do_reset():
+            self.game_service.reset_game(self.my_cash, self.my_portfolio)
+            QTimer.singleShot(0, self._post_reset_ui)
+
+        threading.Thread(target=_do_reset, daemon=True).start()
 
     # ─────────────────────────────────────────────
     # UI 동기화
@@ -1437,6 +1448,34 @@ class StockHTS(QMainWindow):
         top1_ratio = (top1_mc / total_mc * 100) if total_mc > 0 else 0
         buffett   = getattr(s, 'buffett_index', 0.0)
 
+        # ── 섹터별/산업별 종목 수 계산 ──────────────
+        from engine.constants import MAIN_INDUSTRIES, SECTOR_MAP as _SM
+        sec_cnt  = {"Growth": 0, "Value": 0, "Defensive": 0, "Cyclical": 0}
+        ind_cnt  = {ind: 0 for ind in MAIN_INDUSTRIES}
+        for st in stocks:
+            ind = st['meta'].get('ind', '')
+            sec = _SM.get(ind, 'Value')
+            if sec in sec_cnt:  sec_cnt[sec]  += 1
+            if ind in ind_cnt:  ind_cnt[ind]  += 1
+
+        SEC_KR = {"Growth": "성장주", "Value": "가치주", "Defensive": "방어주", "Cyclical": "테마주"}
+        sec_rows = "".join(
+            f"<span style='color:#888;'>{SEC_KR[k]}</span> "
+            f"<b style='color:#aaa;'>{sec_cnt[k]}개</b>&nbsp;&nbsp;"
+            for k in ["Growth", "Value", "Defensive", "Cyclical"]
+        )
+        IND_SHORT = {
+            "IT": "IT", "에너지": "에너지", "건강관리": "건강",
+            "산업재": "산업재", "소재": "소재", "자유소비재": "자유소비",
+            "커뮤니케이션": "커뮤", "금융": "금융", "필수소비재": "필수소비",
+            "유틸리티": "유틸", "부동산": "부동산",
+        }
+        ind_rows = "&nbsp; ".join(
+            f"<span style='color:#666;'>{short}</span>"
+            f"<b style='color:#888;'> {ind_cnt.get(full,0)}</b>"
+            for full, short in IND_SHORT.items()
+        )
+
         self.report_panel.setHtml(f"""
         <div style='font-family: Malgun Gothic; padding: 10px;'>
             <p style='font-size:28px; font-weight:bold; color:#00FF00;'>GRI 지수</p>
@@ -1461,6 +1500,12 @@ class StockHTS(QMainWindow):
             <span style='color:{b_color};'> {b_label}</span></p>
             <p><b style='color:#FFD700;'>현재 시나리오</b><br/>
             {s.current_scenario}</p>
+            <hr style='border:0.5px solid #222;'/>
+            <p><b style='color:#FFD700;'>섹터별 종목 수</b><br/>
+            <span style='font-size:12px;'>{sec_rows}</span></p>
+            <p><b style='color:#FFD700;'>산업별 종목 수</b><br/>
+            <span style='font-size:12px;'>{ind_rows}</span></p>
+            <hr style='border:0.5px solid #222;'/>
             <p><b style='color:#FFD700;'>거시경제</b><br/>
             금리: {s.macro['interest_rate']:.2f}%<br/>
             유가: ${s.macro['oil_price']:.1f}<br/>

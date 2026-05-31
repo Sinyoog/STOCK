@@ -14,7 +14,9 @@ MacroEngine: 경기선행지수 기반 사이클, 피드백 루프 3개, 섹터 
 import random
 import math
 from datetime import timedelta
-from .constants import SECTOR_MAP, TECH_PHASE, PHASE_SECTOR_COEFF, SOX_GROWTH_RATE
+from .constants import (SECTOR_MAP, TECH_PHASE, PHASE_SECTOR_COEFF, SOX_GROWTH_RATE,
+                         TECH_PRODUCTIVITY_SPILLOVER, TECH_LEVEL_UPGRADE,
+                         NORMAL_PER_BY_SECTOR)
 
 
 class MacroEngine:
@@ -178,51 +180,48 @@ class MacroEngine:
             upgrade_years = getattr(self.s, '_tech_upgrade_years', {1: 2000})
 
             if current_lv == 1:
+                lv_cfg = TECH_LEVEL_UPGRADE[1]
                 lv1_start = upgrade_years.get(1, 2000)
                 years_in_lv1 = cy - lv1_start
-                # LV1 진입 후 10년 이전 불가, GRI 1800 이상 필요
-                if years_in_lv1 < 10 or self.s.gri < 1800:
+
+                # 강제전환: 13년 이상이면 무조건
+                if years_in_lv1 >= lv_cfg["force_years"]:
+                    evolution_chance = 1.0
+                # 최소 조건: 10년 + GRI 1800
+                elif years_in_lv1 < lv_cfg["min_years"] or self.s.gri < lv_cfg["gri_required"]:
                     evolution_chance = 0.0
                 else:
-                    # 10~14년: 낮은 확률, 14년 이상: 점점 높아짐
-                    base = min(0.15, (years_in_lv1 - 10) * 0.025) / 100 / 252
-                    gri_mult = min(2.0, max(0.5, self.s.gri / 2500))
+                    # 10년 이후 점진적 확률 증가
+                    base = min(0.15, (years_in_lv1 - lv_cfg["min_years"]) * 0.03) / 100 / 252
+                    gri_mult = min(2.0, max(0.5, self.s.gri / lv_cfg["gri_required"]))
                     evolution_chance = base * gri_mult
-                    # 20년 이상이면 강제 전환
-                    if years_in_lv1 >= 20:
-                        evolution_chance = 1.0
 
             elif current_lv == 2:
+                lv_cfg = TECH_LEVEL_UPGRADE[2]
                 lv2_start = upgrade_years.get(2, cy)
                 years_in_lv2 = cy - lv2_start if lv2_start else 0
-                # LV2 진입 후 12년 이전 불가, GRI 7000 이상 필요
-                if years_in_lv2 < 12 or self.s.gri < 7000:
+
+                # 강제전환: 15년 이상
+                if years_in_lv2 >= lv_cfg["force_years"]:
+                    evolution_chance = 1.0
+                # 최소 조건: 8년 + GRI 7000
+                elif years_in_lv2 < lv_cfg["min_years"] or self.s.gri < lv_cfg["gri_required"]:
                     evolution_chance = 0.0
                 else:
-                    base = min(0.20, (years_in_lv2 - 12) * 0.02) / 100 / 252
-                    gri_mult = min(2.0, max(0.5, self.s.gri / 12000))
+                    base = min(0.20, (years_in_lv2 - lv_cfg["min_years"]) * 0.025) / 100 / 252
+                    gri_mult = min(2.0, max(0.5, self.s.gri / lv_cfg["gri_required"]))
                     evolution_chance = base * gri_mult
-                    if years_in_lv2 >= 25:
+                    if years_in_lv2 >= 12:
                         evolution_chance = max(evolution_chance, 0.15 / 252)
-                    if years_in_lv2 >= 30:
-                        evolution_chance = 1.0
 
             elif current_lv == 3:
-                lv3_start = upgrade_years.get(3, cy)
-                years_in_lv3 = cy - lv3_start if lv3_start else 0
-
-                # LV3→LV4: 진입 후 20년 경과부터 누적 확률
-                # 5판에 1판 도달 목표 (약 20% 확률)
-                # 20년 후부터 매일 0.003% 누적, 안정기 보너스 있음
-                if years_in_lv3 >= 20 and not is_depression:
-                    base_daily = 0.003 / 252
-                    # 안정기(버블 낮음) 보너스
-                    if self.s.bubble_index < 80:
-                        base_daily *= 1.5
-                    # 누적 (대공황 중엔 누적 중단)
-                    self.s.lv4_chance_accum = getattr(self.s, 'lv4_chance_accum', 0.0)
-                    self.s.lv4_chance_accum += base_daily
-                    evolution_chance = self.s.lv4_chance_accum
+                # LV3 → LV4: 복합 조건 기반 (dispatcher._check_lv4_conditions()에서 처리)
+                # 여기서는 복합 조건이 충족됐을 때만 evolution_chance 설정
+                lv4_days = getattr(self.s, '_lv4_condition_days', 0)
+                from .constants import LV4_UNLOCK_CONDITIONS
+                sustain = LV4_UNLOCK_CONDITIONS.get("sustain_days", 252)
+                if lv4_days >= sustain:
+                    evolution_chance = 1.0
                 else:
                     evolution_chance = 0.0
 
@@ -295,45 +294,40 @@ class MacroEngine:
         return self.s.max_tech_reached
 
     def _apply_tech_shock(self, new_lv: int):
-        """테크 전환 시 섹터별 efficiency 영구 조정 + GRI 즉각 부양"""
+        """
+        테크 전환 시 처리:
+        1. GRI 즉각 부양 (기대감 선반영 — 주가가 먼저 뜀)
+        2. efficiency는 즉시 올리지 않고 시차 큐에 적재
+           → lag_years 후 실제 실적에 반영 (버블 → 크래시 → 실적 확인 구조)
+        3. catalyst 산업(반도체 등)에만 즉시 소폭 효율 부스트 (수요 폭발 반영)
+        """
+        spillover = TECH_PRODUCTIVITY_SPILLOVER.get(new_lv, {})
+        catalyst  = spillover.get("catalyst", "IT")
+        lag_years = spillover.get("lag_years", 3)
+        수혜_map   = spillover.get("수혜", {})
+        피해_map   = spillover.get("피해", {})
+
         if new_lv == 2:
-            boost   = {"IT": 0.20, "커뮤니케이션": 0.15, "자유소비재": 0.10, "금융": 0.08}
-            penalty = {"에너지": -0.10}
-            gri_boost   = 0.10   # GRI +10%
+            gri_boost   = 0.10
             new_sentiment = 75
             ff_boost    = 30
         elif new_lv == 3:
-            boost   = {"건강관리": 0.25, "IT": 0.20, "산업재": 0.15, "소재": 0.10}
-            penalty = {"필수소비재": -0.05, "유틸리티": -0.10}
-            gri_boost   = 0.15   # GRI +15%
+            gri_boost   = 0.15
             new_sentiment = 80
             ff_boost    = 35
         elif new_lv == 4:
-            boost   = {"IT": 0.30, "건강관리": 0.25, "금융": 0.15}
-            penalty = {"에너지": -0.15, "부동산": -0.05}
-            gri_boost   = 0.20   # GRI +20%
+            gri_boost   = 0.20
             new_sentiment = 85
             ff_boost    = 40
         else:
             return
 
-        # ── efficiency 조정 ────────────────────────
-        for stock in self.s.stocks:
-            meta   = stock['meta']
-            ind    = meta.get('ind', '')
-            for key, delta in {**boost, **penalty}.items():
-                if key == ind:
-                    old_eff = meta.get('efficiency', 0.05)
-                    meta['efficiency'] = max(0.005, min(0.30, old_eff + old_eff * delta))
-                    break
-
-        # ── ★ GRI 즉각 부양 ───────────────────────
-        # 버블 상태에서는 효과 감소 (과열 방지)
+        # ── 1. GRI 즉각 부양 (기대감) ─────────────
         bubble = getattr(self.s, 'bubble_index', 0.0)
         if bubble >= 150:
-            gri_boost *= 0.3    # 버블 과열 시 30%만 적용
+            gri_boost *= 0.3
         elif bubble >= 100:
-            gri_boost *= 0.6    # 주의 구간 60%
+            gri_boost *= 0.6
 
         self.s.gri = self.s.gri * (1.0 + gri_boost)
         self.s.sentiment = max(getattr(self.s, 'sentiment', 50.0), float(new_sentiment))
@@ -342,12 +336,100 @@ class MacroEngine:
             getattr(self.s, 'foreign_flow_index', 0.0) + ff_boost
         )
 
+        # ── 2. catalyst 산업 즉시 소폭 효율 부스트 ─
+        # 반도체/IT 수요 폭발은 즉시 반영 (단, 소폭만 — 대부분은 시차 큐로)
+        for stock in self.s.stocks:
+            meta = stock['meta']
+            ind  = meta.get('ind', '')
+            if ind == catalyst:
+                old_eff = meta.get('efficiency', 0.05)
+                # 즉시 부스트: 파급 강도의 20%만 (나머지 80%는 시차 큐)
+                instant_boost = 수혜_map.get(catalyst, 0.5) * 0.20
+                meta['efficiency'] = max(0.005, min(0.30, old_eff * (1.0 + instant_boost)))
+            # 피해 산업도 즉시 소폭 반영
+            elif ind in 피해_map:
+                old_eff = meta.get('efficiency', 0.05)
+                instant_pen = 피해_map[ind] * 0.15
+                meta['efficiency'] = max(0.005, meta.get('efficiency', 0.05) * (1.0 - instant_pen))
+
+        # ── 3. 나머지 파급 효과는 시차 큐에 적재 ──
+        # lag_years 후에 economy.py _apply_productivity_lag()에서 실제 반영
+        expire_year = self.s.current_date.year + lag_years + 10  # 여유 기간
+        lag_queue = getattr(self.s, '_productivity_lag_queue', {})
+
+        for ind, strength in 수혜_map.items():
+            if ind == catalyst:
+                remaining_boost = strength * 0.80  # catalyst는 20% 즉시 반영했으므로
+            else:
+                remaining_boost = strength
+            lag_queue[ind] = {
+                "boost":          remaining_boost * 0.15,  # efficiency 최대 +15%
+                "expire_year":    expire_year,
+                "lag_remaining_years": lag_years,
+                "direction":      1,
+            }
+
+        for ind, strength in 피해_map.items():
+            existing = lag_queue.get(ind, {})
+            if existing.get("direction", 1) == 1:  # 수혜와 피해가 겹치면 수혜 우선
+                continue
+            lag_queue[ind] = {
+                "boost":          -strength * 0.10,
+                "expire_year":    expire_year,
+                "lag_remaining_years": lag_years,
+                "direction":      -1,
+            }
+
+        self.s._productivity_lag_queue = lag_queue
+
         lv_name = {2: "모바일·클라우드", 3: "AI·양자", 4: "기술 특이점"}.get(new_lv, "")
         self.s.daily_news.append(
             f"📊 [테크 충격] {lv_name} 혁명 — "
             f"GRI +{gri_boost*100:.0f}% 즉각 상승! "
-            f"수혜 섹터 효율 상승, 구시대 산업 타격"
+            f"핵심 산업({catalyst}) 즉시 수혜, 전 산업 파급은 {lag_years}년 후 반영"
         )
+
+    def _apply_productivity_lag(self):
+        """
+        매년 1월 시차 큐 감소 처리.
+        lag_remaining_years가 0이 되면 해당 산업 전 종목에 efficiency 반영.
+        """
+        cur_year = self.s.current_date.year
+        if self.s.current_date.month != 1 or self.s.current_date.day > 7:
+            return
+
+        lag_queue = getattr(self.s, '_productivity_lag_queue', {})
+        to_apply  = []
+        to_remove = []
+
+        for ind, info in list(lag_queue.items()):
+            if cur_year > info.get("expire_year", 9999):
+                to_remove.append(ind)
+                continue
+            lag_queue[ind]["lag_remaining_years"] -= 1
+            if lag_queue[ind]["lag_remaining_years"] <= 0:
+                to_apply.append((ind, info["boost"]))
+                to_remove.append(ind)
+
+        # 실제 efficiency 반영
+        for ind, boost in to_apply:
+            affected = [s for s in self.s.stocks if s['meta'].get('ind') == ind]
+            for stock in affected:
+                meta    = stock['meta']
+                old_eff = meta.get('efficiency', 0.05)
+                new_eff = max(0.005, min(0.30, old_eff * (1.0 + boost)))
+                meta['efficiency'] = new_eff
+
+            direction = "수혜" if boost > 0 else "피해"
+            if not self.s.silent_mode and affected:
+                self.s.daily_news.append(
+                    f"⚙️ [생산성 파급] {ind} 산업 기술 시차 반영 — "
+                    f"efficiency {direction} ({boost*100:+.1f}%)"
+                )
+
+        for ind in to_remove:
+            lag_queue.pop(ind, None)
+        self.s._productivity_lag_queue = lag_queue
 
     # ─────────────────────────────────────────────
     # 경기선행지수 계산
@@ -436,6 +518,9 @@ class MacroEngine:
         if len(hist) > 20:
             hist.pop(0)
         self.s._gri_history_20 = hist
+
+        # ── 생산성 파급 시차 처리 (매년 1월) ────────
+        self._apply_productivity_lag()
 
         # ── 선행지수 & 사이클 ─────────────────────
         is_depression = "대공황" in scenario and "극복" not in scenario

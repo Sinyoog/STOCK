@@ -279,6 +279,7 @@ class EarningsDialog(QDialog):
         super().__init__(parent)
         self.name    = name
         self.gs      = game_service
+        self._mode   = 'cur'   # ★ 현재 모드 저장: 'cur' / 'all' / 'year'
         self.setWindowTitle(f"🔎 [실적 상세] {name}")
         self.resize(700, 800)
         self.setStyleSheet(HTS_STYLE)
@@ -360,6 +361,7 @@ class EarningsDialog(QDialog):
         return html + "</table><br/>"
 
     def load_year(self):
+        self._mode = 'year'   # ★ 모드 저장
         y = self.year_in.text().strip()
         h = self.gs.get_earnings_history(self.name)
         if y in h:
@@ -369,17 +371,33 @@ class EarningsDialog(QDialog):
             _sb.setValue(_pos)
 
     def load_cur(self):
+        self._mode = 'cur'    # ★ 모드 저장
         y = str(self.gs.s.current_date.year)
         self.year_in.setText(y)
-        self.load_year()
+        h = self.gs.get_earnings_history(self.name)
+        if y in h:
+            _sb = self.report.verticalScrollBar()
+            _pos = _sb.value()
+            self.report.setHtml(self._make_table_html(y, h[y]))
+            _sb.setValue(_pos)
 
     def load_all(self):
+        self._mode = 'all'    # ★ 모드 저장
         h   = self.gs.get_earnings_history(self.name)
         html = "".join(self._make_table_html(y, h[y]) for y in sorted(h.keys()))
         _sb = self.report.verticalScrollBar()
         _pos = _sb.value()
         self.report.setHtml(html)
         _sb.setValue(_pos)
+
+    def refresh(self):
+        """★ NEXT DAY 후 현재 모드 그대로 갱신"""
+        if self._mode == 'all':
+            self.load_all()
+        elif self._mode == 'year':
+            self.load_year()  # year_in에 저장된 연도 그대로 유지
+        else:
+            self.load_cur()
 
 
 # ─────────────────────────────────────────────
