@@ -26,7 +26,7 @@ from .dialogs import (
 )
 from .group_view import GroupInfoDialog
 from .news_view  import NewsWindow
-from engine.constants import SECTOR_MAP
+from engine.constants import SECTOR_MAP, TECH_PHASE, MAIN_INDUSTRIES, EXPORT_SANCTION_TYPES
 
 
 def _get_tick(price: int) -> int:
@@ -103,7 +103,6 @@ def _build_event_html(s) -> str:
     # 수출 규제
     sanctions = getattr(s, 'export_sanctions', {})
     for sid, state in sanctions.items():
-        from engine.constants import EXPORT_SANCTION_TYPES
         s_def = EXPORT_SANCTION_TYPES.get(sid, {})
         phase = state.get('phase', '')
         timer = state.get('timer', 0)
@@ -858,7 +857,6 @@ class StockHTS(QMainWindow):
         }
         # 산업별 수익률 — 시가총액 가중 평균
         # {ind: [가중합, 시총합]}
-        from engine.constants import MAIN_INDUSTRIES
         industry_rate = {ind: [0.0, 0.0] for ind in MAIN_INDUSTRIES}
         # 섹터별도 시총 가중 평균으로
         sector_rate = {
@@ -1142,7 +1140,6 @@ class StockHTS(QMainWindow):
         # 페이즈 표시 (1A/1B/2A 등 + 페이즈 이름)
         try:
             phase = self.game_service.eco.get_current_phase()
-            from engine.constants import TECH_PHASE
             lv = s.max_tech_reached
             phase_name = next(
                 (p["name"] for p in TECH_PHASE.get(lv, []) if p["id"] == phase),
@@ -1577,7 +1574,7 @@ class StockHTS(QMainWindow):
         buffett   = getattr(s, 'buffett_index', 0.0)
 
         # ── 섹터별/산업별 종목 수 계산 ──────────────
-        from engine.constants import MAIN_INDUSTRIES, SECTOR_MAP as _SM
+        _SM = SECTOR_MAP
         sec_cnt  = {"Growth": 0, "Value": 0, "Defensive": 0, "Cyclical": 0}
         ind_cnt  = {ind: 0 for ind in MAIN_INDUSTRIES}
         for st in stocks:

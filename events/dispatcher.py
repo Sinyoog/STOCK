@@ -75,7 +75,7 @@ class EventDispatcher:
             self.mkt.handle_group_expansion(silent)
             # ★ update_macro_logic 전에 전일 값 보존 — UI 등락률 표시 전용
             # (_prev_macro_snapshot은 economy.py 내부에서 덮어쓰므로 별도 키 사용)
-            self.s._ui_prev_macro = {k: v for k, v in self.s.macro.items()}
+            self.s._ui_prev_macro = dict(self.s.macro)
             self.s._ui_prev_macro["buffett_index"] = getattr(self.s, 'buffett_index', 0.0)
             self.eco.update_macro_logic()
             # ★ 6순위: 공급망 패널티 적용
@@ -1122,7 +1122,7 @@ class EventDispatcher:
             # PER — 최근 1년치만 빠르게 합산
             hist = eh.get(name)
             if hist:
-                recent_yr = sorted(hist.keys())[-1]
+                recent_yr = max(hist.keys())
                 annual_ni = sum(
                     q.get('net_income', 0)
                     for q in hist[recent_yr].values()

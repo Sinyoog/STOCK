@@ -13,6 +13,7 @@ StockMarket: 주가 변동, 상장폐지, 그룹 확장, 신규 상장, 자사�
 8. 신용등급 갱신 - HP 기반 매일 재산정
 """
 import random
+from collections import defaultdict
 import math
 from datetime import datetime, timedelta
 from .constants import SECTOR_MAP, MAIN_INDUSTRIES, INDUSTRY_LEVELS
@@ -112,11 +113,11 @@ class StockMarket:
         self._update_industry_competition()
 
         # ★ 산업별 평균 등락률 사전 계산 — _calc_cluster_adj O(n²) → O(n) 최적화
-        _ind_rates: dict = {}
+        _ind_rates: defaultdict = defaultdict(list)
         for _s in self.s.stocks:
             _ind = _s['meta'].get('ind', '')
             if _ind:
-                _ind_rates.setdefault(_ind, []).append(_s.get('rate', 0.0))
+                _ind_rates[_ind].append(_s.get('rate', 0.0))
         _ind_avg_rate: dict = {
             k: sum(v) / len(v) for k, v in _ind_rates.items()
         }
@@ -132,21 +133,18 @@ class StockMarket:
 
         # ★ 테마 모멘텀 — 루프 전 갱신 (elapsed +1, 만료 제거)
         # 루프 밖에서 1회만 갱신해야 함 (종목별로 중복 갱신 방지)
-        _themes_to_remove = []
         for _t in self.s.active_themes:
             _t['elapsed'] += 1
-            if _t['elapsed'] >= _t['duration']:
-                _themes_to_remove.append(_t)
-                # bull 테마 종료 시 쿨다운 기록
-                if _t['type'] == 'bull':
-                    self.s._theme_cooldown[_t['ind']] = cur_date.year
-        for _t in _themes_to_remove:
-            self.s.active_themes.remove(_t)
+            if _t['elapsed'] >= _t['duration'] and _t['type'] == 'bull':
+                self.s._theme_cooldown[_t['ind']] = cur_date.year
+        self.s.active_themes = [
+            _t for _t in self.s.active_themes
+            if _t['elapsed'] < _t['duration']
+        ]
 
         # 테마 강도 계산 함수 (루프 안에서 재사용)
         def _calc_theme_intensity(theme: dict) -> float:
             """테마 진행 단계에 따라 강도 반환 (사인 곡선 기반)"""
-            import math
             ratio = theme['elapsed'] / max(1, theme['duration'])
             # 초기 30% 상승, 중기 40% 피크 유지, 후기 30% 하락
             if ratio < 0.30:

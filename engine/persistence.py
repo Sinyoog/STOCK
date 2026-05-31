@@ -13,6 +13,7 @@ from datetime import datetime
 class SaveManager:
     def __init__(self, state):
         self.s    = state
+        self._db_lock = __import__('threading').Lock()
         self.conn = sqlite3.connect("stock_data.db", check_same_thread=False)
         # WAL 모드: commit 속도 대폭 개선 + 읽기/쓰기 동시성
         self.conn.execute("PRAGMA journal_mode=WAL")
@@ -49,6 +50,15 @@ class SaveManager:
                 'meta':       slim_meta,
             })
         return result
+
+
+    def _is_conn_open(self) -> bool:
+        """DB 연결이 열려있는지 안전하게 확인"""
+        try:
+            self.conn.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
 
     def close(self):
         """게임 종료 시 명시적 DB 닫기 — 종료 딜레이 방지"""
@@ -294,6 +304,7 @@ class SaveManager:
         """[(date_str, name, f, i, r), ...] 일괄 INSERT (commit 없음 — flush_daily_db 에서 일괄 커밋)"""
         if not records:
             return
+        if not self._is_conn_open(): return
         try:
             safe = [(d, n, int(f), int(i), int(r)) for d, n, f, i, r in records]
             self.conn.executemany(
@@ -309,6 +320,7 @@ class SaveManager:
         days: 최대 조회 일수 (기본 1260 = 5년치 거래일)
         since_date: 이 날짜 이후만 조회 (상폐 역사관용 — 상폐일 기준 5년 전)
         """
+        if not self._is_conn_open(): return
         try:
             cur = self.conn.cursor()
             if since_date:
@@ -338,6 +350,7 @@ class SaveManager:
 
     def insert_gri_record(self, date_str: str, gri: float, bubble_index: float = 0.0):
         """GRI 일별 데이터 저장 (commit 없음 — flush_daily_db 에서 일괄 커밋)"""
+        if not self._is_conn_open(): return
         try:
             self.conn.execute(
                 "INSERT OR REPLACE INTO gri_history VALUES (?, ?, ?)",
@@ -348,6 +361,7 @@ class SaveManager:
 
     def insert_macro_record(self, date_str: str, macro: dict, buffett_index: float = 0.0):
         """거시경제 지표 일별 저장 (commit 없음 — flush_daily_db 에서 일괄 커밋)"""
+        if not self._is_conn_open(): return
         try:
             self.conn.execute(
                 """INSERT OR REPLACE INTO macro_history
@@ -487,10 +501,11 @@ class SaveManager:
 
     def flush_daily_db(self):
         """하루치 INSERT를 모두 모은 뒤 한 번만 커밋 — next_day 끝에 1회 호출"""
-        try:
-            self.conn.commit()
-        except Exception as e:
-            print(f"❌ DB flush 오류: {e}")
+        with self._db_lock:
+            try:
+                self.conn.commit()
+            except Exception as e:
+                print(f"❌ DB flush 오류: {e}")
 
     def get_gri_history(self, days: int = 0) -> list:
         """GRI 히스토리 조회. days=0이면 전체"""
@@ -512,6 +527,7 @@ class SaveManager:
 
     def insert_stock_records(self, records: list):
         """[(date_str, name, price, cap), …] 일괄 INSERT"""
+        if not self._is_conn_open(): return
         try:
             # SQLite REAL은 float64 — 값 float 변환으로 오버플로우 방지
             safe = [(d, n, float(p), float(c)) for d, n, p, c in records]
@@ -659,29 +675,29 @@ class SaveManager:
 
     def clear_all_history(self):
         """DB 전체 초기화 — DB 파일 자체 삭제 후 재생성 (가장 빠르고 완전한 초기화)"""
-        import os
+        import os, sqlite3
         db_file = "stock_data.db"
-        try:
-            # 연결 먼저 닫기
+        with self._db_lock:
             try:
-                self.conn.close()
-            except Exception:
-                pass
-            # DB 파일 + WAL 부산물 삭제
-            for ext in ["", "-shm", "-wal"]:
-                path = db_file + ext
-                if os.path.exists(path):
-                    os.remove(path)
-            # 새 연결 + 재생성
-            import sqlite3
-            self.conn = sqlite3.connect(db_file, check_same_thread=False)
-            self.conn.execute("PRAGMA journal_mode=WAL")
-            self.conn.execute("PRAGMA synchronous=NORMAL")
-            self._create_db()
-            # ★ 캐시 초기화 (초기화 후 새 게임 시작 시 중복 방지)
-            self._scenario_log_cache = None
-        except Exception as e:
-            print(f"❌ DB 초기화 중 오류: {e}")
+                # 연결 먼저 닫기
+                try:
+                    self.conn.close()
+                except Exception:
+                    pass
+                # DB 파일 + WAL 부산물 삭제
+                for ext in ["", "-shm", "-wal"]:
+                    path = db_file + ext
+                    if os.path.exists(path):
+                        os.remove(path)
+                # 새 연결 + 재생성
+                self.conn = sqlite3.connect(db_file, check_same_thread=False)
+                self.conn.execute("PRAGMA journal_mode=WAL")
+                self.conn.execute("PRAGMA synchronous=NORMAL")
+                self._create_db()
+                # ★ 캐시 초기화 (초기화 후 새 게임 시작 시 중복 방지)
+                self._scenario_log_cache = None
+            except Exception as e:
+                print(f"❌ DB 초기화 중 오류: {e}")
 
     # ─────────────────────────────────────────────
     # 게임 저장
@@ -979,6 +995,7 @@ class SaveManager:
     def update_scenario_log_daily(self, gri: float):
         """매일 최신 시나리오 행의 고점/저점/종료GRI/지속일수 업데이트
         ★ commit 없음 — flush_daily_db()에서 일괄 처리"""
+        if not self._is_conn_open(): return
         try:
             # ★ 메모리 캐시로 SELECT 최소화
             # _scenario_log_cache: (id, gri_high, gri_low) 유지
