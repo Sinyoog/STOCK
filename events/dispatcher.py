@@ -341,8 +341,10 @@ class EventDispatcher:
         is_preview_month = cur_month in [2, 5, 8, 11]
 
         # 심사일: 해당 분기 월의 1~3일 중 첫 번째 평일
+        last_exam       = getattr(self.s, '_last_tier_exam_yearmonth', None)
+        this_quarter    = f'{cur_date.year}_{cur_month}'
         is_exam_day    = is_exam_month and cur_day <= 3 and weekday <= 4 and \
-                         not getattr(self.s, f'_tier_exam_done_{cur_month}_{cur_date.year}', False)
+                         last_exam != this_quarter
         is_preview_day = is_preview_month and cur_day == 24
 
         # ── D-7 심사 예고 (프리미엄 전용) ───────────────────────
@@ -364,8 +366,8 @@ class EventDispatcher:
         # ── D-0 심사 확정: 비율 기반 전체 재배정 ────────────────
         if is_exam_day:
             self._execute_full_tier_rebalance(silent)
-            # 이번 분기 심사 완료 플래그 (월이 바뀌면 자동 소멸)
-            setattr(self.s, f'_tier_exam_done_{cur_month}_{cur_date.year}', True)
+            # 이번 분기 심사 완료 기록 (세이브/로드 후에도 유지됨)
+            self.s._last_tier_exam_yearmonth = f'{cur_date.year}_{cur_month}'
 
         # ── 즉시강등: 현저한 이탈 (심사일 무관, 매일) ───────────
         self._check_immediate_demotion(silent)

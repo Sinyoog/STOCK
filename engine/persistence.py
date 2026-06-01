@@ -776,6 +776,8 @@ class SaveManager:
                     # ★ 테마 모멘텀
                     "active_themes":         getattr(self.s, 'active_themes', []),
                     "theme_cooldown":        getattr(self.s, '_theme_cooldown', {}),
+                    # ★ 티어 심사 마지막 완료 분기 (예: "2003_6")
+                    "last_tier_exam_yearmonth": getattr(self.s, '_last_tier_exam_yearmonth', None),
                     # daily_volume: SQLite investor_volume으로 관리 — JSON 제외
                     "pending_delist":        {
                         k: {"date": v["date"].strftime("%Y-%m-%d") if hasattr(v.get("date"), "strftime") else str(v.get("date", "")), "reason": v.get("reason", "")}
@@ -877,6 +879,8 @@ class SaveManager:
             # ★ 테마 모멘텀 복원
             self.s.active_themes    = eng.get("active_themes", [])
             self.s._theme_cooldown  = eng.get("theme_cooldown", {})
+            # ★ 티어 심사 마지막 완료 분기 복원
+            self.s._last_tier_exam_yearmonth = eng.get("last_tier_exam_yearmonth", None)
 
             # ★ macro 신규 원자재 필드 — 구버전 세이브 호환
             macro = self.s.macro
