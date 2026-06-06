@@ -404,6 +404,15 @@ class EarningsDialog(QDialog):
 # MyInvestmentDialog
 # ─────────────────────────────────────────────
 class MyInvestmentDialog(QDialog):
+    # 컬럼 인덱스 상수
+    COL_NAME    = 0
+    COL_SHARES  = 1
+    COL_AVG     = 2
+    COL_CUR     = 3
+    COL_BUY     = 4
+    COL_EVAL    = 5
+    COL_RATE    = 6
+
     def __init__(self, parent):
         super().__init__(parent)
         self.hts = parent
@@ -411,25 +420,158 @@ class MyInvestmentDialog(QDialog):
         self.resize(1000, 600)
         self.setStyleSheet(HTS_STYLE)
 
+        # 정렬 상태: (컬럼 인덱스, 오름차순여부) / None = 매수순서(기본)
+        self._sort_col = None
+        self._sort_asc = True
+        # 매수 순서 보존용 리스트 [(name, data), ...]
+        self._buy_order: list = []
+
         layout = QVBoxLayout()
         self.summary_label = QLabel()
         self.summary_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.summary_label.setStyleSheet("background-color: #1a1a1a; border: 1px solid #333; padding: 10px; border-radius: 5px; margin-bottom: 5px;")
+        self.summary_label.setStyleSheet(
+            "background-color: #1a1a1a; border: 1px solid #333; "
+            "padding: 10px; border-radius: 5px; margin-bottom: 5px;"
+        )
         layout.addWidget(self.summary_label)
 
         self.label = QLabel("📊 실시간 보유 주식 상세 현황")
         self.label.setStyleSheet("font-size: 14px; font-weight: bold; color: #2ECC71;")
         layout.addWidget(self.label)
 
+        # ── 헤더 + 정렬 버튼 행 ─────────────────────────────────────
+        COLS = ["종목명", "보유수량", "평균단가", "현재가", "매수금액", "평가금액", "수익률"]
+        self._sort_btns: list = []
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(2)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        btn_style = (
+            "QPushButton { background:#1a1a1a; color:#2ECC71; border:1px solid #333; "
+            "padding:3px 6px; font-size:11px; border-radius:3px; }"
+            "QPushButton:hover { background:#2a2a2a; }"
+            "QPushButton:checked { background:#003300; border:1px solid #2ECC71; font-weight:bold; }"
+        )
+        for idx, col_name in enumerate(COLS):
+            btn = QPushButton(f"{col_name} ↕")
+            btn.setCheckable(True)
+            btn.setStyleSheet(btn_style)
+            btn.setProperty("col_idx", idx)
+            btn.clicked.connect(self._on_sort_btn)
+            self._sort_btns.append(btn)
+            header_layout.addWidget(btn)
+        layout.addLayout(header_layout)
+
+        # ── 테이블 ──────────────────────────────────────────────────
         self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["종목명", "보유수량", "평균단가", "현재가", "매수금액", "평가금액", "수익률"])
-        self.table.setStyleSheet("QTableWidget { background-color: #000; gridline-color: #222; } QHeaderView::section { background-color: #222; color: #2ECC71; }")
+        self.table.setHorizontalHeaderLabels(COLS)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table.setStyleSheet(
+            "QTableWidget { background-color: #000; gridline-color: #222; }"
+            "QHeaderView::section { background-color: #111; color: #555; font-size:11px; }"
+            "QTableWidget::item:selected { background-color: #003300; }"
+        )
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setVisible(True)
+        # ★ 편집 불가
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # ★ 행 전체 선택
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.cellClicked.connect(self._go_to_stock)
+
         layout.addWidget(self.table)
         self.setLayout(layout)
         self.update_info()
 
+    # ── 정렬 버튼 클릭 ──────────────────────────────────────────────
+    def _on_sort_btn(self):
+        btn = self.sender()
+        col_idx = btn.property("col_idx")
+
+        # 같은 버튼 재클릭 → 방향 토글 / 다른 버튼 → 오름차순으로 시작
+        if self._sort_col == col_idx:
+            self._sort_asc = not self._sort_asc
+        else:
+            self._sort_col = col_idx
+            self._sort_asc = True
+
+        # 다른 버튼 uncheck
+        for b in self._sort_btns:
+            b.setChecked(b is btn)
+
+        # 버튼 텍스트 갱신
+        COLS = ["종목명", "보유수량", "평균단가", "현재가", "매수금액", "평가금액", "수익률"]
+        for i, b in enumerate(self._sort_btns):
+            if i == col_idx:
+                arrow = "▲" if self._sort_asc else "▼"
+                b.setText(f"{COLS[i]} {arrow}")
+            else:
+                b.setText(f"{COLS[i]} ↕")
+
+        self._render_table()
+
+    # ── 테이블 렌더 (정렬 적용) ──────────────────────────────────────
+    def _render_table(self):
+        def _qty(d): return d.get('shares', d.get('quantity', 0))
+
+        # 매수 순서 동기화 (새 종목 추가 반영)
+        port = self.hts.my_portfolio
+        existing_names = {n for n, _ in self._buy_order}
+        for name, data in port.items():
+            if name not in existing_names:
+                self._buy_order.append((name, data))
+        # 삭제된 종목 제거
+        self._buy_order = [(n, d) for n, d in self._buy_order if n in port]
+
+        # 표시 데이터 빌드
+        rows = []
+        for name, data in self._buy_order:
+            stock  = self.hts.game_service.get_stock_by_name(name)
+            cur_p  = float(stock['price']) if stock else 0.0
+            shares = _qty(data)
+            avg_p  = data['avg_price']
+            buy_t  = shares * avg_p
+            eval_t = shares * cur_p
+            rate   = ((cur_p / avg_p) - 1) * 100 if avg_p > 0 else 0.0
+            rows.append({
+                'name': name, 'shares': shares, 'avg_p': avg_p,
+                'cur_p': cur_p, 'buy_t': buy_t, 'eval_t': eval_t, 'rate': rate,
+            })
+
+        # 정렬
+        if self._sort_col is not None:
+            key_map = {
+                self.COL_NAME:   lambda r: r['name'],
+                self.COL_SHARES: lambda r: r['shares'],
+                self.COL_AVG:    lambda r: r['avg_p'],
+                self.COL_CUR:    lambda r: r['cur_p'],
+                self.COL_BUY:    lambda r: r['buy_t'],
+                self.COL_EVAL:   lambda r: r['eval_t'],
+                self.COL_RATE:   lambda r: r['rate'],
+            }
+            rows.sort(key=key_map[self._sort_col], reverse=not self._sort_asc)
+
+        # 테이블 채우기
+        self.table.setRowCount(len(rows))
+        for i, r in enumerate(rows):
+            texts = [
+                r['name'],
+                f"{r['shares']:,}주",
+                f"{int(r['avg_p']):,}원",
+                f"{int(r['cur_p']):,}원",
+                f"{int(r['buy_t']):,}원",
+                f"{int(r['eval_t']):,}원",
+                f"{r['rate']:+.2f}%",
+            ]
+            for j, text in enumerate(texts):
+                it = QTableWidgetItem(text)
+                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                if j == self.COL_RATE:
+                    it.setForeground(QColor(
+                        "#FF4444" if r['rate'] > 0 else ("#4444FF" if r['rate'] < 0 else "#e0e0e0")
+                    ))
+                self.table.setItem(i, j, it)
+
+    # ── 외부에서 호출하는 갱신 (summary + 테이블) ──────────────────
     def update_info(self, total_eval_value=None, total_profit=None, total_rate=None):
         def _qty(d): return d.get('shares', d.get('quantity', 0))
         if total_eval_value is None:
@@ -456,38 +598,44 @@ class MyInvestmentDialog(QDialog):
             f"<span style='color:#FFD700;font-size:24px;font-weight:bold;'>{int(self.hts.my_cash):,}원</span>"
             f"</div></td></tr></table></div>"
         )
+        self._render_table()
 
-        portfolio = self.hts.my_portfolio
-        self.table.setRowCount(len(portfolio))
-        for i, (name, data) in enumerate(portfolio.items()):
-            stock   = self.hts.game_service.get_stock_by_name(name)
-            cur_p   = float(stock['price']) if stock else 0
-            shares  = _qty(data)
-            avg_p   = data['avg_price']
-            buy_t   = shares * avg_p
-            eval_t  = shares * cur_p
-            rate    = ((cur_p / avg_p) - 1) * 100 if avg_p > 0 else 0.0
-
-            for j, text in enumerate([name, f"{shares:,}주", f"{int(avg_p):,}원",
-                                        f"{int(cur_p):,}원", f"{int(buy_t):,}원",
-                                        f"{int(eval_t):,}원", f"{rate:+.2f}%"]):
-                it = QTableWidgetItem(text)
-                it.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if j == 6:
-                    it.setForeground(QColor("#FF4444" if rate > 0 else ("#4444FF" if rate < 0 else "#e0e0e0")))
-                self.table.setItem(i, j, it)
-
+    # ── 행 클릭 → 메인화면 종목 이동 ───────────────────────────────
     def _go_to_stock(self, r, c):
-        stock_name = self.table.item(r, 0).text()
+        item = self.table.item(r, self.COL_NAME)
+        if not item:
+            return
+        stock_name = item.text()
+
+        # stock_table cellClicked 시그널 잠깐 차단 (포커스 이동 시 오버라이드 방지)
+        try:
+            self.hts.stock_table.cellClicked.disconnect(self.hts.on_stock_clicked)
+        except Exception:
+            pass
+
+        # 1) 메인 selected_stock_name 세팅 후 UI 갱신
         self.hts.selected_stock_name = stock_name
-        self.hts.search_bar.clear()
+        self.hts.sync_ui_with_engine()
+
+        # 2) 메인 stock_table에서 해당 종목 행 찾아 하이라이트 + 스크롤
         for i in range(self.hts.stock_table.rowCount()):
-            item = self.hts.stock_table.item(i, 0)
-            if item and item.text() == stock_name:
-                self.hts.stock_table.setCurrentCell(i, 0)
-                self.hts.on_stock_clicked(i, 0)
-                break
-        self.hts.scroll_to_selected()
+            tbl_item = self.hts.stock_table.item(i, 1)
+            if tbl_item:
+                raw = tbl_item.text()
+                for prefix in ["☠️ ", "🚨 ", "⚠️ ", "💀 "]:
+                    if raw.startswith(prefix):
+                        raw = raw[len(prefix):]
+                        break
+                if raw == stock_name:
+                    self.hts.stock_table.setCurrentCell(i, 1)
+                    self.hts.stock_table.scrollToItem(tbl_item)
+                    break
+
+        # 시그널 재연결
+        try:
+            self.hts.stock_table.cellClicked.connect(self.hts.on_stock_clicked)
+        except Exception:
+            pass
 
 
 # ─────────────────────────────────────────────

@@ -579,6 +579,13 @@ class StockHTS(QMainWindow):
         self.game_service.next_day(silent=True)
         self.my_portfolio = self.game_service.adjust_portfolio_for_splits(self.my_portfolio)
 
+        # ★ 상장폐지된 종목 포트폴리오에서 제거
+        delisted_names = {ds['meta']['c_name'] for ds in s.delisted_stocks}
+        removed = [n for n in list(self.my_portfolio.keys()) if n in delisted_names]
+        for name in removed:
+            del self.my_portfolio[name]
+            s.daily_news.append(f"💀 [포트폴리오] {name} 상장폐지로 보유 주식이 소모되었습니다.")
+
         # 구독 자동 연장 체크
         curr_now  = s.current_date.date()
         bill_date = s.next_billing_date
