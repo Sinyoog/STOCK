@@ -1355,7 +1355,7 @@ class InvestorVolumeDialog(QDialog):
             color = "#FF4444" if v > 0 else ("#4444FF" if v < 0 else "#888888")
             return f"<span style='color:{color};font-weight:bold;'>{sign}{v:,}</span>"
 
-        # ★ 액면가 + tick_size 가져오기
+        # ★ 액면가 + tick_size + 공매도잔고 + 거래량배율 가져오기
         stock_obj = next((s for s in self.gs.s.stocks
                          if s['meta'].get('c_name') == self.stock_name), None)
         par_val  = stock_obj['meta'].get('par_value', 500) if stock_obj else 500
@@ -1368,6 +1368,24 @@ class InvestorVolumeDialog(QDialog):
         elif cur_price >= 5_000:   tick = 10
         elif cur_price >= 2_000:   tick = 5
 
+        # ★ [신규] 공매도 잔고비율 표시
+        short_interest = 0.0
+        vol_ratio_str  = "-"
+        if stock_obj:
+            short_interest = stock_obj['meta'].get('short_interest', 0.0)
+            # 거래량 배율 계산
+            _vols = self.gs.s.daily_volume.get(self.stock_name, [])
+            if len(_vols) >= 5:
+                _recent = _vols[-20:]
+                _avg = sum(abs(_v.get('foreign', 0)) + abs(_v.get('inst', 0)) + abs(_v.get('retail', 0))
+                           for _v in _recent) / len(_recent)
+                _today_v = _vols[-1] if _vols else {}
+                _today = abs(_today_v.get('foreign', 0)) + abs(_today_v.get('inst', 0)) + abs(_today_v.get('retail', 0))
+                _vr = (_today / max(1, _avg)) if _avg > 0 else 1.0
+                vol_ratio_str = f"{_vr:.1f}x"
+
+        _si_color = "#FF4444" if short_interest > 0.05 else ("#FFD700" if short_interest > 0.02 else "#888888")
+
         self.summary_label.setText(
             f"1년 합산 &nbsp;|&nbsp; "
             f"외국인: {fmt(total_f)} &nbsp; "
@@ -1377,4 +1395,8 @@ class InvestorVolumeDialog(QDialog):
             f"<span style='color:#FFD700;'>액면가: {par_val:,}원</span> "
             f"&nbsp; "
             f"<span style='color:#AAAAAA;'>호가단위: {tick:,}원</span>"
+            f"&nbsp;&nbsp;|&nbsp;&nbsp; "
+            f"<span style='color:{_si_color};'>공매도잔고: {short_interest*100:.1f}%</span>"
+            f"&nbsp; "
+            f"<span style='color:#00FFAA;'>거래량배율: {vol_ratio_str}</span>"
         )

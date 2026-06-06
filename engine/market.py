@@ -64,39 +64,88 @@ class StockMarket:
         # ── 시장 공통 일별 drift ─────────────────
         if is_depression:
             market_drift = -0.0008
+        elif "대공황V" in self.s.current_scenario or "고난과 부활" in self.s.current_scenario:
+            _gri_ratio_v = self.s.gri / max(1.0, getattr(self.s, 'peak_gri', 1000.0))
+            if   _gri_ratio_v < 0.15:  market_drift = +0.0012
+            elif _gri_ratio_v < 0.30:  market_drift = +0.0010
+            elif _gri_ratio_v < 0.50:  market_drift = +0.0008
+            else:                       market_drift = +0.0006
         elif "극복" in self.s.current_scenario:
             market_drift = +0.0006
+        elif getattr(self.s, '_pandemic_liquidity_active', False):
+            # 팬데믹 유동성 장세: 각국 QE → 상승 drift
+            market_drift = +0.0008
+        elif '팬데믹' in self.s.current_scenario and '극복' not in self.s.current_scenario:
+            # ★ [수정] 팬데믹 진행 중: 음수 drift (버그: 이 분기가 없어서 확장 기본drift 적용됐음)
+            # 초반 충격 이후에도 계속 약한 하락 압력 유지 (유동성 장세 전환 전까지)
+            market_drift = random.uniform(-0.0008, -0.0002)
+        elif any(x in self.s.current_scenario for x in ['전쟁', '분쟁']) or                 getattr(self.s, 'war_event', {}).get('phase') == '진행중':
+            # ★ [수정] 전쟁/분쟁 중 drift 음수 (버그: 전쟁 4년 +226%)
+            # 현실: 전쟁 중 주식시장은 불확실성으로 하락 or 횡보
+            # 대규모전쟁: 강한 하락 / 지역분쟁: 약한 하락
+            _war_type = getattr(self.s, 'war_event', {}).get('type', '')
+            if '대규모' in _war_type or '전쟁' in self.s.current_scenario:
+                market_drift = random.uniform(-0.0010, -0.0003)
+            else:  # 지역분쟁
+                market_drift = random.uniform(-0.0004, +0.0001)
         else:
             market_drift = {
-                "확장": +0.00080,   # 0.00060 → 0.00080 (연 20%)
-                "정점": +0.00030,   # 0.00025 → 0.00030
+                "확장": +0.00048,   # +0.00080 → +0.00048 (연 ~12%, 기존 ~20%)
+                "정점": +0.00018,   # +0.00030 → +0.00018 (연 ~4.5%)
                 "수축": -0.00005,
-                "저점": +0.00015,   # 0.00010 → 0.00015
-            }.get(cycle, +0.00040)
+                "저점": +0.00009,   # +0.00015 → +0.00009
+            }.get(cycle, +0.00024)
 
         # ★ 초반 성장률 억제 — 연도 하드코딩 제거, 게임 시작 기준 상대 연수로
         _start_year = getattr(self.s, 'start_date', cur_date).year
         _years_elapsed = cur_date.year - _start_year
         if _years_elapsed <= 2:
             market_drift = min(market_drift, 0.00020)   # 상승 상한: 연 ~5%
-            market_drift = max(market_drift, -0.00010)  # 하락 하한: 연 ~-2.5% (완화)
+            market_drift = max(market_drift, -0.00020)  # ★ 하락 하한: 상승 상한과 대칭 (기존 -0.00010 → -0.00020)
         elif _years_elapsed <= 5:
             market_drift = min(market_drift, 0.00030)   # 상승 상한: 연 ~7.5%
-            market_drift = max(market_drift, -0.00015)  # 하락 하한: 연 ~-3.8% (완화)
+            market_drift = max(market_drift, -0.00030)  # ★ 하락 하한: 상승 상한과 대칭 (기존 -0.00015 → -0.00030)
+
+        # ★ [신규] 초반 소형/중형주 drift 하한 — GRI 희석 방지
+        # 소형/중형주가 초반에 쏟아지면서 -1%+/일씩 빠져 GRI를 끌어내리는 문제 해소
+        # 일별 하한: -0.5% (연 약 -12%). 이보다 더 빠지는 건 개별 악재가 있을 때만
+        _is_early_game = _years_elapsed <= 3
+        _early_cap_floor = -0.005  # 일별 -0.5% 하한 (2~3년 공통)
 
         prev_rate  = getattr(self.s, '_prev_macro_snapshot', {}).get('interest_rate', interest_rate)
         rate_delta = interest_rate - prev_rate
-        if   rate_delta >  0.1: market_drift -= 0.00020
-        elif rate_delta < -0.1: market_drift += 0.00020
+        # ★ [수정] 금리 변화 → GRI drift 연동 강화
+        # 현실: 금리 인하 → 할인율 하락 → PER 확장 → 주가 상승 (가장 강력한 연동)
+        # 기존: ±0.00020으로 너무 약했음 (금리 1%p 인하가 하루 +0.02%에 불과)
+        if   rate_delta >= 0.50:  market_drift -= 0.00080   # 빅스텝 인상(0.5%p): 강한 하락 압력
+        elif rate_delta >= 0.25:  market_drift -= 0.00040   # 일반 인상(0.25%p)
+        elif rate_delta >  0.10:  market_drift -= 0.00020
+        elif rate_delta <= -0.50: market_drift += 0.00100   # 빅스텝 인하: 강한 상승 압력 (유동성 장세)
+        elif rate_delta <= -0.25: market_drift += 0.00060   # 일반 인하(0.25%p)
+        elif rate_delta < -0.10:  market_drift += 0.00020
         market_drift += (sentiment - 50) / 50 * 0.00008
+
+        # ★ 버핏지수 과열 시 market_drift 하락 압력
+        # 현실: 버핏지수 높으면 외국인 이탈, 고평가 인식 → 시총(분자)이 내려옴
+        # GDP 가속이 아니라 주가 자체에 브레이크
+        _buffett_now = getattr(self.s, 'buffett_index', 0.0)
+        if _buffett_now > 150:
+            # 버핏 150%+: 연 최대 -3%p 하락 압력 (일별 -0.012%)
+            _buffett_penalty = -min(0.00012, (_buffett_now - 150) / 100 * 0.00005)
+            market_drift += _buffett_penalty
+        elif _buffett_now > 120:
+            # 버핏 120%+: 약한 압력
+            _buffett_penalty = -min(0.00004, (_buffett_now - 120) / 30 * 0.00002)
+            market_drift += _buffett_penalty
 
         # ★ 버블 drift 보정 — 상승 중일 때만 억제 적용
         # 이미 하락 중이면 건드리지 않음 (폭락 방지)
+        # [수정] elif 중복 버그 제거 (200, 150 구간이 두 번 정의됨 → 뒤 것은 dead code)
         if market_drift > 0:
-            if   bubble_index >= 280: market_drift *= -0.1   # -0.3 → -0.1 (급반전 완화)
-            elif bubble_index >= 250: market_drift *=  0.25  # -0.1 → 0.25 (성장 유지)
-            elif bubble_index >= 200: market_drift *=  0.55  # 0.3  → 0.55
-            elif bubble_index >= 150: market_drift *=  0.80  # 0.7  → 0.80
+            if   bubble_index >= 300: market_drift *= -0.15  # 극단 버블: 반전 압력
+            elif bubble_index >= 250: market_drift *=  0.05  # 버블 250+: 거의 0
+            elif bubble_index >= 200: market_drift *=  0.25  # 버블 200+: 약한 성장
+            elif bubble_index >= 150: market_drift *=  0.50  # 버블 150+: 절반 성장
 
         peak_gri    = getattr(self.s, 'peak_gri', self.s.gri)
         if self.s.gri > peak_gri: self.s.peak_gri = peak_gri = self.s.gri
@@ -108,6 +157,24 @@ class StockMarket:
             fear_mult = 1.3
 
         tech_upgrade_year = getattr(self.s, '_tech_upgrade_years', {1: 1999}).get(lv) or 1999
+
+        # ★ [신규] 종목별 거래량 비율(vol_ratio) 사전 계산 — 주가 영향용
+        # 현실: 평소 대비 거래량이 폭발한 날 → 방향성 강화, 수렴 느려짐
+        # vol_ratio = 오늘 거래량 / 최근 20일 평균거래량
+        _vol_ratio_map: dict = {}
+        for _s in self.s.stocks:
+            _n    = _s['meta']['c_name']
+            _vols = self.s.daily_volume.get(_n, [])
+            if len(_vols) >= 5:
+                # 최근 20일(최대) 총거래량(abs) 평균
+                _recent = _vols[-20:]
+                _avg = sum(abs(_v.get('foreign', 0)) + abs(_v.get('inst', 0)) + abs(_v.get('retail', 0))
+                           for _v in _recent) / len(_recent)
+                _today_v = _vols[-1] if _vols else {}
+                _today = abs(_today_v.get('foreign', 0)) + abs(_today_v.get('inst', 0)) + abs(_today_v.get('retail', 0))
+                _vol_ratio_map[_n] = (_today / max(1, _avg)) if _avg > 0 else 1.0
+            else:
+                _vol_ratio_map[_n] = 1.0
 
         # ★ 산업별 경쟁도 갱신
         self._update_industry_competition()
@@ -163,24 +230,38 @@ class StockMarket:
             ind       = meta.get('ind', '')
             sector    = SECTOR_MAP.get(ind, 'Value')
 
-            # ★ 수급 구조 기반 변동성 (tier hard cap 제거)
-            # 기관·외국인 비중 높을수록 변동성 낮아짐, 개인 비중 높을수록 커짐
+            # ★ [수정] 변동성 현실화 — 코스피 기준
+            # 코스피 대형주 일 변동성: 0.8~1.2%, 중형주: 1.2~2.0%, 소형주: 1.5~2.5%
+            # 기존 소형주 4.0%는 코스닥 단타 종목 수준 → 1.8%로 조정
             foreign_share = meta.get('foreign_share', 0.1)
             inst_share    = meta.get('inst_share',    0.15)
             retail_share  = meta.get('retail_share',  0.5)
 
             if   "대형" in tier: base_vol = 0.010; tier_mult = 0.8
-            elif "중형" in tier: base_vol = 0.015; tier_mult = 1.0
-            else:                base_vol = 0.020; tier_mult = 1.2
+            elif "중형" in tier: base_vol = 0.016; tier_mult = 1.0   # 기존 0.022 → 0.016
+            else:                base_vol = 0.020; tier_mult = 1.2   # 기존 0.040 → 0.020
 
-            vol_multiplier = 1.0 + (retail_share * 1.5) - (inst_share * 1.0) - (foreign_share * 0.8)
-            vol_multiplier = max(0.4, min(2.5, vol_multiplier))
+            vol_multiplier = 1.0 + (retail_share * 1.8) - (inst_share * 1.0) - (foreign_share * 0.8)
+            vol_multiplier = max(0.4, min(3.5, vol_multiplier))   # 상한 2.5 → 3.5
             vol = base_vol * vol_multiplier
 
             # ★ 섹터별 변동성 추가 조정
-            if sector == "Cyclical":       vol *= 1.4   # 테마주: 변동성 가장 큼
-            elif sector == "Growth":    vol *= 1.2   # 성장주: 변동성 큼
-            elif sector == "Defensive": vol *= 0.8   # 방어주: 변동성 작음
+            if sector == "Cyclical":    vol *= 1.5   # 1.4 → 1.5
+            elif sector == "Growth":    vol *= 1.3   # 1.2 → 1.3
+            elif sector == "Defensive": vol *= 0.8
+
+            # ★ [신규] 이벤트 기반 변동성 스파이크
+            # 현실: 어닝 서프라이즈, 테마 뉴스, 외국인 대량 매수 당일은 vol이 3~10배
+            _vol_spike = 1.0
+            if meta.get('_earnings_just_released'):
+                _vol_spike = 4.0 if "소형" in tier else (2.5 if "중형" in tier else 1.8)
+            elif meta.get('_theme_spike'):   # dispatcher에서 설정 가능한 플래그
+                _vol_spike = random.uniform(2.0, 5.0) if "소형" in tier else 1.5
+            # 외국인/기관 추세 5일 이상 → 모멘텀 장세, vol 소폭 상승
+            _f_days = self.s.investor_trends.get(name, {}).get('foreign', {}).get('days', 0)
+            if _f_days >= 5 and "대형" not in tier:
+                _vol_spike = max(_vol_spike, 1.5)
+            vol *= _vol_spike
 
             eff   = meta.get('efficiency', 0.05) * tier_mult
             # ★ 경기 사이클별 efficiency 변동
@@ -196,55 +277,63 @@ class StockMarket:
             # 섹터/테크 조정
             # ★ 섹터 기본 베이스 (레벨/사이클 무관 장기 추세)
             # cycle_sector는 사이클마다 등락하므로 이 베이스가 장기 우상향의 핵심
+            # [수정] Growth 베이스 7%→5%. 커뮤니케이션이 Defensive로 이동했으므로
+            #        Growth 섹터는 IT+건강관리만. Defensive 베이스는 유지.
             sector_adj = {
-                "Growth":    0.07 / 252,   # 5% → 7%
-                "Value":     0.05 / 252,
-                "Defensive": 0.040 / 252,
-                "Cyclical":  0.05 / 252,   # 4% → 5%
-            }.get(sector, 0.03 / 252)
+                "Growth":    0.030 / 252,   # 5% → 3%
+                "Value":     0.024 / 252,   # 4% → 2.4%
+                "Defensive": 0.018 / 252,   # 3% → 1.8%
+                "Cyclical":  0.030 / 252,   # 5% → 3%
+            }.get(sector, 0.018 / 252)
 
-            # ★ 레벨별 섹터 보너스 (LV가 높을수록 Growth 가속)
+            # ★ 산업별 추가 보정
+            if ind == "IT":
+                sector_adj += 0.012 / 252   # 2% → 1.2%
+            elif ind == "건강관리":
+                sector_adj += 0.006 / 252   # 1% → 0.6%
+
+            # ★ 레벨별 섹터 보너스
             if lv >= 4 and sector == "Growth":
-                sector_adj += 0.05 / 252   # LV4: +5%
+                sector_adj += 0.030 / 252   # 5% → 3%
             elif lv >= 3 and sector == "Growth":
-                sector_adj += 0.03 / 252   # LV3: +3%
+                sector_adj += 0.018 / 252   # 3% → 1.8%
             elif lv >= 2 and sector == "Growth":
-                sector_adj += 0.03 / 252   # LV2: +3% (기존과 동일)
+                sector_adj += 0.018 / 252   # 3% → 1.8%
             elif lv >= 2 and sector == "Cyclical":
-                sector_adj += 0.02 / 252
+                sector_adj += 0.012 / 252   # 2% → 1.2%
             if lv >= 3 and sector == "Value":
-                sector_adj -= 0.02 / 252
+                sector_adj -= 0.012 / 252   # 2% → 1.2%
 
             years_since_lv_up = cur_date.year - tech_upgrade_year
             if 0 <= years_since_lv_up <= 3:
-                if   sector == "Growth":    sector_adj += 0.04 / 252
-                elif sector == "Cyclical":  sector_adj += 0.03 / 252
-                elif sector == "Defensive": sector_adj += 0.01 / 252
+                if   sector == "Growth":    sector_adj += 0.024 / 252  # 4% → 2.4%
+                elif sector == "Cyclical":  sector_adj += 0.018 / 252  # 3% → 1.8%
+                elif sector == "Defensive": sector_adj += 0.006 / 252  # 1% → 0.6%
 
             # ★ PHASE_SECTOR_COEFF는 economy.py에서 이미 적용
             # market.py에서 중복 적용하지 않음
 
             cycle_sector = {
                 # ★ 확장기
-                ("확장", "Growth"):    +0.10 / 252,
-                ("확장", "Value"):     +0.06 / 252,
-                ("확장", "Defensive"): -0.03 / 252,
-                ("확장", "Cyclical"):  +0.07 / 252,
-                # ★ 정점기 — 완화 (시나리오 없는 자연 하락 방지)
-                ("정점", "Defensive"): +0.05 / 252,
-                ("정점", "Growth"):    -0.01 / 252,   # -0.03 → -0.01
-                ("정점", "Cyclical"):  -0.02 / 252,   # -0.05 → -0.02
-                ("정점", "Value"):     +0.02 / 252,
-                # ★ 수축기 — 완화 (시나리오 없는 폭락 방지)
-                ("수축", "Defensive"): +0.08 / 252,
-                ("수축", "Growth"):    -0.02 / 252,   # -0.04 → -0.02
-                ("수축", "Value"):     -0.004 / 252,  # -0.01 → -0.004
-                ("수축", "Cyclical"):  -0.03 / 252,   # -0.06 → -0.03
+                ("확장", "Growth"):    +0.060 / 252,   # 10% → 6%
+                ("확장", "Value"):     +0.036 / 252,   # 6% → 3.6%
+                ("확장", "Defensive"): -0.018 / 252,   # -3% → -1.8%
+                ("확장", "Cyclical"):  +0.042 / 252,   # 7% → 4.2%
+                # ★ 정점기
+                ("정점", "Defensive"): +0.030 / 252,   # 5% → 3%
+                ("정점", "Growth"):    -0.006 / 252,   # -1% → -0.6%
+                ("정점", "Cyclical"):  -0.012 / 252,   # -2% → -1.2%
+                ("정점", "Value"):     +0.012 / 252,   # 2% → 1.2%
+                # ★ 수축기
+                ("수축", "Defensive"): +0.048 / 252,   # 8% → 4.8%
+                ("수축", "Growth"):    -0.012 / 252,   # -2% → -1.2%
+                ("수축", "Value"):     -0.0024 / 252,
+                ("수축", "Cyclical"):  -0.018 / 252,   # -3% → -1.8%
                 # ★ 저점기
-                ("저점", "Value"):     +0.10 / 252,
-                ("저점", "Growth"):    +0.05 / 252,
-                ("저점", "Defensive"): +0.04 / 252,
-                ("저점", "Cyclical"):  +0.03 / 252,
+                ("저점", "Value"):     +0.060 / 252,   # 10% → 6%
+                ("저점", "Growth"):    +0.030 / 252,   # 5% → 3%
+                ("저점", "Defensive"): +0.024 / 252,   # 4% → 2.4%
+                ("저점", "Cyclical"):  +0.018 / 252,   # 3% → 1.8%
             }.get((cycle, sector), 0.0)
             sector_adj += cycle_sector
 
@@ -357,17 +446,20 @@ class StockMarket:
                 if _intensity <= 0:
                     continue
 
-                # 테마 방향별 일별 조정값
-                # base_effect: 연간 기준, /252로 일별 변환
-                # 대형주 bull: 연 최대 30%, 소형주 bull: 연 최대 150%
                 if _t['type'] == 'bull':
-                    _base = 0.30 * _tier_theme_mult  # 대형주 30%, 소형 105%
+                    _base = 0.30 * _tier_theme_mult
+                    # ★ [수정] 소형주 테마 adj 연간 상한
+                    # 기존: 소형주 0.30*3.5=1.05 (연 105%) → 비현실적
+                    # 수정: 소형주 연 50%, 중형주 연 35%, 대형주 연 20%
+                    _theme_annual_cap = {'대형주': 0.20, '중형주': 0.35, '소형주': 0.50}.get(tier, 0.35)
+                    _base = min(_base, _theme_annual_cap)
                     _theme_adj += _intensity * _base / 252
-                else:  # bear
+                else:
                     _base = 0.20 * _tier_theme_mult
+                    _theme_annual_cap = {'대형주': 0.15, '중형주': 0.25, '소형주': 0.40}.get(tier, 0.25)
+                    _base = min(_base, _theme_annual_cap)
                     _theme_adj -= _intensity * _base / 252
 
-                # vol 동적 상향 (테마 강도 * 체급 배율)
                 _theme_vol_mult = max(_theme_vol_mult,
                                       1.0 + _intensity * _tier_vol_boost)
 
@@ -420,14 +512,20 @@ class StockMarket:
 
                 eff_limit = per_limit * per_tolerance  # 실효 PER 한도
 
-                # ★ PER 패널티 — alpha /252 수정 후 균형 재설계
-                # Growth 균형점: ~50배 / Value 균형점: ~22배
-                if per > eff_limit * 2.5:
-                    val_penalty = -min(0.008, (per - eff_limit) / eff_limit * 0.003)
+                # ★ PER 패널티 — 현실화
+                # 실제 시장: 성장주 PER 100~200배도 수년 유지 가능 (테슬라, 카카오 등)
+                # 패널티는 장기적 수렴 압력이지 단기 폭락이면 안 됨
+                # 기존 최대 -5%/일은 PER 970배 종목을 연 -1260%로 만듦 → 비현실적
+                # 수정: 최대 -0.5%/일 (연 -70% 수준이 상한)
+                _per_tier_mult = {'대형주': 0.5, '중형주': 0.8, '소형주': 1.5}.get(tier, 0.8)
+                if per > eff_limit * 3.0:
+                    val_penalty = -min(0.005, (per - eff_limit) / eff_limit * 0.0008) * _per_tier_mult
+                elif per > eff_limit * 2.5:
+                    val_penalty = -min(0.003, (per - eff_limit) / eff_limit * 0.0005) * _per_tier_mult
                 elif per > eff_limit * 1.5:
-                    val_penalty = -min(0.004, (per - eff_limit) / eff_limit * 0.002)
+                    val_penalty = -min(0.0015, (per - eff_limit) / eff_limit * 0.0003) * _per_tier_mult
                 elif per > eff_limit:
-                    val_penalty = -min(0.002, (per - eff_limit) / eff_limit * 0.001)
+                    val_penalty = -min(0.0005, (per - eff_limit) / eff_limit * 0.0001) * _per_tier_mult
                 else:
                     val_penalty = 0.0
                 daily_return += val_penalty
@@ -508,6 +606,16 @@ class StockMarket:
             # 소형 테마주 하락 시 신용잔고 → 반대매매 → 추가 하락
             daily_return += self._calc_margin_call_adj(name, stock, tier, sector)
 
+            # ★ [신규] [6] 거래량→주가 피드백 adj
+            # 현실: 거래량이 평소 대비 클수록 방향성 강화
+            # 거래량 폭발 = 확신의 증거 → 그 방향으로 추가 모멘텀
+            daily_return += self._calc_volume_momentum_adj(name, daily_return, _vol_ratio_map)
+
+            # ★ [신규] [7] 공매도 adj
+            # 현실: short_interest 높은 종목 → 하락 압력 상시 존재
+            #        주가 급등 시 숏커버 → 추가 급등(쇼트스퀴즈)
+            daily_return += self._calc_short_selling_adj(name, meta, stock, tier, sector)
+
             # ★ 계절성 보정
             daily_return += self._get_seasonal_adj(cur_date, sector, tier)
 
@@ -518,22 +626,35 @@ class StockMarket:
                 daily_return -= 0.0003   # 신저가 하향 압력
 
             # ★ 전 종목 ±30% (현실 상한가/하한가)
-            # 대형주가 덜 움직이는 건 vol(수급 연동)이 낮아서 자연스럽게 결정됨
             cap = 0.30
+
+            # ★ [신규] 초반 소형/중형주 하락 하한 — GRI 희석 방지
+            # 게임 시작 3년 내 소형/중형주가 매일 -1%+ 빠져 GRI를 끌어내리는 문제 해소
+            # 일별 -1.5% 하한: 개별 악재 없이 구조적으로 빠지는 것만 차단 (자연 하위25% 수준)
+            if _is_early_game and ("소형" in tier or "중형" in tier):
+                daily_return = max(-0.015, daily_return)
 
             # ★ 서킷브레이커: GRI 하루 -5% 이상이면 당일 변동폭 절반
             if _circuit_breaker:
                 cap = 0.15
 
-            # ★ 확장기에는 하루 하락 하한선 적용 (무조건 하락 방지)
+            # ★ [수정] 확장기 하락 하한선: 소형주/이벤트 종목은 제외
+            # 기존 -5% 캡이 소형주 급락, 상한가 종목의 다음날 급락 등을 막았음
+            # 대형주 확장기에만 -8%로 완화 적용 (소형/중형은 자유롭게)
             if cycle == "확장" and not is_depression:
-                daily_return = max(-0.05, daily_return)
+                if "대형" in tier:
+                    daily_return = max(-0.08, daily_return)   # -0.05 → -0.08 (대형만)
+                # 중형/소형은 하락 제한 없음 → 상한가/하한가 자연 발생 가능
             daily_return = max(-cap, min(cap, daily_return))
 
             new_price = old_price * (1.0 + daily_return)
             new_price = max(10.0, new_price)
             if not math.isfinite(new_price): new_price = old_price
 
+            # ★ 개별 종목 시총 상한 제거
+            # 현실 주식시장에는 시총 하드캡이 없음
+            # 과열 제어는 PER 압력 / 버핏지수 패널티 / anchor 브레이크로 처리
+            _phase_now = getattr(self.s, '_last_processed_phase', '1A')
             # ★ assets 갱신: 주가 변화 소폭 반영 + 주가/초기주가 괴리 보정
             init_assets   = meta.get('initial_assets', meta['assets'])
             initial_price = meta.get('initial_price', old_price)
@@ -554,9 +675,10 @@ class StockMarket:
                     market_implied = new_price * stock['shares']
                     new_assets = min(new_assets, max(init_assets * 0.1, market_implied * 3.0))
 
+            # assets 상한: 초기값 30배 유지 (시총 연동 제거 — earnings 폭발 루프 방지)
             meta['assets'] = max(
-                init_assets * 0.1,       # 하한선: 초기값의 10%
-                min(init_assets * 30, new_assets)   # 상한선: 초기값의 30배 (100배 → 30배)
+                init_assets * 0.1,
+                min(init_assets * 30, new_assets)
             )
 
             # ★ efficiency 자연 회복 — 섹터×티어×페이즈별 상한 차등 적용
@@ -592,12 +714,13 @@ class StockMarket:
                 base_cap = _EFF_CAP.get((sector, tier), 0.12)
 
                 # ★ 버그 방지: 페이즈 승수 적용하되 절대 상한 설정
-                # Growth 대형주: 최대 0.25 * 3.5 = 0.875 → 너무 높음
-                # 절대 상한: Growth 0.60, Cyclical 0.45, Value 0.35, Defensive 0.25
+                # [수정] 절대 상한 하향: ROE 200% 같은 비현실적 수치 방지
+                # 현실 최고 수준 기업(애플, 엔비디아): ROE 50~100%
+                # efficiency 0.60은 ROE 수백 % 가능 → 0.30으로 제한
                 _ABS_CAP = {
-                    "Growth": 0.60, "Cyclical": 0.45,
-                    "Value": 0.35,  "Defensive": 0.25,
-                }.get(sector, 0.35)
+                    "Growth": 0.30, "Cyclical": 0.22,
+                    "Value": 0.18,  "Defensive": 0.14,
+                }.get(sector, 0.20)
 
                 tier_eff_cap = min(_ABS_CAP, base_cap * phase_mult)
 
@@ -633,157 +756,181 @@ class StockMarket:
             self._handle_survival_strategy(stock)
             self._update_shareholder_structure(stock, cycle, bubble_index, rate_delta)
 
-        # ── GRI 갱신 (시장 집중도 제한 포함) ───────
-        # total_w_cap은 메인 루프에서 이미 누적된 값 사용 (별도 sum comprehension 제거)
+        # ── 1위 집중도 패널티 — 주가에 직접 적용 ───────
+        # 현실: 삼성전자도 최대 25~30% / 42% 같은 극단적 집중은 현실에 없음
+        # 집중도 30% 초과 시 해당 종목 주가에 하락 압력 적용
+        if self.s.stocks:
+            _total_mc = sum(s['market_cap'] for s in self.s.stocks)
+            _top1 = max(self.s.stocks, key=lambda s: s['market_cap'])
+            _top1_ratio = _top1['market_cap'] / max(1, _total_mc)
+            if _top1_ratio > 0.30:
+                # 30% 초과분에 비례해서 주가 하락 압력
+                # 40%면 -0.1%/일, 50%면 -0.2%/일 수준
+                _penalty = min(0.003, (_top1_ratio - 0.30) * 0.01)
+                _old = _top1['price']
+                _top1['price'] = max(10, int(_old * (1.0 - _penalty)))
+                _top1['market_cap'] = _top1['price'] * _top1['shares']
+                # total_market_cap도 보정
+                total_market_cap -= (_old - _top1['price']) * _top1['shares']
+
+        # ── GRI 갱신 — 수정 기준시총 방식 (현실 코스피와 동일) ───────
+        # 공식: GRI = (현재 시총 / 수정 기준시총) × 1000
+        # 수정 기준시총: 신규상장/유상증자 시 기준시총도 같이 올려줌
+        #               → 순수 주가 상승분만 GRI에 반영
+        #               상폐 시: 기준시총에서 해당 종목 상폐 직전 시총 제거
+        # 이렇게 하면 상폐 잡주가 GRI를 깎아먹는 왜곡이 사라짐
         import math as _math
-        tier_weights = {"대형주": 3.0, "중형주": 1.5, "소형주": 0.2}
-        w_sum = 0.0; wr_sum = 0.0
-        total_w_cap = sum(
-            tier_weights.get(s['meta'].get('tier', '소형주'), 0.5) * s['market_cap']
-            for s in self.s.stocks
-        )
 
-        for stock in self.s.stocks:
-            r = stock.get('rate', 0.0)
-            if not _math.isfinite(r): continue
+        # 수정 기준시총 초기화 (게임 시작 시 최초 1회)
+        if not hasattr(self.s, '_adj_base_cap') or self.s._adj_base_cap <= 0:
+            self.s._adj_base_cap = float(self.s.initial_market_total_cap or total_market_cap or 1.0)
 
-            # ★ 신규 상장 30일 미만 종목 GRI 계산 제외
-            try:
-                ld = stock['meta'].get('listed_date_dt')
-                if not ld:
-                    ld = __import__('datetime').datetime.strptime(
-                        stock['meta']['listed_date'], '%Y-%m-%d')
-                if (cur_date - ld).days < 30:
-                    # 초기 종목(1999-12-31 상장)은 예외 — 이미 오래된 기업이므로 제한 불필요
-                    if ld.strftime('%Y-%m-%d') != '1999-12-31':
-                        continue
-            except Exception:
-                pass
+        # ★ 기준시총 현실 코스피 종목 수 차이 보정
+        # 현실 코스피: 940개 종목, 기준시총 연간 증가율 약 14%
+        # (신규상장+유상증자+주식수증가 합산, 실증 역산값)
+        # 게임: 최대 400개 → 실제 반영 비율 400/940 = 42.6%
+        # 나머지 57.4%는 기준시총에 가상으로 반영 (GRI 스케일 현실화)
+        # 주가/시총/버핏지수는 완전히 그대로, GRI 숫자만 조정됨
+        _real_market_growth_annual = 0.14          # 현실 기준시총 연간 증가율 (역산값)
+        _game_coverage   = min(1.0, len(self.s.stocks) / 940.0)
+        _missing_annual  = _real_market_growth_annual * (1.0 - _game_coverage)
+        _daily_base_adj  = (1.0 + _missing_annual) ** (1.0 / 252) - 1.0
+        self.s._adj_base_cap *= (1.0 + _daily_base_adj)
 
-            w = tier_weights.get(stock['meta'].get('tier', '소형주'), 0.2)
+        # 현재 GRI = 현재시총 / 수정기준시총 × 1000
+        _adj_base   = max(1.0, self.s._adj_base_cap)
+        raw_gri_cap = (total_market_cap / _adj_base) * 1000.0
 
-            # ★ 단일 종목 GRI 기여 상한 10%
-            if total_w_cap > 0:
-                contribution = w * stock['market_cap'] / total_w_cap
-                if contribution > 0.10:
-                    w *= (0.10 / contribution)
+        # GRI 하한
+        import math as _math
+        _floor_absolute = 50.0
+        _peak_for_floor = getattr(self.s, 'peak_gri', raw_gri_cap)
+        _is_dep_scenario = ('대공황' in self.s.current_scenario)
+        if _is_dep_scenario:
+            _floor_relative = _peak_for_floor * 0.40
+            _floor = max(_floor_absolute, _floor_relative)
+        else:
+            _floor = _floor_absolute
 
-            w_sum += w; wr_sum += w * r
-
-        weighted_avg_rate = (wr_sum / w_sum / 100.0) if w_sum > 0 else 0.0
-
-        # ★ 하락 상한을 상승 상한보다 작게 설정 (비대칭 보정 - 하락 방지)
-        up_cb   = 0.03 if is_depression else 0.02
-        down_cb = 0.05 if is_depression else (0.015 if cycle in ("수축", "저점") else 0.012)
-        weighted_avg_rate = max(-down_cb, min(up_cb, weighted_avg_rate))
-
-        years_elapsed = max(0, cur_date.year - 2000)
-        # ★ lv_target: GDP 누적치 연동 — 경기침체 누적 시 낮아지고 호황 지속 시 높아짐
-        # GDP 기준(2000년 600조) 대비 성장 비율을 0.7승으로 반영 (완전 연동 아님)
-        gdp_now       = getattr(self.s, 'gdp', 600_000_000_000_000.0)
-        gdp_base      = 600_000_000_000_000.0
-        gdp_ratio     = gdp_now / max(1.0, gdp_base)
-        gdp_factor    = (gdp_ratio ** 0.7)   # 0.7승: GDP 변화를 70% 반영
-
-        lv_base = {
-            # ★ 연 5.5% 복리 (현실 코스피 장기 평균 수준)
-            # 26년: 1000 * 1.055^26 = 4,000 수준 목표
-            1: 1000 * (1.055 ** years_elapsed),
-            2: 1000 * (1.055 ** 15) * (1.060 ** max(0, years_elapsed - 15)),
-            3: 1000 * (1.055 ** 15) * (1.060 ** 20) * (1.045 ** max(0, years_elapsed - 35)),
-            4: 1000 * (1.055 ** 15) * (1.060 ** 20) * (1.045 ** 25) * (1.035 ** max(0, years_elapsed - 60)),
-        }.get(lv, 1000.0)
-        lv_target = lv_base * gdp_factor
-
-        anchor = self.s.gri / max(1.0, lv_target)
-        # ★ anchor 브레이크 강화 — 목표 대비 과도한 상승 억제
-        if   anchor > 8.0: weighted_avg_rate -= 0.0060
-        elif anchor > 5.0: weighted_avg_rate -= 0.0035
-        elif anchor > 3.0: weighted_avg_rate -= 0.0015
-        elif anchor > 2.0: weighted_avg_rate -= 0.0008  # 2배 초과 시 브레이크
-        elif anchor > 1.5: weighted_avg_rate -= 0.0004  # 1.5배 초과 시 약한 브레이크
-        elif anchor > 1.2: weighted_avg_rate -= 0.0001
-        elif anchor < 0.3: weighted_avg_rate += 0.0025
-        elif anchor < 0.5: weighted_avg_rate += 0.0015
-        elif anchor < 0.7: weighted_avg_rate += 0.0010
-        elif anchor < 0.85: weighted_avg_rate += 0.0005
-        elif anchor < 1.0:  weighted_avg_rate += 0.0002
-
-        # ★ 초반 3년 추가 보정
-        if cur_date.year <= 2003 and anchor < 1.0:
-            weighted_avg_rate += 0.0010  # 0.0008 → 0.0010 강화
-
-        # ★ prev_gri는 GRI 갱신 전에 저장 (등락률 계산용)
         self.s.prev_gri = self.s.gri
+        self.s.gri = max(_floor, raw_gri_cap)
+        if not _math.isfinite(self.s.gri):
+            self.s.gri = self.s.prev_gri
 
-        raw_gri = self.s.gri * (1.0 + weighted_avg_rate)
-        if not _math.isfinite(raw_gri): raw_gri = self.s.gri
-        self.s.gri = max(100.0, raw_gri)
+        # peak_gri 갱신
+        peak_gri = getattr(self.s, 'peak_gri', self.s.gri)
+        if self.s.gri > peak_gri:
+            self.s.peak_gri = self.s.gri
 
-        # ★ 시나리오 드리프트 패널티 적용 (기간 분산 충격)
-        drift_penalty = getattr(self.s, '_scenario_drift_penalty', 0.0)
-        if drift_penalty != 0.0:
-            self.s.gri = max(100.0, self.s.gri * (1.0 + drift_penalty))
-            # 드리프트가 양수(충격 소멸 중)면 서서히 0으로 수렴
-            if drift_penalty < 0:
-                # 충격: 매일 적용 (dispatcher에서 설정한 일별값 그대로 사용)
-                pass
-            else:
-                # 회복 패널티: 사용 후 소폭 감소
-                self.s._scenario_drift_penalty = max(0.0, drift_penalty * 0.995)
+        # ★ 절대 경과일 카운터 갱신
+        self.s._total_days_elapsed = getattr(self.s, "_total_days_elapsed", 0) + 1
 
-        # ★ GDP 연간 성장 (매년 1월 1일) — 경기 사이클 연동
-        if cur_date.month == 1 and cur_date.day == 1:
-            # 기술 레벨별 기본 성장률 상향 (현실 한국 GDP 연 4~5% 수준)
-            lv_base_growth = {1: 0.065, 2: 0.075, 3: 0.050, 4: 0.030}.get(lv, 0.065)
+        # ★ 위기 후 저점 추적
+        _trough = getattr(self.s, "_gri_trough_after_crisis", self.s.gri)
+        if self.s.gri < _trough:
+            self.s._gri_trough_after_crisis = self.s.gri
 
-            # 경기 사이클별 보정 — 현실화 (저점 -4% → -1.5%로 완화)
-            cycle_gdp_mult = {
-                "확장": random.uniform(0.05, 0.08),    # 기존 4~6% → 5~8%
-                "정점": random.uniform(0.02, 0.04),    # 기존 2~3% → 2~4%
-                "수축": random.uniform(-0.005, 0.005), # 기존 -1~-0.5% → 거의 횡보
-                "저점": random.uniform(-0.015, -0.005),# 기존 -4~-2% → -0.5~-1.5%
-            }.get(cycle, lv_base_growth)
+        # ★ [수정] GDP 분기별 갱신 (매 분기 첫날) — 현실: GDP는 분기별 발표
+        # 한국 GDP 현실 기준:
+        #   확장기: +4~7% / 정점: +2~4% / 수축: -1~+2% / 저점: -3~+1%
+        #   대공황: -6~-12% / LV2: 성장률 상향 / LV3+: 점차 안정화
+        is_quarter_start = (cur_date.month in [1, 4, 7, 10]) and (cur_date.day == 1)
+        if is_quarter_start:
+            lv_base_growth = {1: 0.055, 2: 0.065, 3: 0.045, 4: 0.025}.get(lv, 0.055)
 
-            # 대공황: GDP 급격히 역성장
+            # ★ GDP 성장률 현실화 — 한국 실제 기준
+            # LV1(2000년대): 확장기 연 5~7% / LV2(2010년대): 연 4~6% / LV3+: 연 3~5%
+            # 정점: 연 2~4% / 수축: 연 -1~+2% / 저점: 연 -3~+1% / 대공황: 연 -6~-12%
+            _lv_gdp_bonus = {1: 0.000, 2: 0.003, 3: 0.005, 4: 0.004}.get(lv, 0.0)
             if is_depression:
-                cycle_gdp_mult = random.uniform(-0.10, -0.06)  # -6~-10%
+                q_growth = random.uniform(-0.030, -0.015)
+            else:
+                q_growth = {
+                    "확장": random.uniform(0.013, 0.018),   # 분기 +1.3~1.8% (연 +5~7%)
+                    "정점": random.uniform(0.005, 0.010),   # 분기 +0.5~1.0% (연 +2~4%)
+                    "수축": random.uniform(-0.003, 0.005),  # 분기 -0.3~+0.5%
+                    "저점": random.uniform(-0.008, 0.003),  # 분기 -0.8~+0.3%
+                }.get(cycle, lv_base_growth / 4)
+            q_growth += _lv_gdp_bonus
 
-            self.s.gdp = getattr(self.s, 'gdp', 600_000_000_000_000.0) * (1 + cycle_gdp_mult)
-            self.s.gdp_growth_rate = cycle_gdp_mult   # 뉴스 표시용
+            # ★ [신규] 호황/악재 시나리오 GDP 추가 보정
+            scenario = self.s.current_scenario
+            boom = getattr(self.s, 'boom_event', {})
+            if boom.get('phase') == '진행중':
+                btype = boom.get('type', '')
+                if btype in ('수출호황', '반도체슈퍼사이클'):
+                    q_growth += 0.005   # 수출호황 → GDP 추가 상승
+                elif btype in ('유동성장세', '정부부양'):
+                    q_growth += 0.003
+            if any(x in scenario for x in ['전쟁', '팬데믹', '스태그']):
+                q_growth -= 0.005
 
-            # GDP 성장률 뉴스 (교육 효과)
+            prev_gdp = getattr(self.s, 'gdp', 600_000_000_000_000.0)
+
+            # GDP 성장률 현실화 — 버핏지수 추격 가속 없음
+            # 현실: GDP는 실물경제 기준으로만 성장, 시총과 무관
+            # 버핏지수 정상화는 GDP가 올라가는 게 아니라 시총 drift 압력으로 처리
+            self.s.gdp = prev_gdp * (1 + q_growth)
+            self.s.gdp_growth_rate = q_growth * 4
+
             if not self.s.silent_mode:
-                gdp_pct = cycle_gdp_mult * 100
-                if gdp_pct < 0:
+                ann_pct = q_growth * 4 * 100
+                q_num   = {1: 'Q4', 4: 'Q1', 7: 'Q2', 10: 'Q3'}.get(cur_date.month, '')
+                if ann_pct < -2:
                     self.s.daily_news.append(
-                        f"📉 [GDP 발표] {cur_date.year}년 GDP 성장률 {gdp_pct:+.1f}% "
-                        f"(GDP↓ → 버핏 지수↑ → 시장 고평가 압력)"
+                        f"📉 [GDP 발표] {cur_date.year}년 {q_num} GDP 성장률 {ann_pct:+.1f}% "
+                        f"(역성장 — 버핏지수 상승 압력)"
+                    )
+                elif ann_pct < 2:
+                    self.s.daily_news.append(
+                        f"📊 [GDP 발표] {cur_date.year}년 {q_num} GDP 성장률 {ann_pct:+.1f}% (저성장)"
                     )
                 else:
                     self.s.daily_news.append(
-                        f"📈 [GDP 발표] {cur_date.year}년 GDP 성장률 {gdp_pct:+.1f}%"
+                        f"📈 [GDP 발표] {cur_date.year}년 {q_num} GDP 성장률 {ann_pct:+.1f}%"
                     )
 
         # ★ 버핏 지수 갱신
-        gdp = getattr(self.s, 'gdp', 600_000_000_000_000.0)
-        self.s.buffett_index = (total_market_cap / max(1.0, gdp)) * 100
+        # ★ [수정] 400종목 보정: 게임은 400개 종목 기준이므로 시총이 코스피보다 낮음
+        # 코스피 940개 중 상위 대형주가 시총 60%를 차지 → 게임 대형주 시총은 유사
+        # 그러나 중소형 풀이 얇아서 전체 시총이 코스피 대비 구조적으로 낮음
+        # 버핏지수를 그대로 쓰면 항상 저평가 → 보정 계수 적용
+        # 보정: 코스피 940개 / 게임 현재 종목수 의 로그 비율로 완만하게 상향
+        import math as _math_bi
+        _cur_stock_count = max(1, len(self.s.stocks))
+        _kospi_equiv     = 940
+        # 종목 수가 적을수록 시총이 덜 집계됨 → 버핏지수 상향 보정
+        # 400종목 기준: log(940/400)/log(940/1) ≈ 보정 약 1.25배
+        # 종목 수가 많아질수록 보정 줄어듦 (400개 도달 시 ~1.20배)
+        # ★ [수정] 보정 범위 축소 (버그3: 버핏지수 인위 상승 방지)
+        _stock_count_adj = (_math_bi.log(_kospi_equiv) / _math_bi.log(max(2, _cur_stock_count))) ** 0.25
+        _stock_count_adj = max(1.00, min(1.15, _stock_count_adj))  # 1.0~1.15배 (기존 1.1~1.4)
 
-        # ★ 버블 지수: 버핏 지수(시총/GDP) 기반으로 재계산
-        # 현실: 버블은 실물 경제 대비 금융 자산의 괴리
-        # 버핏 60% 미만 → 버블 0~30 / 100~130% → 버블 80~150 / 160%+ → 버블 250~300
+        gdp = getattr(self.s, 'gdp', 600_000_000_000_000.0)
+        self.s.buffett_index = (total_market_cap / max(1.0, gdp)) * 100 * _stock_count_adj
+
+        # ★ [수정] 버핏 지수 → 버블 지수 변환 현실화
+        # 한국 코스피 버핏지수 역사적 범위:
+        #   2000년대 초: ~40~60% (저평가)
+        #   2007~2008: ~100~120% (과열)
+        #   2020~2021: ~130~150% (버블)
+        #   정상 범위: 70~100%
+        # 기존 설정이 너무 낮은 버핏지수에서도 버블 압력을 줬음
+        # → 80% 이하는 완전 정상, 120% 이상부터 버블 신호로 조정
         buffett = getattr(self.s, 'buffett_index', 0.0)
 
-        if buffett < 80:
-            target_bubble = buffett * 0.4                            # 0~32
+        if buffett < 60:
+            target_bubble = buffett * 0.2                            # 0~12 (저평가)
+        elif buffett < 100:
+            target_bubble = 12 + (buffett - 60) * 0.7               # 12~40 (정상)
         elif buffett < 130:
-            target_bubble = 32 + (buffett - 80) * 0.96              # 32~80
-        elif buffett < 180:
-            target_bubble = 80 + (buffett - 130) * 1.40             # 80~150
-        elif buffett < 260:         # 230 → 260 (더 여유 있게)
-            target_bubble = 150 + (buffett - 180) * 1.25            # 150~250
+            target_bubble = 40 + (buffett - 100) * 1.6              # 40~88 (주의)
+        elif buffett < 170:
+            target_bubble = 88 + (buffett - 130) * 1.8              # 88~160 (경고)
+        elif buffett < 230:
+            target_bubble = 160 + (buffett - 170) * 1.5             # 160~250 (위험)
         else:
-            target_bubble = min(300.0, 250 + (buffett - 260) * 1.43)  # 260%+부터 극단
+            target_bubble = min(300.0, 250 + (buffett - 230) * 1.43)  # 230%+: 극단
 
         # T3 유지 / 대공황 극복 시 버블 억제
         if "T3 유지" in self.s.current_scenario:
@@ -797,18 +944,21 @@ class StockMarket:
 
         # ★ 자연감소: bi가 높을수록 중력처럼 끌어내림 (mean-reversion)
         # target이 300이어도 bi가 높으면 자연감소가 상쇄 → 평형점 형성
+        # ★ [수정] natural_decay 강화 — 버블 270 고착 방지
+        # 기존: bi=270일 때 decay=-1.5, diff*0.05=+1.5 → 상쇄되어 고착
+        # 수정: decay를 더 강하게 해서 고버블 시 반드시 하락 압력
         if bi >= 270:
-            natural_decay = -1.5
+            natural_decay = -3.0   # -1.5 → -3.0
         elif bi >= 240:
-            natural_decay = -1.0
+            natural_decay = -2.0   # -1.0 → -2.0
         elif bi >= 200:
-            natural_decay = -0.5
+            natural_decay = -1.0   # -0.5 → -1.0
         elif bi >= 150:
-            natural_decay = -0.15
+            natural_decay = -0.3   # -0.15 → -0.3
         else:
             natural_decay = 0.0
 
-        bubble_delta_final = max(-4.0, min(2.0, bubble_diff * 0.05 + natural_decay))
+        bubble_delta_final = max(-6.0, min(2.0, bubble_diff * 0.05 + natural_decay))
         self.s.bubble_index = max(0.0, min(300.0, bi + bubble_delta_final))
 
         # 버블 경고 뉴스 (교육 효과)
@@ -896,8 +1046,9 @@ class StockMarket:
         annual_interest = debt * (interest_rate / 100) * cost_mult
         daily_interest  = annual_interest / 252
 
-        # 자산에서 이자 차감
-        meta['assets'] = max(10000.0, meta['assets'] - daily_interest)
+        # 자산에서 이자 차감 — 하한: 초기 자산의 10% (earnings.py와 일관성)
+        _init_assets_floor = meta.get('initial_assets', meta['assets']) * 0.10
+        meta['assets'] = max(_init_assets_floor, meta['assets'] - daily_interest)
 
         # ★ 부채비율 독립 HP 차감 (금리 무관 — 부채 자체의 구조적 위험)
         # 부채비율 200% 이상이면 매일 소량 HP 차감
@@ -905,12 +1056,16 @@ class StockMarket:
         debt_ratio = meta.get('debt_ratio', 0.5)
         tier       = meta.get('tier', '소형주')
 
-        if debt_ratio >= 5.0:       # 500%+: 자본잠식 수준
-            debt_hp_dmg = 0.08
-        elif debt_ratio >= 3.0:     # 300%+: 심각한 과부채
-            debt_hp_dmg = 0.04
-        elif debt_ratio >= 2.0:     # 200%+: 위험 수준
-            debt_hp_dmg = 0.015
+        # ★ [수정] 부채비율 HP 차감 완화
+        # 기존: 200%+ 매일 -0.015 → 연 -3.78 HP. earnings.py와 중복 차감 → 폭주
+        # 코스피 현실: 부채비율 200%는 위험하지만 즉시 망하지 않음 (대우조선해양 수년 버팀)
+        # 수정: 차감량 절반 + 500% 이상 극단값만 강하게
+        if debt_ratio >= 5.0:       # 500%+: 실질 자본잠식
+            debt_hp_dmg = 0.03      # 기존 0.08 → 0.03
+        elif debt_ratio >= 3.0:     # 300%+: 심각
+            debt_hp_dmg = 0.015     # 기존 0.04 → 0.015
+        elif debt_ratio >= 2.0:     # 200%+: 위험
+            debt_hp_dmg = 0.005     # 기존 0.015 → 0.005
         else:
             debt_hp_dmg = 0.0
 
@@ -923,8 +1078,11 @@ class StockMarket:
 
         # ★ 금리 + 고부채 → HP 추가 차감 (기존 7% → 3%로 완화)
         # Lv1 정상 금리(3~4%)에서도 고부채 기업 타격 가능하도록
-        if interest_rate >= 3.0 and debt_ratio >= 1.5:
-            extra_hp_dmg = (interest_rate - 3.0) * debt_ratio * 0.002
+        # ★ [수정] 금리+고부채 추가 차감 완화
+        # 기존: 금리 3% + 부채 1.5 → 매일 -0.009 → 연 -2.27 HP (부채비율 차감과 중복)
+        # 수정: 임계값 상향(5.0%+) + 계수 절반
+        if interest_rate >= 5.0 and debt_ratio >= 2.0:
+            extra_hp_dmg = (interest_rate - 5.0) * debt_ratio * 0.001
             meta['hp'] = max(0.0, meta.get('hp', 50.0) - extra_hp_dmg)
 
     # ─────────────────────────────────────────────
@@ -1019,79 +1177,99 @@ class StockMarket:
         free_float = max(0.05, 1.0 - meta.get('treasury_share', 0.0) - meta.get('owner_share', 0.0))
 
         LIMITS = {
-            "대형주": {"foreign": (0.05, 0.55), "inst": (0.05, 0.30), "retail": (0.05, 0.50)},
-            "중형주": {"foreign": (0.01, 0.25), "inst": (0.03, 0.25), "retail": (0.15, 0.65)},
-            "소형주": {"foreign": (0.00, 0.08), "inst": (0.01, 0.15), "retail": (0.30, 0.85)},
+            "대형주": {"foreign": (0.05, 0.55), "inst": (0.10, 0.40), "retail": (0.05, 0.45)},
+            "중형주": {"foreign": (0.01, 0.30), "inst": (0.05, 0.30), "retail": (0.15, 0.65)},
+            "소형주": {"foreign": (0.00, 0.10), "inst": (0.01, 0.18), "retail": (0.25, 0.85)},
         }
         lim = LIMITS.get(tier, LIMITS["소형주"])
 
         foreign_delta = 0.0
-        # ★ 확장기 대형주도 매일 방향이 바뀌도록 — 편향은 작게, 노이즈는 크게
+        # ★ [수정] 수급 delta를 현실적 규모로 확대
+        # 현실: 대형주 외국인 비중이 1~3개월 사이 5~10%p 이동은 흔함
+        # 일별 최대 변동: 대형주 ±0.5~1%, 중형 ±0.3~0.6%, 소형 ±0.1~0.3%
         cycle_base = {
-            "확장": +0.0002, "정점": 0.0,
-            "수축": -0.0004, "저점": -0.0002,
+            "확장": +0.0008, "정점": 0.0,
+            "수축": -0.0015, "저점": -0.0008,
         }.get(cycle, 0.0)
         if "대형" in tier:
-            foreign_delta += cycle_base + random.gauss(0, 0.0012)
+            foreign_delta += cycle_base + random.gauss(0, 0.0035)   # 0.0012 → 0.0035
         elif "중형" in tier:
-            foreign_delta += cycle_base * 0.5 + random.gauss(0, 0.0008)
+            foreign_delta += cycle_base * 0.5 + random.gauss(0, 0.0020)  # 0.0008 → 0.0020
         else:
-            foreign_delta += random.gauss(0, 0.0003)  # 소형주: 외국인 거의 없음
+            foreign_delta += random.gauss(0, 0.0006)  # 소형주: 외국인 거의 없음
 
-        foreign_delta -= rate_delta * 0.0008
-        if macro.get('exchange_rate', 1100) > 1400: foreign_delta -= 0.0008
-        elif macro.get('exchange_rate', 1100) < 1050: foreign_delta += 0.0005
+        foreign_delta -= rate_delta * 0.0015   # 0.0008 → 0.0015 (금리 민감도 ↑)
+        if macro.get('exchange_rate', 1100) > 1400: foreign_delta -= 0.0020   # 0.0008 → 0.0020
+        elif macro.get('exchange_rate', 1100) < 1050: foreign_delta += 0.0015 # 0.0005 → 0.0015
         if meta.get('_earnings_just_released'):
             lc = meta.get('continuous_loss_count', 0)
-            foreign_delta += -0.008 if lc >= 2 else (-0.003 if lc == 1 else +0.005)
+            foreign_delta += -0.018 if lc >= 2 else (-0.008 if lc == 1 else +0.012)  # 2~3배 확대
         if "소형" in tier: foreign_delta *= 0.15
         if "대공황" in self.s.current_scenario and "극복" not in self.s.current_scenario:
-            foreign_delta -= 0.0015
+            foreign_delta -= 0.0040   # 0.0015 → 0.0040
 
-        # ★ 외국인 수급 지수 반영
+        # ★ 외국인 수급 지수 반영 (강도 상향)
         flow_idx = getattr(self.s, 'foreign_flow_index', 0.0)
-        foreign_delta += flow_idx * 0.00005
+        foreign_delta += flow_idx * 0.00015   # 0.00005 → 0.00015
+
+        # ★ [신규] 외국인 연속 매수/매도 모멘텀 (추세 지속성)
+        # 현실: 외국인은 한 번 방향 잡으면 수주~수개월 지속하는 경향
+        f_trend = self.s.investor_trends.get(meta['c_name'], {}).get('foreign', {})
+        f_trend_days = f_trend.get('days', 0)
+        f_trend_dir  = f_trend.get('dir', 0)
+        if f_trend_days >= 5 and f_trend_dir != 0:
+            # 5일 이상 연속 추세 → 방향 강화 (최대 10일치 누적, 이후 수렴)
+            momentum_boost = min(f_trend_days, 15) * 0.0002 * f_trend_dir
+            foreign_delta += momentum_boost
 
         inst_delta = 0.0
-        # ★ 기관: 대형주에서 외국인 반대 성향 + 노이즈
+        # ★ [수정] 기관: 외국인과 독립적 판단 강화 (반대 성향 완화)
+        # 현실: 외국인과 기관이 같은 방향으로 움직이는 날도 많음
         if "대형" in tier:
-            # 외국인이 강하게 매수하면 기관은 차익실현 경향
-            inst_delta += -foreign_delta * 0.4 + random.gauss(0, 0.0010)
+            # 외국인 강매수 시 기관 차익실현 성향은 유지하되, 독립 노이즈 크게
+            inst_delta += -foreign_delta * 0.25 + random.gauss(0, 0.0030)  # -0.4 → -0.25, 0.0010 → 0.0030
         elif "중형" in tier:
-            inst_delta += random.gauss(0, 0.0008)
+            inst_delta += random.gauss(0, 0.0020)   # 0.0008 → 0.0020
         else:
-            inst_delta += random.gauss(0, 0.0005)
+            inst_delta += random.gauss(0, 0.0012)   # 0.0005 → 0.0012
 
         if meta.get('_earnings_just_released'):
             lc = meta.get('continuous_loss_count', 0)
-            inst_delta += -0.012 if lc >= 2 else (-0.005 if lc == 1 else +0.007)
+            inst_delta += -0.025 if lc >= 2 else (-0.010 if lc == 1 else +0.015)  # 2배 확대
         hp_r = meta.get('hp', 50.0) / max(1.0, meta.get('hp_soft_cap', 60.0))
-        if hp_r < 0.15: inst_delta -= 0.004
-        elif hp_r < 0.30: inst_delta -= 0.0015
-        if bubble_index > 200: inst_delta -= 0.001
-        elif bubble_index > 150: inst_delta -= 0.0005
+        if hp_r < 0.15: inst_delta -= 0.010   # 0.004 → 0.010
+        elif hp_r < 0.30: inst_delta -= 0.004  # 0.0015 → 0.004
+        if bubble_index > 200: inst_delta -= 0.003   # 0.001 → 0.003
+        elif bubble_index > 150: inst_delta -= 0.0015 # 0.0005 → 0.0015
         cm = self.s.current_date.month; cd = self.s.current_date.day
         if cm in [3, 6, 9, 12] and cd >= 25:
-            inst_delta += -0.004 if meta.get('continuous_loss_count', 0) > 0 else +0.002
+            inst_delta += -0.008 if meta.get('continuous_loss_count', 0) > 0 else +0.005
         tech_upgrade_year = getattr(self.s, '_tech_upgrade_years', {1: 1999}).get(
             self.s.max_tech_reached) or 1999
         if 0 <= self.s.current_date.year - tech_upgrade_year <= 2 and sector == "Growth":
-            inst_delta += 0.003
+            inst_delta += 0.008   # 0.003 → 0.008
+
+        # ★ [신규] 기관 연속 추세 모멘텀
+        i_trend = self.s.investor_trends.get(meta['c_name'], {}).get('inst', {})
+        i_trend_days = i_trend.get('days', 0)
+        i_trend_dir  = i_trend.get('dir', 0)
+        if i_trend_days >= 3 and i_trend_dir != 0:
+            inst_delta += min(i_trend_days, 10) * 0.00025 * i_trend_dir
 
         retail_delta = 0.0
-        # ★ 개인: 역매매 성향 + 노이즈 (대형 우량주는 장기보유로 변동 작음)
+        # ★ [수정] 개인: 역매매 성향 + 노이즈 (규모 현실화)
         if "대형" in tier:
-            retail_delta += -(foreign_delta + inst_delta) * 0.3 + random.gauss(0, 0.0008)
+            retail_delta += -(foreign_delta + inst_delta) * 0.3 + random.gauss(0, 0.0025)  # 0.0008 → 0.0025
         else:
-            retail_delta += random.gauss(0, 0.0015)
+            retail_delta += random.gauss(0, 0.0045)   # 0.0015 → 0.0045
 
-        if   rate < -0.05: retail_delta += 0.010   # 급락 시 저점 매수
-        elif rate < -0.02: retail_delta += 0.004
-        elif rate >  0.05: retail_delta -= 0.005   # 급등 시 차익실현
-        elif rate >  0.02: retail_delta -= 0.002
+        if   rate < -0.05: retail_delta += 0.025   # 0.010 → 0.025 급락 시 강한 저점매수
+        elif rate < -0.02: retail_delta += 0.010   # 0.004 → 0.010
+        elif rate >  0.05: retail_delta -= 0.012   # 0.005 → 0.012 급등 시 강한 차익실현
+        elif rate >  0.02: retail_delta -= 0.005   # 0.002 → 0.005
         sentiment = getattr(self.s, 'sentiment', 50.0)
-        if sentiment > 75 and bubble_index > 150: retail_delta += 0.002
-        elif sentiment < 25: retail_delta -= 0.001
+        if sentiment > 75 and bubble_index > 150: retail_delta += 0.005   # 0.002 → 0.005
+        elif sentiment < 25: retail_delta -= 0.003  # 0.001 → 0.003
 
         char = meta.get('char', 'Normal')
         if char == 'BANKRUPT':
@@ -1139,24 +1317,38 @@ class StockMarket:
         fixed_ratio  = meta.get('treasury_share', 0.0) + meta.get('owner_share', 0.0)
         float_shares = max(1, int(shares_total * (1.0 - fixed_ratio)))
 
-        # ★ 거래량은 delta와 완전 분리 — 회전율로만 결정
-        # 현실: 유통주식 기준 회전율 ~1%/일
-        # 총발행주식 기준으로 환산 (유통비율 약 50~60% 가정)
-        # 대형주: 총발행의 0.5~1.2%/일 (유통기준 ~1%)
-        # 중형주: 총발행의 0.8~2.0%/일
-        # 소형주: 총발행의 1.5~4.0%/일
+        # ★ [수정] 거래량 계산 현실화
+        # 현실: 평소 대비 어닝/테마/급등 당일은 5~50배 거래량 폭발
         base_turnover = {
             "대형주": random.uniform(0.005, 0.012),
-            "중형주": random.uniform(0.008, 0.020),
-            "소형주": random.uniform(0.015, 0.040),
+            "중형주": random.uniform(0.010, 0.025),   # 0.008~0.020 → 0.010~0.025
+            "소형주": random.uniform(0.020, 0.060),   # 0.015~0.040 → 0.020~0.060
         }.get(tier, 0.010)
 
-        # 등락률 클수록 거래량 증가
+        # ★ [수정] 등락률 기반 거래량 배율 현실화
+        # 기존: 1.0 + rate * 0.3 (최대 ~10배)
+        # 수정: 등락률 크기에 따라 지수적으로 증가
         abs_rate_pct = abs(stock.get('rate', 0.0))
-        vol_mult     = 1.0 + abs_rate_pct * 0.3
+        if abs_rate_pct >= 25:
+            vol_mult = random.uniform(15.0, 50.0)   # 상/하한가 근접: 15~50배
+        elif abs_rate_pct >= 15:
+            vol_mult = random.uniform(6.0, 20.0)    # 급등락: 6~20배
+        elif abs_rate_pct >= 8:
+            vol_mult = random.uniform(3.0, 8.0)     # 큰 등락: 3~8배
+        elif abs_rate_pct >= 3:
+            vol_mult = random.uniform(1.5, 4.0)     # 소폭: 1.5~4배
+        else:
+            vol_mult = random.uniform(0.7, 1.5)     # 보합: 평소 수준
+
+        # ★ 어닝 발표일: 추가 거래량 폭발
         if meta.get('_earnings_just_released'):
-            vol_mult *= 3.0
-        turnover  = min(0.50, base_turnover * vol_mult)
+            vol_mult *= random.uniform(2.0, 5.0)
+
+        # ★ 소형주 테마 스파이크
+        if meta.get('_theme_spike') and "소형" in tier:
+            vol_mult *= random.uniform(3.0, 10.0)
+
+        turnover  = min(0.80, base_turnover * vol_mult)   # 상한 0.50 → 0.80
         total_vol = max(1, int(float_shares * turnover))
 
         # 투자자별 거래 규모 — 비중 비례
@@ -1464,48 +1656,63 @@ class StockMarket:
                     meta['retail_share']  = max(0.001, meta.get('retail_share', 0.0) - recover)
 
     # ─────────────────────────────────────────────
-    # 상장폐지 (기존 유지)
+    # 상장폐지 (완화 버전)
     # ─────────────────────────────────────────────
     def check_delisting(self):
-        # HP 0이면 무조건 상폐 (종목 수 관계없이)
-        # 종목 수 균형은 IPO 가속으로 해결
-        MIN_STOCKS_LIMIT = 50  # 절대 최솟값만 유지
+        MIN_STOCKS_LIMIT = 50
+
         if len(self.s.stocks) <= MIN_STOCKS_LIMIT:
             return
 
-        # ★ HP 0 종목 즉시 상폐 처리 (좀비 방지)
-        # pending_events 거치지 않고 바로 delisted_stocks에 추가
-        to_delist_now = []
-        for stock in self.s.stocks:
-            hp_now = stock['meta'].get('hp', 99.0)
-            if hp_now <= 0.0:
-                to_delist_now.append(stock)
-
-        remaining = len(self.s.stocks)
-        for stock in to_delist_now:
-            if remaining <= MIN_STOCKS_LIMIT:
-                break
-            meta = stock['meta']
-            name = meta['c_name']
-            meta['is_doomed']              = True
-            meta['delisted_date']          = self.s.current_date.strftime('%Y-%m-%d')
-            meta['is_officially_delisted'] = True
-            self.s.delisted_stocks.append(stock)
-            if hasattr(self, '_db') and self._db:
-                self._db.save_delisted_stock(stock)
-            self.s.stocks.remove(stock)
-            self.s.pending_events.get("delist", {}).pop(name, None)
-            self.s.pending_events.get("warning", {}).pop(name, None)
-            remaining -= 1
-
-        delisted_this_turn = []
         is_depression = (
             any("대공황" in str(v) for v in [self.s.current_scenario])
             and "극복" not in self.s.current_scenario
         )
-        # ★ HP 0인 종목은 제한 없이 전부 상폐 처리
-        # (좀비 기업 방지)
-        max_delist   = 999 if not is_depression else 30
+
+        # ★ [수정] 연간 상폐 상한 — 400종목 기준 현실화
+        # 코스피 940개 기준 연 30~40개(3.2~4.3%) → 400개 기준 비례 적용
+        # 정상: 400 × 3.2% ≈ 13개 / 대공황: 400 × 5% ≈ 20개
+        # 단, HP=0 종목은 상한 예외 처리 (좀비주 누적 방지)
+        _cur_year    = self.s.current_date.year
+        _annual_key  = f"_delist_count_{_cur_year}"
+        _annual_used = getattr(self.s, _annual_key, 0)
+        # ★ [수정] 연간 상폐 상한 상향 (버그: 10원 좀비 누적 방지)
+        # 코스피 현실: 연 40~50개 상폐, 400종목 기준 비례 상향
+        _annual_max  = 30 if is_depression else 20   # 20/13 → 30/20
+
+        if _annual_used >= _annual_max:
+            # 연간 상한 초과 — pending만 처리하고 신규 상폐 없음
+            _process_pending_only = True
+        else:
+            _process_pending_only = False
+
+        # ★ [수정] HP=0 종목은 연간 상한 무관하게 반드시 워크아웃 큐 등록 (좀비 누적 방지)
+        # 10원 고착 종목(is_doomed 예정)은 grace 기간 단축
+        for stock in list(self.s.stocks):
+            hp_now = stock['meta'].get('hp', 99.0)
+            name   = stock['meta']['c_name']
+            if hp_now <= 0.0 and not stock['meta'].get('is_doomed'):
+                remaining = len(self.s.stocks)
+                if remaining <= MIN_STOCKS_LIMIT:
+                    break
+                # [수정] 10원 고착이면 유예 단축 (5~10일), 아니면 기존 유예
+                _stuck = stock['meta'].get('_price_low_days', 0)
+                _grace_days = random.randint(5, 10) if _stuck >= 30 else random.randint(63, 105)
+                delist_date = self.s.current_date + timedelta(days=_grace_days)
+                self.s.pending_events["delist"][name] = {
+                    "date":   delist_date,
+                    "reason": "재무 완전 파탄 (워크아웃 실패)"
+                }
+                stock['meta']['is_doomed'] = True
+                _annual_used += 1
+                setattr(self.s, _annual_key, _annual_used)
+                if not self.s.silent_mode:
+                    self.s.daily_news.append(
+                        f"⚠️ [워크아웃 개시] {name} HP 소진 — "
+                        f"{delist_date.strftime('%Y-%m-%d')} 상폐 예정 (회생 가능성 있음)"
+                    )
+
+        delisted_this_turn = []
         new_reserved = 0
         candidates   = sorted(self.s.stocks, key=lambda x: x['meta'].get('hp', 99.0))
         _LOSS_LIMIT  = {"대형주": 12, "중형주": 10, "소형주": 8}
@@ -1529,6 +1736,9 @@ class StockMarket:
                 self.s.pending_events.get("warning", {}).pop(name, None)
                 continue
 
+            if _process_pending_only:
+                continue
+
             ld = meta.get('listed_date_dt')
             if not ld or isinstance(ld, str):
                 try:    ld = datetime.strptime(meta['listed_date'], '%Y-%m-%d')
@@ -1539,15 +1749,24 @@ class StockMarket:
             is_bankrupt = hp_now <= 0.0
 
             if is_bankrupt and not meta.get('is_doomed'):
-                remaining = len(self.s.stocks) - len(delisted_this_turn) - new_reserved
-                if remaining > MIN_STOCKS_LIMIT:
-                    delist_date = self.s.current_date
-                    reason      = "재무 완전 파탄 (HP 소진)"
-                    self.s.pending_events["delist"][name] = {"date": delist_date, "reason": reason}
-                    meta['is_doomed'] = True
-                    new_reserved += 1
-                    if not self.s.silent_mode:
-                        self.s.daily_news.append(f"☠️ [즉시상폐] {name} 재무 체력 완전 소진 — 오늘 상장폐지")
+                    # ★ [수정] 즉시상폐 → 유예 큐로 리다이렉트 (워크아웃 처리로 이미 처리됨)
+                    remaining = len(self.s.stocks) - len(delisted_this_turn) - new_reserved
+                    if remaining > MIN_STOCKS_LIMIT and _annual_used < _annual_max:
+                        _grace_days = random.randint(63, 105)
+                        delist_date = self.s.current_date + timedelta(days=_grace_days)
+                        self.s.pending_events["delist"][name] = {
+                            "date":   delist_date,
+                            "reason": "재무 완전 파탄 (워크아웃 실패)"
+                        }
+                        meta['is_doomed'] = True
+                        new_reserved += 1
+                        _annual_used += 1
+                        setattr(self.s, _annual_key, _annual_used)
+                        if not self.s.silent_mode:
+                            self.s.daily_news.append(
+                                f"⚠️ [워크아웃 개시] {name} HP 소진 — "
+                                f"{delist_date.strftime('%Y-%m-%d')} 상폐 예정"
+                            )
                     continue
 
         for ds in delisted_this_turn:
@@ -1557,6 +1776,11 @@ class StockMarket:
                 self.s.delisted_stocks.append(ds)
                 if hasattr(self, '_db') and self._db:
                     self._db.save_delisted_stock(ds)
+                # ★ 상폐 → 수정 기준시총에서 해당 종목 상폐 직전 시총 제거
+                # 현실 코스피와 동일: 상폐 종목이 GRI를 깎지 않도록 기준시총도 같이 줄임
+                _delist_cap = float(ds.get('market_cap', 0))
+                if _delist_cap > 0:
+                    self.s._adj_base_cap = max(1.0, getattr(self.s, '_adj_base_cap', _delist_cap) - _delist_cap)
                 self.s.stocks.remove(ds)
 
     # ─────────────────────────────────────────────
@@ -1671,6 +1895,11 @@ class StockMarket:
             if stock['meta']['listed_date'] <= today_str:
                 self.s.stocks.append(stock)
                 self.s.pending_listings.remove(stock)
+                # ★ 신규상장 → 수정 기준시총에 해당 종목 시총 추가
+                # 현실 코스피와 동일: 신규상장은 GRI에 영향 없음 (순수 주가 상승분만 반영)
+                _ipo_cap = float(stock.get('market_cap', 0))
+                if _ipo_cap > 0:
+                    self.s._adj_base_cap = getattr(self.s, '_adj_base_cap', 0.0) + _ipo_cap
                 # ★ 상장 시점 스냅샷 저장
                 if self._db:
                     self._db.save_listing_snapshot(stock)
@@ -1688,11 +1917,9 @@ class StockMarket:
             if random.random() > 0.1: return
 
         # ── 종목 수 기반 IPO 속도 조정 ───────────────
-        # 400개 이상:  1~3개 (과포화 방지)
-        # 300~400개:  2~4개 (정상)
-        # 250~300개:  3~5개 (소폭 증가)
-        # 200~250개:  4~6개 (경보)
-        # 200개 이하: 6~8개 (긴급)
+        # ★ [수정] 초반 종목 수 구간 세분화 — 50개 미만은 별도 완속 처리
+        # 기존: 200개 이하 = 6~8개/주 → 50개에서도 6~8개 쏟아져 소형주 희석 폭락
+        # 수정: 100개 미만은 2~3개/주, 100~150개는 3~5개/주로 천천히 키움
         if cur_count >= 400:
             ipo_min, ipo_max = 1, 3
             mid_ratio = 0.20  # ★ 항상 20% 중형주 유지 (현실 신규상장 비율 반영)
@@ -1705,9 +1932,15 @@ class StockMarket:
         elif cur_count >= 200:
             ipo_min, ipo_max = 4, 6
             mid_ratio = 0.30
+        elif cur_count >= 150:
+            ipo_min, ipo_max = 3, 5   # ★ 신규: 150~200 구간
+            mid_ratio = 0.35
+        elif cur_count >= 100:
+            ipo_min, ipo_max = 2, 4   # ★ 신규: 100~150 구간
+            mid_ratio = 0.40          # ★ 중형주 비율 높임 (소형주 희석 방지)
         else:
-            ipo_min, ipo_max = 6, 8
-            mid_ratio = 0.35  # 긴급 시 중형주 35%
+            ipo_min, ipo_max = 1, 3   # ★ 수정: 100개 미만은 1~3개 (기존 6~8개)
+            mid_ratio = 0.50          # ★ 초반은 중형주 위주로 상장
 
         # 버블/수축기 보정 (단, 종목 수 긴급 구간이면 무시)
         if cur_count >= 250:
@@ -1827,8 +2060,8 @@ class StockMarket:
             daily_hp_dmg = 0.01 * loss_count * sens
             if self.s.macro["interest_rate"] > 15.0:
                 daily_hp_dmg += 0.02
-            if price < 1000:
-                daily_hp_dmg += 0.02
+            # ★ [수정] price < 1000 차감 제거 — 신규 상장 소형주 초기가가 낮아서
+            # 정상적인 종목도 매일 깎이는 문제 (1000원 미만이면 전체 소형주 해당)
 
             hp       = meta.get('hp', 50.0)
             soft_cap = meta.get('hp_soft_cap', 60.0)
@@ -1853,13 +2086,31 @@ class StockMarket:
                 if hp > 0.0 and price >= 100:
                     meta['hp'] = round(min(soft_cap, hp + 0.02), 2)
 
-        # ★ 절대 주가 기준 HP 차감 (loss_count 관계없이)
-        # 주가가 낮을수록 시장 신뢰 상실 → HP 강제 차감
+        # ★ 절대 주가 기준 HP 차감
+        # ★ [수정] 완화 — 주가 저가가 매일 폭발적으로 HP를 깎아 상폐 2000개 유발
+        # 현실: 코스피 저가주도 즉시 퇴출 아님, 관리종목 지정 후 수개월 유예
+        # 10원: -0.5/일 (soft_cap 60 기준 120일 내 HP=0, 4개월)
+        # 10~50원: -0.2/일 (300일, 약 1년)
+        # 50~100원: -0.05/일 (완만한 압박)
         hp_now = meta.get('hp', 50.0)
         if hp_now > 0.0:
-            if   price <= 10:  meta['hp'] = max(0.0, hp_now - 2.0)
-            elif price < 50:   meta['hp'] = max(0.0, hp_now - 1.0)
-            elif price < 100:  meta['hp'] = max(0.0, hp_now - 0.5)
+            if   price <= 10:  meta['hp'] = max(0.0, hp_now - 0.8)   # 0.5→0.8: 75일 내 HP 소진
+            elif price < 50:   meta['hp'] = max(0.0, hp_now - 0.25)
+            elif price < 100:  meta['hp'] = max(0.0, hp_now - 0.05)
+        # ★ [수정] 저가 좀비주 복합 조건 — 10원 정확히 아닌 저가+HP 기준 (버그: 10~27 왕복)
+        # 50원 미만 저가에서 매일 누적, 10원 초과해도 50원 미만이면 카운터 유지
+        _is_cheap = price < 50
+        if _is_cheap:
+            _stuck_days = meta.get('_price_low_days', 0) + 1
+            meta['_price_low_days'] = _stuck_days
+            # [수정] 30일(1개월) 이상 50원 미만 + HP 50% 미만: 강제 HP 0
+            # 현실 코스피: 주가 50원 미만 + 30일 지속 → 관리종목, 이후 상폐
+            # 기존 126일(6개월)은 너무 느려서 좀비주 137개 누적됨
+            _hp_low = meta.get('hp', 50.0) / max(1.0, meta.get('hp_soft_cap', 60.0)) < 0.50
+            if _stuck_days >= 30 and _hp_low and not meta.get('is_doomed'):
+                meta['hp'] = 0.0
+        else:
+            meta['_price_low_days'] = 0
 
         # char 상태 판정
         hp_now       = meta.get('hp', 50.0)
@@ -2326,18 +2577,17 @@ class StockMarket:
         retail = meta.get('retail_share', 0.3)
 
         if "소형" in tier:
-            # 소형주: 개인 비중 50%+ 이고 유통물량 적으면 변동성 증폭
             if retail > 0.50 and float_ratio < 0.50:
                 rate = stock.get('rate', 0.0)
-                # 오를 때 더 오르고, 내릴 때 더 내리는 효과
-                return (rate / 100.0) * 0.08
+                # ★ [수정] 유동성 함정 상한: ±2% (기존 무한 증폭 → 억제)
+                return max(-0.02, min(0.02, (rate / 100.0) * 0.08))
             elif retail > 0.40:
                 rate = stock.get('rate', 0.0)
-                return (rate / 100.0) * 0.04
+                return max(-0.015, min(0.015, (rate / 100.0) * 0.04))
         elif "중형" in tier:
             if retail > 0.45 and float_ratio < 0.55:
                 rate = stock.get('rate', 0.0)
-                return (rate / 100.0) * 0.03
+                return max(-0.008, min(0.008, (rate / 100.0) * 0.03))
 
         return 0.0
 
@@ -2446,3 +2696,132 @@ class StockMarket:
             return -call_intensity * 0.3
 
         return 0.0
+
+    # ─────────────────────────────────────────────
+    # ★ [신규] 거래량 → 주가 피드백 adj
+    # ─────────────────────────────────────────────
+    def _calc_volume_momentum_adj(self, name: str, current_return: float,
+                                   vol_ratio_map: dict) -> float:
+        """
+        거래량이 평소보다 클수록 현재 방향성을 강화.
+
+        현실 근거:
+        - 거래량 폭발 + 상승 = 강한 매수 수요 → 추가 상승 모멘텀
+        - 거래량 폭발 + 하락 = 패닉셀 / 공매도 집중 → 추가 하락
+        - 거래량 극도 저조 + 상승 = 유동성 부족, 신뢰 낮은 상승 → 약한 adj
+        - 이른바 "거래량은 주가에 선행한다" 원칙
+
+        vol_ratio 기준:
+        - 1.0 이하: 평소 이하 거래 → adj 없음(중립)
+        - 2~5배: 소폭 방향 강화
+        - 5~15배: 중간 강화 (테마/뉴스 장)
+        - 15배+: 강한 강화 (상한가 급등, 패닉셀)
+        """
+        vol_ratio = vol_ratio_map.get(name, 1.0)
+
+        # 거래량이 평소 이하면 adj 없음
+        if vol_ratio <= 1.2:
+            return 0.0
+
+        # 방향: 현재 daily_return 부호
+        direction = 1.0 if current_return > 0 else -1.0
+
+        # 강도: vol_ratio에 따라 로그 스케일 adj
+        # vol_ratio=3 → 0.003, vol_ratio=10 → 0.007, vol_ratio=30 → 0.012
+        import math as _math
+        strength = min(0.015, _math.log(vol_ratio, 3) * 0.004)
+
+        # 소형주일수록 거래량 영향 큼 (유동성 낮아 가격 충격 큼)
+        # 단, tier는 호출 시점에서 meta로 접근
+        return strength * direction
+
+    # ─────────────────────────────────────────────
+    # ★ [신규] 공매도 adj
+    # ─────────────────────────────────────────────
+    def _calc_short_selling_adj(self, name: str, meta: dict,
+                                 stock: dict, tier: str, sector: str) -> float:
+        """
+        공매도(Short Selling) 효과 시뮬레이션.
+
+        현실 메커니즘:
+        1. short_interest(공매도 잔고비율): 유통주식 대비 공매도 비율
+           - 높을수록 하락 베팅이 많다는 의미 → 상시 하락 압력
+        2. 숏커버(Short Squeeze):
+           - 공매도 많은 종목이 급등하면 숏포지션 청산 강제
+           - → 추가 매수 발생 → 더 큰 급등 (감마 스퀴즈)
+        3. 공매도 증가 조건:
+           - 버블지수 높음, PER 고평가, HP 낮음, 수축/저점기
+        4. 공매도 감소 조건:
+           - 주가 급락 (숏커버), 어닝 서프라이즈, 호재 이벤트
+
+        코스피 현실:
+        - 대형주 short_interest: 0.5~3%
+        - 중형주: 1~5%
+        - 소형주 테마주: 0.5~2% (대차가 어려워 낮음)
+        - 버블/고평가 종목: 최대 10~15%
+        """
+        # short_interest 초기화
+        if 'short_interest' not in meta:
+            if "대형" in tier:
+                meta['short_interest'] = random.uniform(0.005, 0.025)
+            elif "중형" in tier:
+                meta['short_interest'] = random.uniform(0.008, 0.040)
+            else:
+                meta['short_interest'] = random.uniform(0.003, 0.015)
+
+        si         = meta['short_interest']
+        rate       = stock.get('rate', 0.0)
+        bubble     = getattr(self.s, 'bubble_index', 0.0)
+        cycle      = getattr(self.s, 'cycle_stage', '확장')
+        hp_ratio   = meta.get('hp', 50.0) / max(1.0, meta.get('hp_soft_cap', 60.0))
+
+        adj = 0.0
+
+        # ── 1. 상시 하락 압력 (공매도 잔고 존재 자체) ──────────
+        # 현실: 공매도 잔고가 많으면 매도 오버행이 지속됨
+        adj -= si * 0.08   # SI 5% → 일별 -0.004 (연 -1%)
+
+        # ── 2. 숏커버(쇼트스퀴즈) — 급등 시 강제 청산 ──────────
+        # 현실: 하루 5% 이상 급등 시 손절/강제청산 발동
+        if rate >= 8.0 and si >= 0.02:
+            # 숏포지션 강제청산 → 추가 매수 → 급등 가속
+            squeeze_power = si * random.uniform(0.5, 1.5)
+            squeeze_adj   = min(0.05, squeeze_power * 0.8)
+            adj += squeeze_adj
+            # 숏커버 후 잔고 감소
+            meta['short_interest'] = max(0.001, si * 0.70)
+            if not self.s.silent_mode and squeeze_adj > 0.02:
+                self.s.daily_news.append(
+                    f"⚡ [숏스퀴즈] {name} 공매도 청산 러시! "
+                    f"공매도잔고 {si*100:.1f}% → 강제 매수 급등"
+                )
+        elif rate >= 4.0 and si >= 0.01:
+            # 소규모 숏커버
+            meta['short_interest'] = max(0.001, si * 0.92)
+            adj += si * 0.15
+
+        # ── 3. 공매도 증가 조건 ──────────────────────────────
+        # 고평가 + 버블 + 수축기 = 공매도 세력 유입
+        if bubble > 180 and cycle in ('수축', '저점') and hp_ratio < 0.6:
+            si_increase = random.uniform(0.0002, 0.0008)
+            meta['short_interest'] = min(0.15, si + si_increase)
+
+        # HP 낮은 종목 (펀더멘털 악화) = 공매도 타깃
+        elif hp_ratio < 0.30 and "대형" not in tier:
+            si_increase = random.uniform(0.0003, 0.0010)
+            meta['short_interest'] = min(0.15, si + si_increase)
+
+        # ── 4. 공매도 자연 감소 (숏포지션 만기/청산) ──────────
+        # 공매도는 무한정 유지할 수 없음 — 매일 소폭 감소
+        else:
+            meta['short_interest'] = max(0.001, si * 0.998)
+
+        # ── 5. 공매도 금지 시나리오 (한국 특유) ──────────────
+        # 금융위기/대공황 시 한국은 공매도 금지를 자주 시행
+        scenario = self.s.current_scenario
+        if any(x in scenario for x in ['대공황', '금융위기', '외부충격', '긴축 쇼크']):
+            # 공매도 금지 효과: 하락 압력 완화, 단 인위적 가격 왜곡
+            adj *= 0.2   # 공매도 효과 80% 감쇠
+            meta['short_interest'] = max(0.001, meta['short_interest'] * 0.90)
+
+        return adj

@@ -39,13 +39,12 @@ class GameService:
         self.cm.used_all_time = self.s.used_all_time
 
         # ── 그룹사 생성 ──────────────────────────────────────────
-        # 최상위 3개 그룹 ("대1" 티어)
-        # ★ IT/커뮤/건강관리/산업재/소재 중 3개를 중복 없이 랜덤 배정
-        # 각 산업의 1B/2A 핵심 사업을 sub_list에 포함 → 페이즈 전환 시 자연 수혜
+        # 5개 그룹 중 랜덤으로 3개가 대1(삼성/SK/LG급), 나머지 2개가 대(현대차/포스코급)
+        # 기존: 제니스/서한/가온이 항상 대1 → 범양/버거는 항상 대 (하드코딩 편향)
+        # 수정: 5개 그룹명을 섞은 뒤 앞 3개가 대1, 뒤 2개가 대
         _ELITE_INDS = ["IT", "커뮤니케이션", "건강관리", "산업재", "소재"]
-        _elite_pool = random.sample(_ELITE_INDS, 3)  # 중복 없이 3개 선택
+        _elite_pool = random.sample(_ELITE_INDS, 3)
 
-        # 산업별 페이즈 선행 사업 (1B/2A 대형 핵심 sub)
         _ELITE_SUBS = {
             "IT":           ["PC용D램", "모바일AP", "팹리스파운드리"],
             "커뮤니케이션": ["이동통신사", "종합포털서비스", "모바일메신저"],
@@ -54,34 +53,33 @@ class GameService:
             "소재":         ["정밀화학", "양극재소재", "리튬정제"],
         }
 
-        top3_groups = ["제니스", "서한", "가온"]
-        for i, gn in enumerate(top3_groups):
-            gid      = f"GROUP_{gn}"
+        from engine.constants import GROUP_BASE_NAMES
+        _all_groups = GROUP_BASE_NAMES[:]
+        random.shuffle(_all_groups)
+        elite_groups  = _all_groups[:3]
+        normal_groups = _all_groups[3:]
+
+        for i, gn in enumerate(elite_groups):
+            gid       = f"GROUP_{gn}"
             elite_ind = _elite_pool[i]
             self.s.groups[gid] = {"name": gn, "active": True}
 
-            # 대1 종목: 엘리트 산업 + 선행 사업 sub_list
             stock_d1 = self.cm.create_stock_data(None, elite_ind, "대1", gid)
-            # sub_list를 해당 산업의 핵심 사업으로 덮어씀
             elite_subs = _ELITE_SUBS.get(elite_ind, [])
             if elite_subs:
                 stock_d1['meta']['sub_list'] = elite_subs[:]
                 stock_d1['meta']['sub']      = elite_subs[0]
             self.s.stocks.append(stock_d1)
 
-            # 계열사 1개: 나머지 산업 중 랜덤
             remaining_inds = [x for x in MAIN_INDUSTRIES if x != elite_ind]
             ind2 = random.choice(remaining_inds)
             self.s.stocks.append(self.cm.create_stock_data(None, ind2, "대", gid))
 
-        # 일반 그룹사 2개 ("대" 티어: 시총 1조~20조)
-        normal_groups = ["범양", "버거"]
         for gn in normal_groups:
             gid = f"GROUP_{gn}"
             self.s.groups[gid] = {"name": gn, "active": True}
             for ind in random.sample(MAIN_INDUSTRIES, 2):
                 self.s.stocks.append(self.cm.create_stock_data(None, ind, "대", gid))
-
         # ── 독립 대기업 5개 (1조~20조) ───────────────────────────
         for _ in range(5):
             self.s.stocks.append(
@@ -302,12 +300,103 @@ class GameService:
         return self.dp.get_ui_packet()
 
     def get_macro_snapshot(self) -> dict:
-        m = self.s.macro
+        """거시경제 스냅샷 — UI 표시용 풍부한 정보 반환"""
+        m  = self.s.macro
+        s  = self.s
+        lv = s.max_tech_reached
+
+        # ★ 금리 방향성 (전일 대비)
+        prev = getattr(s, '_prev_macro_snapshot', {})
+        rate_delta = m.get('interest_rate', 0) - prev.get('interest_rate', m.get('interest_rate', 0))
+        rate_dir = "▲" if rate_delta > 0.01 else ("▼" if rate_delta < -0.01 else "─")
+
+        # ★ 환율 방향성
+        fx_delta = m.get('exchange_rate', 0) - prev.get('exchange_rate', m.get('exchange_rate', 0))
+        fx_dir = "▲" if fx_delta > 1 else ("▼" if fx_delta < -1 else "─")
+
+        # ★ SOX 방향성
+        sox_delta = m.get('semi_index', 0) - prev.get('semi_index', m.get('semi_index', 0))
+        sox_dir = "▲" if sox_delta > 0 else ("▼" if sox_delta < 0 else "─")
+
+        # ★ 버핏지수 해석
+        buffett = getattr(s, 'buffett_index', 0.0)
+        if buffett < 60:    buffett_label = "저평가"
+        elif buffett < 100: buffett_label = "정상"
+        elif buffett < 130: buffett_label = "주의"
+        elif buffett < 170: buffett_label = "경고"
+        else:               buffett_label = "위험"
+
+        # ★ 공매도 시장 전체 평균 잔고
+        all_si = [st['meta'].get('short_interest', 0.0) for st in s.stocks if 'short_interest' in st['meta']]
+        avg_si = sum(all_si) / len(all_si) if all_si else 0.0
+
         return {
-            "interest":    m.get("interest_rate", 0),
-            "oil":         m.get("oil_price", 0),
-            "exchange":    m.get("exchange_rate", 0),
-            "cpi_display": f"물가체감: 2000년 ₩1,000 → 현재 ₩{self.s.base_item_price:,.0f}",
+            "interest":      m.get("interest_rate", 0),
+            "interest_dir":  rate_dir,
+            "oil":           m.get("oil_price", 0),
+            "exchange":      m.get("exchange_rate", 0),
+            "exchange_dir":  fx_dir,
+            "cpi":           m.get("cpi", 0),
+            "grain":         m.get("grain_price", 250),
+            "metal":         m.get("metal_price", 1800),
+            "semi":          m.get("semi_index", 1000),
+            "semi_dir":      sox_dir,
+            "buffett":       buffett,
+            "buffett_label": buffett_label,
+            "gdp_growth":    getattr(s, 'gdp_growth_rate', 0.05) * 100,
+            "cycle":         getattr(s, 'cycle_stage', '확장'),
+            "sentiment":     getattr(s, 'sentiment', 50.0),
+            "foreign_flow":  getattr(s, 'foreign_flow_index', 0.0),
+            "avg_short_interest": avg_si * 100,  # %
+            "cpi_display":   f"물가체감: 2000년 ₩1,000 → 현재 ₩{s.base_item_price:,.0f}",
+            "lv":            lv,
+        }
+
+    def get_top_short_interest_stocks(self, n: int = 5) -> list:
+        """공매도 잔고 상위 n종목 반환"""
+        stocks_with_si = [
+            (st['meta']['c_name'], st['meta'].get('short_interest', 0.0), st.get('rate', 0.0))
+            for st in self.s.stocks
+            if 'short_interest' in st['meta']
+        ]
+        return sorted(stocks_with_si, key=lambda x: x[1], reverse=True)[:n]
+
+    def get_market_summary(self) -> dict:
+        """시장 전체 요약 — 상승/하락/보합 종목 수, 평균 거래량 배율 등"""
+        stocks = self.s.stocks
+        up   = sum(1 for st in stocks if st.get('rate', 0) > 0.5)
+        down = sum(1 for st in stocks if st.get('rate', 0) < -0.5)
+        flat = len(stocks) - up - down
+
+        # 상한가/하한가 종목
+        limit_up   = sum(1 for st in stocks if st.get('rate', 0) >= 28)
+        limit_down = sum(1 for st in stocks if st.get('rate', 0) <= -28)
+
+        # 평균 거래량 배율 계산
+        vol_ratios = []
+        for st in stocks:
+            name = st['meta']['c_name']
+            vols = self.s.daily_volume.get(name, [])
+            if len(vols) >= 5:
+                recent = vols[-20:]
+                avg = sum(
+                    abs(v.get('foreign', 0)) + abs(v.get('inst', 0)) + abs(v.get('retail', 0))
+                    for v in recent
+                ) / len(recent)
+                today_v = vols[-1] if vols else {}
+                today = abs(today_v.get('foreign', 0)) + abs(today_v.get('inst', 0)) + abs(today_v.get('retail', 0))
+                if avg > 0:
+                    vol_ratios.append(today / avg)
+        avg_vol_ratio = sum(vol_ratios) / len(vol_ratios) if vol_ratios else 1.0
+
+        return {
+            "up":          up,
+            "down":        down,
+            "flat":        flat,
+            "limit_up":    limit_up,
+            "limit_down":  limit_down,
+            "avg_vol_ratio": avg_vol_ratio,
+            "total":       len(stocks),
         }
 
     def get_investor_volume(self, name: str, days: int = 252) -> list:

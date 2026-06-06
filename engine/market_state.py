@@ -56,7 +56,7 @@ class MarketState:
         self.cumulative_inflation: float = 1.0
 
         # ── GDP (버핏 지수용) ─────────────────────
-        self.gdp: float = 600_000_000_000_000.0
+        self.gdp: float = 600_000_000_000_000.0  # 600조 (현실 한국 2000년 GDP 기준)
         self.gdp_growth_rate: float = 0.05
         self.buffett_index: float = 0.0
 
@@ -167,6 +167,11 @@ class MarketState:
         # ── 대주주 행동 공시 큐 ───────────────────
         self.major_holder_action: dict = {}
 
+        # ── 공매도 잔고 (short_interest) ──────────
+        # 종목별 유통주식 대비 공매도 비율 (0.0 ~ 0.15)
+        # market.py _calc_short_selling_adj에서 meta['short_interest']로 관리
+        # (종목별 meta에 직접 저장, 여기서는 집계/조회용 캐시 불필요)
+
         # ══════════════════════════════════════════
         # ★ 신규 필드들
         # ══════════════════════════════════════════
@@ -275,6 +280,10 @@ class MarketState:
         # ══════════════════════════════════════════
         # LV4_UNLOCK_CONDITIONS 조건 충족 연속 일수
         self._lv4_condition_days: int = 0
+        # ★ [수정] 절대 경과일 카운터 (버그7: cycle_day 리셋과 독립)
+        self._total_days_elapsed: int = 0
+        # ★ [수정] 절대 경과일 기준 페이즈 전환 시점 (버그7)
+        self._phase_transition_abs: int = -9999
         # 각 조건별 충족 여부 캐시
         self._lv4_condition_status: dict = {}
 
@@ -282,3 +291,29 @@ class MarketState:
         # ★ 시나리오 드리프트 패널티 (명시화)
         # ══════════════════════════════════════════
         self._scenario_drift_penalty: float = 0.0
+
+        # ══════════════════════════════════════════
+        # ★ 신규 시나리오 카운터 (초기화 누락 방지)
+        # ══════════════════════════════════════════
+        # 시나리오 발동 조건 누적 카운터
+        self._inflation_shock_counter: int = 0    # 인플레이션 충격
+        self._re_burst_counter: int = 0           # 부동산 버블 붕괴
+        self._secular_stagnation_counter: int = 0 # 구조적 저성장
+        self._easing_counter: int = 0             # 금융 완화 사이클
+        self._fx_crisis_counter: int = 0          # 환율 위기
+        self._tightening_counter: int = 0         # 긴축 쇼크
+        self._stagflation_counter: int = 0        # 스태그플레이션
+
+        # 이벤트 쿨다운 연도 (누락분 명시화)
+        self._last_depression_year: int = 0       # 대공황 쿨다운
+        self._last_pandemic_year: int = 0         # 팬데믹 쿨다운
+        self._last_external_shock_year: int = 0   # 외부충격 쿨다운
+
+        # 시나리오 로그용 note 버퍼
+        self._last_scenario_trigger_note: str = ""
+
+        # 페이즈 전환 부스트 기준일
+        self._phase_transition_day: int = 0
+
+        # GRI 히스토리 보조
+        self._gri_history_60: list = []           # 60일 장기 정체 판단용

@@ -249,14 +249,20 @@ class StockHTS(QMainWindow):
         macro_row.addWidget(self.market_stats_label)
         dash_lay.addLayout(macro_row)
 
-        # 라인2: 좌측(물가체감) + 우측(산업 12개)
+        # 라인2: 좌측(물가체감) + 중간(시장폭) + 우측(산업 12개)
         industry_row = QHBoxLayout()
         self.inflation_label = QLabel()
         self.inflation_label.setStyleSheet("font-size: 13px; color: #FFA500; font-weight: bold;")
+        # ★ [신규] 시장폭 레이블 (상승/하락/상한가/하한가 수)
+        self.breadth_label = QLabel()
+        self.breadth_label.setStyleSheet("font-size: 12px;")
+        self.breadth_label.setTextFormat(Qt.TextFormat.RichText)
         self.industry_label = QLabel()
         self.industry_label.setStyleSheet("font-size: 12px;")
         self.industry_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         industry_row.addWidget(self.inflation_label)
+        industry_row.addSpacing(12)
+        industry_row.addWidget(self.breadth_label)
         industry_row.addStretch()
         industry_row.addWidget(self.industry_label)
         dash_lay.addLayout(industry_row)
@@ -1150,20 +1156,38 @@ class StockHTS(QMainWindow):
             phase_str = str(s.max_tech_reached)
         total_mc = sum(st.get('market_cap', 0) for st in s.stocks)
         buffett  = getattr(s, 'buffett_index', 0.0)
-        b_icon   = "🟢" if buffett < 80 else ("🟡" if buffett < 100 else ("🟠" if buffett < 130 else "🔴"))
+        # ★ [수정] 버핏지수 정상범위 상향 (한국 코스피 기준: 70~100%가 정상)
+        b_icon   = "🟢" if buffett < 80 else ("🟡" if buffett < 120 else ("🟠" if buffett < 160 else "🔴"))
         self.index_label.setText(
             f"📊 GRI: {s.gri:,.0f} | {b_str} | {b_icon} 버핏 {buffett:.1f}% | LV.{s.max_tech_reached} [{phase_str}] | 🏦 시총: {_fmt_mc(total_mc)}"
         )
-        # ★ 원자재 (현실 단위)
-        grain = m.get('grain_price')
-        metal = m.get('metal_price')
-        semi  = m.get('semi_index')
-        extra = ""
-        if grain is not None: extra += f" | 🌾 밀: ${grain:.0f}"
-        if metal is not None: extra += f" | ⚙️ 구리: ${metal:,.0f}"
-        if semi  is not None: extra += f" | 💾 SOX: {semi:,.0f}"
-        self.macro_label.setText(f"🌍 금리: {m['interest_rate']:.2f}% | 유가: ${m['oil_price']:.2f} | 물가: {m['cpi']:.2f}% | 환율: ₩{m['exchange_rate']:,.1f}{extra}")
+        # ★ [수정] 거시경제 상태바 — 방향성 화살표 + 공매도 평균 추가
+        macro_snap = self.game_service.get_macro_snapshot()
+        rate_str = f"금리: {macro_snap['interest']:.2f}%{macro_snap['interest_dir']}"
+        fx_str   = f"환율: ₩{macro_snap['exchange']:,.0f}{macro_snap['exchange_dir']}"
+        oil_str  = f"유가: ${macro_snap['oil']:.1f}"
+        cpi_str  = f"CPI: {macro_snap['cpi']:.2f}%"
+        sox_str  = f"SOX: {macro_snap['semi']:,.0f}{macro_snap['semi_dir']}"
+        si_str   = f"공매도: {macro_snap['avg_short_interest']:.1f}%"
+        self.macro_label.setText(
+            f"🌍 {rate_str} | {oil_str} | {cpi_str} | {fx_str} | {sox_str} | {si_str}"
+        )
         self.inflation_label.setText(f"🛍️ 물가체감: 2000년 ₩1,000 → 현재 ₩{s.base_item_price:,.0f}")
+
+        # ★ [신규] 시장 폭(breadth) 표시 — 상승/하락/상한가/하한가 수
+        if s.is_market_open:
+            mkt_sum = self.game_service.get_market_summary()
+            _up_c   = f"<span style='color:#FF4444;'>▲{mkt_sum['up']}</span>"
+            _dn_c   = f"<span style='color:#4488FF;'>▼{mkt_sum['down']}</span>"
+            _fl_c   = f"<span style='color:#888888;'>━{mkt_sum['flat']}</span>"
+            _lu_c   = (f"<span style='color:#FF0000;font-weight:bold;'>상한:{mkt_sum['limit_up']}</span> "
+                       if mkt_sum['limit_up'] > 0 else "")
+            _ld_c   = (f"<span style='color:#0000FF;font-weight:bold;'>하한:{mkt_sum['limit_down']}</span> "
+                       if mkt_sum['limit_down'] > 0 else "")
+            _vr_c   = f"<span style='color:#AAAAAA;'>거래량배율:{mkt_sum['avg_vol_ratio']:.1f}x</span>"
+            _breadth_txt = f"{_up_c} {_dn_c} {_fl_c} &nbsp; {_lu_c}{_ld_c}&nbsp; {_vr_c}"
+            if hasattr(self, 'breadth_label'):
+                self.breadth_label.setText(_breadth_txt)
 
         # ── 시장 통계: 장 열린 날만 갱신, 캐시 활용 ──────────────
         if s.is_market_open:
@@ -1569,11 +1593,29 @@ class StockHTS(QMainWindow):
         large_cnt = sum(1 for st in stocks if st['meta'].get('tier') == '대형주')
         mid_cnt   = sum(1 for st in stocks if st['meta'].get('tier') == '중형주')
         small_cnt = stock_cnt - large_cnt - mid_cnt
-        top1_mc   = max((st.get('market_cap', 0) for st in stocks), default=0)
-        top1_ratio = (top1_mc / total_mc * 100) if total_mc > 0 else 0
-        buffett   = getattr(s, 'buffett_index', 0.0)
 
-        # ── 섹터별/산업별 종목 수 계산 ──────────────
+        # ★ [수정] 상위 3종목 집중도 추가
+        sorted_by_mc = sorted(stocks, key=lambda st: st.get('market_cap', 0), reverse=True)
+        top1_mc    = sorted_by_mc[0].get('market_cap', 0) if sorted_by_mc else 0
+        top3_mc    = sum(st.get('market_cap', 0) for st in sorted_by_mc[:3])
+        top1_name  = sorted_by_mc[0]['meta'].get('c_name', '?') if sorted_by_mc else '?'
+        top1_ratio = (top1_mc / total_mc * 100) if total_mc > 0 else 0
+        top3_ratio = (top3_mc / total_mc * 100) if total_mc > 0 else 0
+        buffett    = getattr(s, 'buffett_index', 0.0)
+
+        # ★ [신규] 버핏지수 해석 레이블
+        if buffett < 60:    b_eval = "저평가"
+        elif buffett < 100: b_eval = "정상"
+        elif buffett < 130: b_eval = "주의"
+        elif buffett < 170: b_eval = "경고"
+        else:               b_eval = "위험"
+
+        # ★ 버핏지수 색상 사전 계산 (f-string 중첩 방지)
+        if b_eval == "저평가":  b_eval_color = "#00AAFF"
+        elif b_eval == "정상":  b_eval_color = "#888888"
+        elif b_eval == "주의":  b_eval_color = "#FFD700"
+        elif b_eval == "경고":  b_eval_color = "#FF6600"
+        else:                   b_eval_color = "#FF0000"
         _SM = SECTOR_MAP
         sec_cnt  = {"Growth": 0, "Value": 0, "Defensive": 0, "Cyclical": 0}
         ind_cnt  = {ind: 0 for ind in MAIN_INDUSTRIES}
@@ -1614,8 +1656,9 @@ class StockHTS(QMainWindow):
             <span style='color:#aaa; font-size:12px;'>
             상장 종목 {stock_cnt}개 &nbsp;|&nbsp;
             대형 {large_cnt} · 중형 {mid_cnt} · 소형 {small_cnt}<br/>
-            1위 집중도: {top1_ratio:.1f}% ({_fmt_mc(top1_mc)}) &nbsp;|&nbsp;
-            버핏지수: {buffett:.1f}%
+            1위 집중도: {top1_ratio:.1f}% ({top1_name} / {_fmt_mc(top1_mc)})
+            &nbsp;|&nbsp; 상위3: {top3_ratio:.1f}%<br/>
+            버핏지수: {buffett:.1f}% <span style='color:{b_eval_color};'>[{b_eval}]</span>
             </span></p>
             <hr style='border:0.5px solid #222;'/>
             <p><b style='color:#FFD700;'>기술 레벨</b><br/>
@@ -1632,20 +1675,25 @@ class StockHTS(QMainWindow):
             <span style='font-size:12px;'>{ind_rows}</span></p>
             <hr style='border:0.5px solid #222;'/>
             <p><b style='color:#FFD700;'>거시경제</b><br/>
-            금리: {s.macro['interest_rate']:.2f}%<br/>
+            <span style='font-size:12px;'>
+            금리: {s.macro['interest_rate']:.2f}% &nbsp;|&nbsp;
             유가: ${s.macro['oil_price']:.1f}<br/>
-            환율: ₩{s.macro['exchange_rate']:,.0f}<br/>
+            환율: ₩{s.macro['exchange_rate']:,.0f} &nbsp;|&nbsp;
             CPI: {s.macro['cpi']:.2f}%<br/>
-            버핏지수: <b style='color:{
-                "#00FF00" if buffett < 80 else
-                ("#FFD700" if buffett < 100 else
-                ("#FFA500" if buffett < 130 else "#FF4444"))
-            };'>{buffett:.1f}%</b> ({
-                "저평가" if buffett < 80 else
-                ("적정" if buffett < 100 else
-                ("고평가" if buffett < 130 else "버블"))
-            })
-            {_build_commodity_html(s.macro)}
+            🌾 밀: ${s.macro.get('grain_price', 250):.0f}/bu &nbsp;|&nbsp;
+            ⚙️ 구리: ${s.macro.get('metal_price', 1800):,.0f}/t<br/>
+            💾 SOX: {s.macro.get('semi_index', 1000):,.0f}<br/>
+            <br/>
+            버핏지수: <b style='color:{b_eval_color};'>{buffett:.1f}% [{b_eval}]</b><br/>
+            GDP 성장률: <span style='color:{"#00FF88" if getattr(s,"gdp_growth_rate",0)>=0 else "#FF4444"};'>
+            {getattr(s,"gdp_growth_rate",0)*100:+.1f}%</span> (연환산)<br/>
+            경기 사이클: <b>{getattr(s,"cycle_stage","확장")}</b> &nbsp;|&nbsp;
+            투자심리: {getattr(s,"sentiment",50.0):.0f}<br/>
+            외국인 수급: <span style='color:{"#FF4444" if getattr(s,"foreign_flow_index",0)>=0 else "#4444FF"};'>
+            {getattr(s,"foreign_flow_index",0):+.1f}</span><br/>
+            광기지수(MMI): <span style='color:{"#FF4444" if getattr(s,"market_mania_index",1)>=1.5 else "#888888"};'>
+            {getattr(s,"market_mania_index",1.0):.2f}</span>
+            </span>
             </p>
             {_build_event_html(s)}
             <hr style='border:0.5px solid #333;'/>

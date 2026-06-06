@@ -749,10 +749,9 @@ class SaveManager:
                     "prev_total_market_cap": getattr(self.s, '_prev_total_market_cap', 0.0),
                     "gri_history_20":        getattr(self.s, '_gri_history_20', []),
                     "tech_upgrade_year":     getattr(self.s, '_tech_upgrade_year', 1999),
-                    "tech_upgrade_year":     getattr(self.s, '_tech_upgrade_year', 1999),
                     "depression_warning_lv": getattr(self.s, '_depression_warning_sent_lv', 0),
                     "prev_macro_snapshot":   getattr(self.s, '_prev_macro_snapshot', {}),
-                    "earnings_history":      self._slim_earnings_history(),  # 최근 8분기만
+                    "earnings_history":      self._slim_earnings_history(),
                     "pending_delist":        {
                         k: {"date": v["date"].strftime("%Y-%m-%d") if hasattr(v.get("date"), "strftime") else str(v.get("date", "")), "reason": v.get("reason", "")}
                         if isinstance(v, dict) else str(v)
@@ -768,25 +767,58 @@ class SaveManager:
                     "margin_balance":        getattr(self.s, 'margin_balance', {}),
                     "earnings_consensus":    getattr(self.s, 'earnings_consensus', {}),
                     "major_holder_action":   getattr(self.s, 'major_holder_action', {}),
-                    # ★ 신규 이벤트 상태
                     "war_event":             getattr(self.s, 'war_event', {}),
                     "pandemic_event":        getattr(self.s, 'pandemic_event', {}),
                     "market_fully_formed":   getattr(self.s, '_market_fully_formed', False),
-                    "last_external_shock_year": getattr(self.s, '_last_external_shock_year', 0),
-                    # ★ 테마 모멘텀
                     "active_themes":         getattr(self.s, 'active_themes', []),
                     "theme_cooldown":        getattr(self.s, '_theme_cooldown', {}),
-                    # ★ 티어 심사 마지막 완료 분기 (예: "2003_6")
                     "last_tier_exam_yearmonth": getattr(self.s, '_last_tier_exam_yearmonth', None),
-                    # daily_volume: SQLite investor_volume으로 관리 — JSON 제외
-                    "pending_delist":        {
-                        k: {"date": v["date"].strftime("%Y-%m-%d") if hasattr(v.get("date"), "strftime") else str(v.get("date", "")), "reason": v.get("reason", "")}
-                        if isinstance(v, dict) else str(v)
-                        for k, v in self.s.pending_events.get("delist", {}).items()
+                    # ★ [신규] 누락 필드 추가
+                    "gdp_growth_rate":           getattr(self.s, 'gdp_growth_rate', 0.05),
+                    "boom_event":                getattr(self.s, 'boom_event', {}),
+                    "export_sanctions":          getattr(self.s, 'export_sanctions', {}),
+                    "depression_active":         getattr(self.s, 'depression_active', False),
+                    "depression_trigger_count":  getattr(self.s, 'depression_trigger_count', 0),
+                    "recovery_trigger_count":    getattr(self.s, 'recovery_trigger_count', 0),
+                    "last_crisis_year":          getattr(self.s, '_last_crisis_year', 0),
+                    "last_boom_year":            getattr(self.s, '_last_boom_year', 0),
+                    "last_boom_month":           getattr(self.s, '_last_boom_month', 0),
+                    "last_boom_year_m":          getattr(self.s, '_last_boom_year_m', 0),
+                    "last_depression_year":      getattr(self.s, '_last_depression_year', 0),
+                    "last_external_shock_year":  getattr(self.s, '_last_external_shock_year', 0),
+                    "tech_upgrade_years":        getattr(self.s, '_tech_upgrade_years', {1: 2000}),
+                    "lv4_chance_accum":          getattr(self.s, 'lv4_chance_accum', 0.0),
+                    "lv4_condition_days":        getattr(self.s, '_lv4_condition_days', 0),
+                    "lv4_condition_status":      getattr(self.s, '_lv4_condition_status', {}),
+                    "market_mania_index":        getattr(self.s, 'market_mania_index', 1.0),
+                    "mania_history":             getattr(self.s, '_mania_history', []),
+                    "bubble_cycle_count":        getattr(self.s, '_bubble_cycle_count', 0),
+                    "last_bubble_burst_year":    getattr(self.s, '_last_bubble_burst_year', 0),
+                    "dominant_industry":         getattr(self.s, 'dominant_industry', None),
+                    "dominance_level":           getattr(self.s, 'dominance_level', None),
+                    "dominance_years":           getattr(self.s, 'dominance_years', 0),
+                    "dominance_counter":         getattr(self.s, '_dominance_counter', {}),
+                    "productivity_lag_queue":    getattr(self.s, '_productivity_lag_queue', {}),
+                    "phase_transition_day":      getattr(self.s, '_phase_transition_day', 0),
+                    "phase_transition_abs":      getattr(self.s, '_phase_transition_abs', -9999),
+                    "total_days_elapsed":        getattr(self.s, '_total_days_elapsed', 0),
+                    "last_processed_phase":      getattr(self.s, '_last_processed_phase', '1A'),
+                    "scenario_drift_penalty":    getattr(self.s, '_scenario_drift_penalty', 0.0),
+                    "scenario_timer":            getattr(self.s, 'scenario_timer', 0),
+                    "prev_foreign_flow":         getattr(self.s, '_prev_foreign_flow', 0.0),
+                    "temp_sector_buff":          {
+                        k: [v[0], v[1].strftime("%Y-%m-%d %H:%M:%S") if hasattr(v[1], 'strftime') else str(v[1])]
+                        for k, v in getattr(self.s, 'temp_sector_buff', {}).items()
                     },
-                    "gdp":                   getattr(self.s, 'gdp', 600_000_000_000_000.0),
-                    "buffett_index":         getattr(self.s, 'buffett_index', 0.0),
-                    "foreign_flow_index":    getattr(self.s, 'foreign_flow_index', 0.0),
+                    "inflation_shock_counter":   getattr(self.s, '_inflation_shock_counter', 0),
+                    "re_burst_counter":          getattr(self.s, '_re_burst_counter', 0),
+                    "secular_stagnation_counter":getattr(self.s, '_secular_stagnation_counter', 0),
+                    "easing_counter":            getattr(self.s, '_easing_counter', 0),
+                    "fx_crisis_counter":         getattr(self.s, '_fx_crisis_counter', 0),
+                    "tightening_counter":        getattr(self.s, '_tightening_counter', 0),
+                    "pending_tech_jump":         getattr(self.s, 'pending_events', {}).get('tech_jump'),
+                    "last_market_stats":         getattr(self.s, '_last_market_stats', {}),
+                    "last_scenario_trigger_note":getattr(self.s, '_last_scenario_trigger_note', ''),
                 },
                 "player": {
                     "my_cash":       my_cash,
@@ -888,6 +920,83 @@ class SaveManager:
             if 'metal_price'  not in macro: macro['metal_price']  = 1800.0
             if 'semi_index'   not in macro: macro['semi_index']   = 1000.0
 
+            # ★ [신규] 누락 필드 복원 — 구버전 세이브와 완전 호환
+            self.s.gdp_growth_rate           = eng.get("gdp_growth_rate", 0.05)
+            self.s.boom_event                = eng.get("boom_event", {})
+            self.s.export_sanctions          = eng.get("export_sanctions", {})
+            self.s.depression_active         = eng.get("depression_active", False)
+            self.s.depression_trigger_count  = eng.get("depression_trigger_count", 0)
+            self.s.recovery_trigger_count    = eng.get("recovery_trigger_count", 0)
+            self.s._last_crisis_year         = eng.get("last_crisis_year", 0)
+            self.s._last_boom_year           = eng.get("last_boom_year", 0)
+            self.s._last_boom_month          = eng.get("last_boom_month", 0)
+            self.s._last_boom_year_m         = eng.get("last_boom_year_m", 0)
+            self.s._last_depression_year     = eng.get("last_depression_year", 0)
+            self.s._last_external_shock_year = eng.get("last_external_shock_year", 0)
+
+            # _tech_upgrade_years: 구버전 단일값 _tech_upgrade_year 호환
+            raw_tuy = eng.get("tech_upgrade_years")
+            if raw_tuy and isinstance(raw_tuy, dict):
+                self.s._tech_upgrade_years = {int(k): v for k, v in raw_tuy.items()}
+            else:
+                _old_year = eng.get("tech_upgrade_year", 2000)
+                self.s._tech_upgrade_years = {1: _old_year, 2: None, 3: None, 4: None}
+
+            self.s.lv4_chance_accum          = eng.get("lv4_chance_accum", 0.0)
+            self.s._lv4_condition_days       = eng.get("lv4_condition_days", 0)
+            self.s._lv4_condition_status     = eng.get("lv4_condition_status", {})
+            self.s.market_mania_index        = eng.get("market_mania_index", 1.0)
+            self.s._mania_history            = eng.get("mania_history", [])
+            self.s._bubble_cycle_count       = eng.get("bubble_cycle_count", 0)
+            self.s._last_bubble_burst_year   = eng.get("last_bubble_burst_year", 0)
+            self.s.dominant_industry         = eng.get("dominant_industry", None)
+            self.s.dominance_level           = eng.get("dominance_level", None)
+            self.s.dominance_years           = eng.get("dominance_years", 0)
+            self.s._dominance_counter        = eng.get("dominance_counter", {})
+            self.s._productivity_lag_queue   = eng.get("productivity_lag_queue", {})
+            self.s._phase_transition_day     = eng.get("phase_transition_day", 0)
+            self.s._phase_transition_abs     = eng.get("phase_transition_abs", -9999)
+            self.s._total_days_elapsed       = eng.get("total_days_elapsed", 0)
+            self.s._last_processed_phase     = eng.get("last_processed_phase", "1A")
+            self.s._scenario_drift_penalty   = eng.get("scenario_drift_penalty", 0.0)
+            self.s.scenario_timer            = eng.get("scenario_timer", 0)
+            self.s._prev_foreign_flow        = eng.get("prev_foreign_flow", 0.0)
+            self.s._last_market_stats        = eng.get("last_market_stats", {})
+            self.s._last_scenario_trigger_note = eng.get("last_scenario_trigger_note", "")
+
+            # temp_sector_buff: [float, datetime_str] → (float, datetime)
+            raw_tsb = eng.get("temp_sector_buff", {})
+            _tsb = {}
+            for ind_k, val_pair in raw_tsb.items():
+                try:
+                    from datetime import datetime as _dt2
+                    _tsb[ind_k] = (float(val_pair[0]), _dt2.strptime(val_pair[1][:19], "%Y-%m-%d %H:%M:%S"))
+                except Exception:
+                    pass
+            self.s.temp_sector_buff = _tsb
+
+            # 시나리오 카운터
+            self.s._inflation_shock_counter    = eng.get("inflation_shock_counter", 0)
+            self.s._re_burst_counter           = eng.get("re_burst_counter", 0)
+            self.s._secular_stagnation_counter = eng.get("secular_stagnation_counter", 0)
+            self.s._easing_counter             = eng.get("easing_counter", 0)
+            self.s._fx_crisis_counter          = eng.get("fx_crisis_counter", 0)
+            self.s._tightening_counter         = eng.get("tightening_counter", 0)
+
+            # pending tech_jump 복원
+            raw_tj = eng.get("pending_tech_jump")
+            if raw_tj and isinstance(raw_tj, dict):
+                try:
+                    from datetime import datetime as _dt3
+                    raw_date = raw_tj.get("date")
+                    if isinstance(raw_date, str):
+                        raw_tj["date"] = _dt3.strptime(raw_date[:10], "%Y-%m-%d")
+                    self.s.pending_events["tech_jump"] = raw_tj
+                except Exception:
+                    self.s.pending_events["tech_jump"] = None
+            else:
+                self.s.pending_events["tech_jump"] = None
+
             # pending_events delist 복원
             pending_delist = eng.get("pending_delist", {})
             self.s.pending_events["delist"] = {}
@@ -903,14 +1012,23 @@ class SaveManager:
                     except Exception:
                         pass
 
-            # ★ initial_price 복원 (DB에서 첫 주가 조회)
+            # ★ 종목 메타 복원 (initial_price + listed_date_dt + short_interest 초기화)
             for stock in self.s.stocks:
                 meta = stock['meta']
+                # initial_price 복원 (DB에서 첫 주가 조회)
                 if not meta.get('initial_price') or meta.get('initial_price', 0) <= 10:
                     name = meta.get('c_name', '')
                     first_price = self.get_first_price(name)
                     if first_price > 10:
                         meta['initial_price'] = first_price
+                # listed_date_dt 복원 (이미 위에서 처리됐으면 skip)
+                if not meta.get('listed_date_dt'):
+                    try:
+                        from datetime import datetime as _dt4
+                        meta['listed_date_dt'] = _dt4.strptime(meta['listed_date'], '%Y-%m-%d')
+                    except Exception:
+                        pass
+                # short_interest: 없으면 시장.py에서 자동 초기화 (여기서는 강제 설정 불필요)
 
             self.s.has_paid_news_access  = eng.get("has_paid_news_access", False)
 
@@ -1103,26 +1221,36 @@ class SaveManager:
         if not rows:
             return ""
         lines = []
-        lines.append("=" * 130)
+        lines.append("=" * 200)
         lines.append("G.PY Economic System — 시나리오 변경 로그")
-        lines.append("=" * 130)
+        lines.append("=" * 200)
 
         # 헤더
         lines.append(
             f"{'날짜':<12} {'시작GRI':>8} {'고점':>8} {'저점':>8} {'종료GRI':>8} {'일수':>5} "
             f"{'버블':>6} {'금리':>6} {'유가':>6} {'환율':>7} {'CPI':>5} "
-            f"{'밀':>5} {'구리':>7} {'SOX':>6} "
+            f"{'밀':>5} {'구리':>7} {'SOX':>7} "
             f"{'PER대':>6} {'PER중':>6} {'PER소':>6} "
             f"{'성장':>5} {'가치':>5} "
             f"{'IT':>5} {'건강':>5} {'에너지':>5} {'금융':>5} "
             f"{'산업재':>5} {'소재':>5} {'부동산':>5} {'재건':>5} "
             f"{'유틸':>5} {'자유소비':>6} {'필수소비':>6} {'커뮤':>5}  "
-            f"{'시나리오':<30} {'전쟁/이벤트'}"
+            f"{'시나리오':<32}  {'발동조건 / 전쟁·이벤트'}"
         )
-        lines.append("-" * 180)
+        lines.append("-" * 200)
 
         for r in rows:
-            war = r.get('war_event') or ""
+            # 전쟁/이벤트 + 발동조건 note 통합
+            war  = r.get('war_event') or ""
+            note = r.get('note') or ""
+            # note가 발동조건이면 앞에, 전쟁은 뒤에 붙임
+            if note and not note.startswith(r.get('scenario', '')[:4]):
+                event_col = f"{note}"
+                if war:
+                    event_col += f"  |  {war}"
+            else:
+                event_col = war if war else note
+
             gri = r.get('gri', 0)
             gri_end = r.get('gri_end', gri)
             chg = f"({(gri_end/gri-1)*100:+.1f}%)" if gri > 0 else ""
@@ -1141,7 +1269,7 @@ class SaveManager:
                 f"{r['cpi']:>4.2f}% "
                 f"${r.get('grain_price', 0):>4.0f} "
                 f"${r.get('metal_price', 0):>6.0f} "
-                f"{r.get('semi_index', 0):>6.0f} "
+                f"{r.get('semi_index', 0):>7.0f} "
                 f"{r.get('per_large', 0):>5.1f}x "
                 f"{r.get('per_mid', 0):>5.1f}x "
                 f"{r.get('per_small', 0):>5.1f}x "
@@ -1159,11 +1287,11 @@ class SaveManager:
                 f"{r.get('ind_consumer', 0):>+6.1f}% "
                 f"{r.get('ind_staple', 0):>+6.1f}% "
                 f"{r.get('ind_comm', 0):>+5.1f}%  "
-                f"{r['scenario']:<30} "
-                f"{war}"
+                f"{r['scenario']:<32}  "
+                f"{event_col}"
             )
 
-        lines.append("=" * 180)
+        lines.append("=" * 200)
         lines.append(f"총 {len(rows)}개 시나리오 기록")
 
         txt = "\n".join(lines)

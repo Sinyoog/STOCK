@@ -173,21 +173,33 @@ class CompanyManager:
         elif tier == "대": base_ts += 0.02
         final_ts = max(0.0, base_ts)
 
-        # 3. 지분 배분
-        if tier == "대":
-            owner_r   = random.uniform(0.35, 0.45)
-            foreign_r = random.uniform(0.30, 0.40)
-            inst_r    = random.uniform(0.10, 0.15)
+        # 3. 지분 배분 — 현실 코스피 기준 재설계
+        # ★ [수정] 대형주 대주주 과도(35~45%) → 현실화(18~32%)
+        #   삼성전자 이재용 일가 ~20%, 현대차 오너 ~22% 수준
+        # ★ [수정] 대형주 기관 과소(10~15%) → 현실화(18~30%)
+        #   국민연금 + 글로벌 자산운용사 합산 실제 20~35%
+        if tier == "대" or tier == "대1":
+            owner_r   = random.uniform(0.18, 0.32)   # 0.35~0.45 → 0.18~0.32
+            foreign_r = random.uniform(0.25, 0.45)   # 0.30~0.40 → 0.25~0.45
+            inst_r    = random.uniform(0.18, 0.30)   # 0.10~0.15 → 0.18~0.30
         elif tier == "중":
-            owner_r   = random.uniform(0.30, 0.45)
-            foreign_r = random.uniform(0.05, 0.15)
-            inst_r    = random.uniform(0.10, 0.20)
-        else:
-            owner_r   = random.uniform(0.25, 0.40)
-            foreign_r = random.uniform(0.01, 0.05)
-            inst_r    = random.uniform(0.05, 0.10)
+            owner_r   = random.uniform(0.28, 0.45)   # 유지 (오너 지배력 강한 중견)
+            foreign_r = random.uniform(0.05, 0.20)   # 소폭 상향
+            inst_r    = random.uniform(0.12, 0.22)   # 0.10~0.20 → 0.12~0.22
+        else:  # 소
+            owner_r   = random.uniform(0.20, 0.40)
+            foreign_r = random.uniform(0.01, 0.06)
+            inst_r    = random.uniform(0.05, 0.12)
 
-        retail_r    = max(0.0, 1.0 - (owner_r + foreign_r + inst_r))
+        # ★ 비율 합 1.0 초과 방지 (대형주에서 가능성 있음)
+        _total_r = owner_r + foreign_r + inst_r
+        if _total_r > 0.90:   # 개인에게 최소 10% 남기기
+            _scale = 0.90 / _total_r
+            owner_r   *= _scale
+            foreign_r *= _scale
+            inst_r    *= _scale
+
+        retail_r    = max(0.05, 1.0 - (owner_r + foreign_r + inst_r))
         rem_p       = 1.0 - final_ts
         owner_abs   = owner_r   * rem_p
         foreign_abs = foreign_r * rem_p
@@ -195,37 +207,40 @@ class CompanyManager:
         retail_abs  = retail_r  * rem_p
 
         # 4. 가격 및 주식수 — 시총 목표 역산
-        # 코스피 현실 기준 (2000년 초)
-        # 최상위("대1"): 5조~30조 (삼성전자급 → 26년 후 800% = 40조~240조)
-        # 일반 대기업("대"): 5000억~5조
-        # 중견("중"): 1000억~1조
-        # 중소("소"): 100억~3000억
+        # 규칙:
+        #   대1 (3개): 삼성전자/SK하이닉스/LG급 → 목표 시총 20조~40조
+        #   대형주: 포항제철/현대차급 → 최대 8조
+        #   중형주: 500억~5000억  /  소형주: 50억~500억
+        # ★ _MC_CAP_BY_PHASE(market.py 상한)도 1A=40조로 맞춰져 있어 즉시 폭락 없음
+
         if tier == "대1":
-            # 현실 2000년 기준: KT 37조, 삼성전자 32조, SKT 28조
-            # 목표 평균 30조 → 26년 성장배수 7~8배 → 200~240조 도달
+            # 20조~40조 범위에서 생성
+            _d1_mc_target = random.uniform(20e12, 40e12)
             case = random.randint(1, 3)
             if case == 1:   # KT형: 발행주 많고 주가 낮음
-                p       = random.randint(30_000, 50_000)
-                s_count = random.randint(300, 800) * 1_000_000
-            elif case == 2: # 삼성전자형: 주가/주식수 균형 ← 상향
-                p       = random.randint(70_000, 150_000)
-                s_count = random.randint(300, 600) * 1_000_000
-            else:           # SKT형: 고주가 소량 ← 상향
-                p       = random.randint(300_000, 700_000)
-                s_count = random.randint(20, 50) * 1_000_000
+                p = random.randint(30_000, 50_000)
+            elif case == 2: # 삼성전자형: 균형
+                p = random.randint(70_000, 150_000)
+            else:           # SKT형: 고주가 소량
+                p = random.randint(200_000, 500_000)
+            s_count = max(1_000_000, int(_d1_mc_target / p))
+
         elif tier == "대":
-            # 현실 2000년 포항제철/현대전자급: 1조~8조
+            # 최대 8조
+            _d_mc_max = 8e12
             p       = random.randint(10_000, 30_000)
-            s_count = random.randint(100, 300) * 1_000_000
+            s_count = random.randint(50, 200) * 1_000_000
+            if float(p * s_count) > _d_mc_max:
+                s_count = max(1_000_000, int(_d_mc_max / p))
+
         elif tier == "중":
-            # 중견: 500억~5000억
+            # 500억~5000억
             p       = random.randint(3_000, 15_000)
             s_count = random.randint(20, 100) * 1_000_000
         else:
-            # 중소: 50억~500억
+            # 50억~500억
             p       = random.randint(500, 5_000)
             s_count = random.randint(5, 30) * 1_000_000
-
         # 5. 이름
         is_group  = (group_id is not None)
         gn_arg    = self.state.groups[group_id]['name'] if is_group else None
@@ -250,15 +265,31 @@ class CompanyManager:
         # ★ 7. 부채비율 초기화 (현실적 범위)
         # 부채비율 = 부채 / 자산 × 100
         # 대형주: 30~60%, 중형주: 50~120%, 소형주: 60~180%
+        # ★ [수정] 코스피 상장 심사 기준으로 현실화
+        # 코스피는 상장 시 재무 검증이 엄격 → 초기 부채비율이 코스닥보다 낮음
+        # 소형주도 코스피 상장 기업이므로 최대 120%로 제한 (기존 180%)
         debt_ratio_range = {
-            "대": (0.30, 0.60),
-            "대1": (0.30, 0.60),
-            "중": (0.50, 1.20),
-            "소": (0.60, 1.80),
+            "대1": (0.25, 0.60),   # 최상위 그룹사: 삼성전자 40%, SKT 60% 수준
+            "대":  (0.30, 0.80),   # 일반 대기업: 현대차급
+            "중":  (0.50, 1.20),   # 중견기업: 코스피 중형주 평균
+            "소":  (0.50, 1.20),   # 기존 0.60~1.80 → 0.50~1.20 (코스피 상장 기준)
         }.get(tier, (0.50, 1.20))
         init_debt_ratio = random.uniform(*debt_ratio_range)
-        init_assets     = float(p * s_count)
-        init_debt       = init_assets * init_debt_ratio
+        # ★ [수정] init_assets를 시총 기반이 아닌 현실적 PBR 역산으로 설정
+        # 기존: init_assets = 시총 → PBR = 1.0 → 첫 실적 발표 후 PER 과고평가로 지속 하락
+        # 현실: 삼성전자(시총 32조, 총자산 50조, PBR ~0.8), 코스피 평균 PBR ~1.0~1.2
+        # 대1: PBR 0.5~0.9 → assets = 시총 / 0.7 (총자산이 시총보다 큼)
+        # 대:  PBR 0.6~1.1 → assets = 시총 / 0.85
+        # 중/소: PBR 0.8~1.3 → assets = 시총 / 1.0
+        _mc = float(p * s_count)
+        _pbr_divisor = {
+            "대1": random.uniform(0.55, 0.85),   # assets = 시총 / 0.55~0.85 → PBR 0.55~0.85
+            "대":  random.uniform(0.65, 1.00),
+            "중":  random.uniform(0.80, 1.20),
+            "소":  random.uniform(0.90, 1.40),
+        }.get(tier, 1.0)
+        init_assets = _mc / _pbr_divisor
+        init_debt   = init_assets * init_debt_ratio
 
         # ★ 8. 신용등급 초기화 (HP 기반)
         # AA: hp >= 80%, BB: hp >= 50%, CCC: hp < 50%

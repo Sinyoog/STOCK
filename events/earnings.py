@@ -20,36 +20,257 @@ class EarningsManager:
         meta = stock['meta']
         tier = meta.get('tier', '소형주')
 
-        # ★ 경기 사이클 → 실적 연동
+        # ════════════════════════════════════════════════════════
+        # ★ 매출 계산 v2 — 거시경제 + 산업 + 대기업 연동 시스템
+        # ════════════════════════════════════════════════════════
+
+        # ── 0. 기본 변수 ──────────────────────────────────────
         cycle = getattr(self.s, 'cycle_stage', '확장')
-        cycle_revenue_mult = {
-            "확장": 1.10,   # 확장기: 매출 10% 증가
-            "정점": 1.00,   # 정점기: 보통
-            "수축": 0.88,   # 수축기: 매출 12% 감소
-            "저점": 0.80,   # 저점기: 매출 20% 감소
+        macro = self.s.macro
+        ind   = meta.get('ind', '')
+        name  = meta.get('c_name', '')
+        group = meta.get('group', None)
+
+        from engine.constants import SECTOR_MAP as _SM, EXPORT_DEPENDENCY
+        _sector      = _SM.get(ind, 'Value')
+        export_dep   = EXPORT_DEPENDENCY.get(ind, 0.3)
+        domestic_dep = 1.0 - export_dep
+
+        # ── 1. 전분기 매출 조회 ───────────────────────────────
+        _hist = self.s.earnings_history.get(name, {})
+        _prev_revenue = None
+        for _yr in sorted(_hist.keys(), reverse=True):
+            for _q in sorted(_hist[_yr].keys(), reverse=True):
+                _r = _hist[_yr][_q].get('revenue')
+                if _r and _r > 0:
+                    _prev_revenue = _r
+                    break
+            if _prev_revenue:
+                break
+
+        # 전분기 없으면 assets 기반 초기화 (첫 실적)
+        if not _prev_revenue or _prev_revenue <= 0:
+            _init_rev = meta['assets'] * random.uniform(0.04, 0.10)
+            _prev_revenue = _init_rev
+
+        # ── 2. 기본 분기 성장률 (노이즈 포함) ─────────────────
+        # 연간 성장률 ±20% 범위에서 분기별 확률적 변동
+        # 기업별 모멘텀(momentum) 반영
+        _momentum = meta.get('momentum', 0.0)
+        _base_qoq = random.gauss(0.015 + _momentum * 0.05, 0.06)
+        # 분기 변동 하드캡: ±30%
+        _base_qoq = max(-0.30, min(0.30, _base_qoq))
+
+        # ── 3. 거시경제 보정 계수 ─────────────────────────────
+        _macro_adj = 1.0
+
+        # 3-1. GDP 성장률 (전체 시장 파이)
+        _gdp_growth = getattr(self.s, 'gdp_growth_rate', 0.05)
+        # GDP 1% → 매출 0.3~0.8% (방어주는 절반)
+        _gdp_sens = 0.4 if _sector == 'Defensive' else 0.7
+        _macro_adj *= (1.0 + _gdp_growth * _gdp_sens * 0.25)  # 분기 기준
+
+        # 3-2. 경기 사이클
+        _cycle_adj = {
+            '확장': 1.04,
+            '정점': 1.00,
+            '수축': 0.93,
+            '저점': 0.86,
         }.get(cycle, 1.0)
+        # 방어주는 사이클 영향 절반
+        if _sector == 'Defensive':
+            _cycle_adj = 1.0 + (_cycle_adj - 1.0) * 0.4
+        _macro_adj *= _cycle_adj
+
+        # 3-3. 금리 영향 (B2B/설비투자 비중 높은 산업 타격)
+        _rate = macro.get('interest_rate', 4.0)
+        _rate_sensitive = {'산업재': 0.8, '부동산': 1.0, '금융': -0.5,
+                           'IT': 0.3, '소재': 0.4, '건강관리': 0.2}
+        _rate_sens = _rate_sensitive.get(ind, 0.3)
+        if _rate > 4.0:
+            _rate_penalty = (_rate - 4.0) * _rate_sens * 0.02  # 금리 1%p 초과당
+            _macro_adj *= max(0.85, 1.0 - _rate_penalty)
+        elif _rate < 2.0 and ind == '금융':
+            # 초저금리는 금융 이익 압박
+            _macro_adj *= 0.92
+
+        # 3-4. 환율 영향 (수출 기업 수혜/내수 기업 무관)
+        _fx_prev = self.s._prev_macro_snapshot.get('exchange_rate', 1100)                    if hasattr(self.s, '_prev_macro_snapshot') else 1100
+        _fx_now  = macro.get('exchange_rate', 1100)
+        _fx_chg  = (_fx_now - _fx_prev) / max(1.0, _fx_prev)
+        if abs(_fx_chg) >= 0.01:
+            # 원화 약세(환율 상승) → 수출 매출 증가, 내수는 수입비용 상승
+            _fx_adj  = 1.0 + _fx_chg * export_dep * 0.6
+            _fx_adj -= _fx_chg * domestic_dep * 0.1  # 내수: 수입물가 상승 부담
+            _macro_adj *= max(0.90, min(1.15, _fx_adj))
+
+        # 3-5. 산업별 원자재/지수 연동
+        _comm_adj = 1.0
+        _oil  = macro.get('oil_price', 55)
+        _sox  = macro.get('semi_index', 1000)
+        _cu   = macro.get('metal_price', 2000)
+        _sox_prev = self.s._prev_macro_snapshot.get('semi_index', _sox)                     if hasattr(self.s, '_prev_macro_snapshot') else _sox
+        _cu_prev  = self.s._prev_macro_snapshot.get('metal_price', _cu)                     if hasattr(self.s, '_prev_macro_snapshot') else _cu
+        _oil_prev = self.s._prev_macro_snapshot.get('oil_price', _oil)                     if hasattr(self.s, '_prev_macro_snapshot') else _oil
+
+        _sox_chg = (_sox - _sox_prev) / max(1.0, _sox_prev)
+        _cu_chg  = (_cu  - _cu_prev)  / max(1.0, _cu_prev)
+        _oil_chg = (_oil - _oil_prev) / max(1.0, _oil_prev)
+
+        if ind == 'IT':
+            # SOX 20% 상승 → IT 매출 +5%
+            _comm_adj += _sox_chg * 0.25
+        elif ind == '에너지':
+            # 유가 10% 변동 → 에너지 매출 ±6%
+            _comm_adj += _oil_chg * 0.60
+        elif ind == '소재':
+            # 구리 10% 변동 → 소재 ±4%
+            _comm_adj += _cu_chg * 0.40
+        elif ind == '산업재':
+            # 구리 + 유가 복합
+            _comm_adj += _cu_chg * 0.25 + _oil_chg * 0.15
+        elif ind == '금융':
+            # 금리 상승 = 이자수입 증가 → 매출 증가
+            if _rate > 3.0:
+                _comm_adj += (_rate - 3.0) * 0.04
+        elif ind == '건강관리':
+            # 방어적 — 경기 무관, 인구 고령화 트렌드로 완만 성장
+            _comm_adj += 0.005
+        elif ind == '필수소비재':
+            # CPI 상승 → 판가 인상 → 명목 매출 증가
+            _cpi = macro.get('cpi', 2.0)
+            _comm_adj += (_cpi - 2.0) * 0.015 if _cpi > 2.0 else 0
+
+        _comm_adj = max(0.85, min(1.20, _comm_adj))
+        _macro_adj *= _comm_adj
+
+        # 3-6. 시나리오 직접 보정
+        _scenario = self.s.current_scenario
+        _scenario_rev_adj = 1.0
+        if '대공황' in _scenario and '극복' not in _scenario:
+            _scenario_rev_adj = 0.65  # 대공황: 전 산업 매출 -35%
+        elif '스태그' in _scenario:
+            _scenario_rev_adj = 0.88  # 스태그: -12%
+        elif '팬데믹' in _scenario and '극복' not in _scenario:
+            _pand_liq = getattr(self.s, '_pandemic_liquidity_active', False)
+            if _pand_liq:
+                # 유동성 장세: IT/헬스 수혜, 오프라인 타격
+                if ind in ('IT', '건강관리', '커뮤니케이션'):
+                    _scenario_rev_adj = 1.25
+                elif ind in ('자유소비재', '부동산', '에너지'):
+                    _scenario_rev_adj = 0.80
+            else:
+                # 팬데믹 초반: 전반적 매출 감소
+                if ind in ('IT', '건강관리'):
+                    _scenario_rev_adj = 1.05  # 비대면 수혜
+                else:
+                    _scenario_rev_adj = 0.82
+        elif '전쟁' in _scenario or '분쟁' in _scenario:
+            # 전쟁: 방산/에너지/소재 수혜, IT/소비재 타격
+            if ind in ('에너지', '소재', '산업재'):
+                _scenario_rev_adj = 1.15
+            elif ind in ('자유소비재', '커뮤니케이션'):
+                _scenario_rev_adj = 0.90
+        elif '재건' in _scenario:
+            # 전후 재건: 건설/산업재/소재 폭발 성장
+            if ind in ('산업재', '소재', '부동산'):
+                _scenario_rev_adj = 1.30
+        elif '금융위기' in _scenario and '극복' not in _scenario:
+            _scenario_rev_adj = 0.78
+        elif '내수 소비 붐' in _scenario:
+            _scenario_rev_adj = 1.0 + domestic_dep * 0.15
+        elif 'FTA' in _scenario:
+            _scenario_rev_adj = 1.0 + export_dep * 0.10
+        _macro_adj *= _scenario_rev_adj
+
+        # ── 4. 대기업 연동 (중소/중견만 적용) ─────────────────
+        # 현실: 중소기업 매출의 30~50%가 대기업 납품
+        # 같은 그룹사 대1 → 30% 연동, 동일 산업 대형주 평균 → 15% 연동
+        _tier_raw = meta.get('tier_raw', '소')
+        _large_cap_adj = 1.0
+
+        if _tier_raw in ('소', '중'):
+            # 같은 그룹사 대1 종목 실적 조회
+            _group_id = meta.get('group_id', None)
+            _anchor_growth = None
+
+            if _group_id is not None:
+                for _st in self.s.stocks:
+                    _m = _st['meta']
+                    if (_m.get('group_id') == _group_id and
+                        _m.get('tier_raw') == '대1'):
+                        # 같은 그룹사 대1의 전분기 매출 성장률
+                        _anchor_name = _m.get('c_name', '')
+                        _anchor_hist = self.s.earnings_history.get(_anchor_name, {})
+                        _anchor_revs = []
+                        for _ayr in sorted(_anchor_hist.keys(), reverse=True):
+                            for _aq in sorted(_anchor_hist[_ayr].keys(), reverse=True):
+                                _ar = _anchor_hist[_ayr][_aq].get('revenue', 0)
+                                if _ar > 0:
+                                    _anchor_revs.append(_ar)
+                                if len(_anchor_revs) >= 2:
+                                    break
+                            if len(_anchor_revs) >= 2:
+                                break
+                        if len(_anchor_revs) >= 2:
+                            _anchor_growth = (_anchor_revs[0] - _anchor_revs[1]) / max(1.0, _anchor_revs[1])
+                        break
+
+            if _anchor_growth is None:
+                # 그룹사 없거나 대1 없으면 동일 산업 대형주 평균 성장률
+                _ind_revs = []
+                for _st in self.s.stocks:
+                    _m = _st['meta']
+                    if _m.get('ind') == ind and _m.get('tier_raw') == '대':
+                        _an = _m.get('c_name', '')
+                        _ah = self.s.earnings_history.get(_an, {})
+                        _ar_list = []
+                        for _ayr in sorted(_ah.keys(), reverse=True):
+                            for _aq in sorted(_ah[_ayr].keys(), reverse=True):
+                                _ar = _ah[_ayr][_aq].get('revenue', 0)
+                                if _ar > 0:
+                                    _ar_list.append(_ar)
+                                if len(_ar_list) >= 2:
+                                    break
+                            if len(_ar_list) >= 2:
+                                break
+                        if len(_ar_list) >= 2:
+                            _ind_revs.append((_ar_list[0] - _ar_list[1]) / max(1.0, _ar_list[1]))
+                if _ind_revs:
+                    _anchor_growth = sum(_ind_revs) / len(_ind_revs)
+
+            if _anchor_growth is not None:
+                # 연동 비율: 중소 30%, 중견 20%
+                _link_ratio = 0.30 if _tier_raw == '소' else 0.20
+                # anchor 성장률의 link_ratio만큼 매출에 반영
+                # 단, 과도한 연동 방지: ±15% 캡
+                _linked_adj = 1.0 + max(-0.15, min(0.15, _anchor_growth * _link_ratio))
+                _large_cap_adj = _linked_adj
+
+        # ── 5. 최종 매출 계산 ─────────────────────────────────
+        # 전분기 × (1 + 기본성장률) × 거시경제 보정 × 대기업 연동
+        revenue = _prev_revenue * (1.0 + _base_qoq) * _macro_adj * _large_cap_adj
+
+        # 안전장치: 분기 변동 하드캡 ±40%
+        _rev_max = _prev_revenue * 1.40
+        _rev_min = _prev_revenue * 0.60
+        revenue  = max(_rev_min, min(_rev_max, revenue))
+
+        # ★ [수정] 매출 절대 하한 완화 (버그6: 대형주 revenue 인위 떠받침 방지)
+        # 전분기 기준 하한 (0.60 클램핑) vs 초기 assets 0.005% 중 작은 값
+        _assets_floor = meta.get('initial_assets', meta['assets']) * 0.005
+        revenue = max(_assets_floor, revenue)
+
+        # 비용 계산용 사이클 승수 (기존 유지)
         cycle_cost_mult = {
-            "확장": 0.95,   # 확장기: 비용 절감
-            "정점": 1.00,
-            "수축": 1.10,   # 수축기: 비용 증가
-            "저점": 1.15,   # 저점기: 비용 더 증가
+            '확장': 0.95,
+            '정점': 1.00,
+            '수축': 1.10,
+            '저점': 1.15,
         }.get(cycle, 1.0)
 
-        # ★ 주가 하락률 기반 efficiency 강제 하락
-        # 주가 -80% 이상 = 시장 신뢰 상실 → 영업환경 악화 → 실질 마진 하락
-        initial_price = meta.get('initial_price', 0)
-        price_now     = stock.get('price', initial_price)
-        if initial_price > 10 and price_now > 0:
-            price_drop_now = 1.0 - (price_now / max(1.0, initial_price))
-            if   price_drop_now > 0.95: eff_penalty = 0.60   # -95%: efficiency 40%만 남음
-            elif price_drop_now > 0.90: eff_penalty = 0.70   # -90%: 30% 하락
-            elif price_drop_now > 0.80: eff_penalty = 0.85   # -80%: 15% 하락
-            else:                       eff_penalty = 1.0
-            effective_efficiency = meta.get('efficiency', 0.05) * eff_penalty
-        else:
-            effective_efficiency = meta.get('efficiency', 0.05)
-
-        revenue   = meta['assets'] * random.uniform(0.04, 0.10) * cycle_revenue_mult
+        # efficiency는 주가와 무관하게 기업 자체 역량 반영
+        effective_efficiency = meta.get('efficiency', 0.05)
 
         # ★ 페이즈별 매출 성장 승수 (핵심 — 이익 성장의 근원)
         # 현실: 삼성전자 2000년 매출 30조 → 2025년 300조 (10배)
@@ -59,44 +280,42 @@ class EarningsManager:
         _sector = _SM.get(meta.get('ind', ''), 'Value')
         _cur_phase = getattr(self.s, '_last_processed_phase', '1A')
 
+        # ★ [수정] phase_rev_mult 상한 하향 (버그1: 주가 폭발 방지)
+        # Growth 4B: 28 → 14, 전 섹터 약 50% 축소
+        # 현실 기준: 26년간 최상위 성장주 10배 수준
         _PHASE_REVENUE_MULT = {
-            # Growth 섹터: IT/건강/커뮤
-            # 목표: 26년간 최상위 기업 10~15배 성장 (현실 삼성전자 수준)
             ("1A", "Growth"):    1.00,
-            ("1B", "Growth"):    1.50,   # 1.30 → 1.50
-            ("2A", "Growth"):    2.50,   # 2.00 → 2.50
-            ("2B", "Growth"):    4.00,   # 3.20 → 4.00
-            ("3A", "Growth"):    7.00,   # 5.00 → 7.00  ★ AI 상용화 붐
-            ("3B", "Growth"):   12.00,   # 7.50 → 12.0  ★ 양자/바이오 폭발
-            ("4A", "Growth"):   18.00,   # 11.0 → 18.0
-            ("4B", "Growth"):   28.00,   # 16.0 → 28.0
-            # Cyclical: 자유소비재
+            ("1B", "Growth"):    1.25,
+            ("2A", "Growth"):    1.80,
+            ("2B", "Growth"):    2.80,
+            ("3A", "Growth"):    4.50,
+            ("3B", "Growth"):    7.00,
+            ("4A", "Growth"):   10.00,
+            ("4B", "Growth"):   14.00,
             ("1A", "Cyclical"):  1.00,
-            ("1B", "Cyclical"):  1.25,   # 1.20 → 1.25
-            ("2A", "Cyclical"):  1.80,   # 1.70 → 1.80
-            ("2B", "Cyclical"):  2.80,   # 2.50 → 2.80
-            ("3A", "Cyclical"):  4.20,   # 3.50 → 4.20
-            ("3B", "Cyclical"):  6.00,   # 5.00 → 6.00
-            ("4A", "Cyclical"):  8.50,   # 7.00 → 8.50
-            ("4B", "Cyclical"): 12.00,   # 10.0 → 12.0
-            # Value: 에너지/금융/산업재/소재/부동산
+            ("1B", "Cyclical"):  1.15,
+            ("2A", "Cyclical"):  1.50,
+            ("2B", "Cyclical"):  2.10,
+            ("3A", "Cyclical"):  3.00,
+            ("3B", "Cyclical"):  4.20,
+            ("4A", "Cyclical"):  5.80,
+            ("4B", "Cyclical"):  7.50,
             ("1A", "Value"):     1.00,
-            ("1B", "Value"):     1.20,   # 1.15 → 1.20
-            ("2A", "Value"):     1.50,   # 1.40 → 1.50
-            ("2B", "Value"):     2.00,   # 1.80 → 2.00
-            ("3A", "Value"):     2.80,   # 2.30 → 2.80
-            ("3B", "Value"):     3.80,   # 3.00 → 3.80
-            ("4A", "Value"):     5.00,   # 3.80 → 5.00
-            ("4B", "Value"):     7.00,   # 5.00 → 7.00
-            # Defensive: 필수소비재/유틸 — 완만 (큰 변화 없음)
+            ("1B", "Value"):     1.12,
+            ("2A", "Value"):     1.35,
+            ("2B", "Value"):     1.70,
+            ("3A", "Value"):     2.20,
+            ("3B", "Value"):     2.80,
+            ("4A", "Value"):     3.60,
+            ("4B", "Value"):     4.50,
             ("1A", "Defensive"): 1.00,
-            ("1B", "Defensive"): 1.08,
-            ("2A", "Defensive"): 1.20,
-            ("2B", "Defensive"): 1.40,   # 1.38 → 1.40
-            ("3A", "Defensive"): 1.65,   # 1.60 → 1.65
-            ("3B", "Defensive"): 1.90,   # 1.85 → 1.90
-            ("4A", "Defensive"): 2.20,   # 2.15 → 2.20
-            ("4B", "Defensive"): 2.60,   # 2.50 → 2.60
+            ("1B", "Defensive"): 1.06,
+            ("2A", "Defensive"): 1.14,
+            ("2B", "Defensive"): 1.25,
+            ("3A", "Defensive"): 1.38,
+            ("3B", "Defensive"): 1.52,
+            ("4A", "Defensive"): 1.70,
+            ("4B", "Defensive"): 1.90,
         }
         phase_rev_mult = _PHASE_REVENUE_MULT.get((_cur_phase, _sector), 1.0)
 
@@ -167,20 +386,36 @@ class EarningsManager:
         else:                  _mc_decay = 0.42   # 200조+: 대형 우량주 수준
 
         # 페이즈 전환 부스트: 전환 후 252일간 감쇠 완화
-        _trans_day   = getattr(self.s, '_phase_transition_day', -9999)
-        _cur_day     = getattr(self.s, 'cycle_day', 0)
-        _since_trans = _cur_day - _trans_day
+        # ★ [수정] 절대 경과일 기준으로 전환 부스트 계산 (버그7: cycle_day 리셋 오용 방지)
+        _trans_abs   = getattr(self.s, '_phase_transition_abs', -9999)
+        _cur_abs     = getattr(self.s, '_total_days_elapsed', 0)
+        _since_trans = _cur_abs - _trans_abs
         if 0 <= _since_trans <= 252:
             _boost = 1.0 - (_since_trans / 252.0)
             _mc_decay = _mc_decay + (1.0 - _mc_decay) * _boost
 
-        # 감쇠는 기본 페이즈 성장 부분에만 적용
-        # boom/수출/수출규제 등 이벤트 승수는 별도 보호
+        # ★ [버그 수정] _mc_decay를 매출 수준이 아닌 성장률에 적용
+        # 기존: phase_rev_mult = _base_rev_mult * _mc_decay → revenue *= 0.78 매 분기
+        #       → 시총 20조 기업은 10년간 매출이 0.78^40 = 0.005%로 붕괴
+        # 수정: 5번에서 이미 계산된 revenue(= prev × (1+qoq) × macro)에
+        #       _mc_decay(성장 감쇠)와 _event_bonus(이벤트 배율)만 추가 적용
+        # 주의: _macro_adj/_base_qoq는 5번에서 이미 반영됐으므로 재적용하지 않음
         _base_rev_mult = _PHASE_REVENUE_MULT.get((_cur_phase, _sector), 1.0)
-        _event_bonus   = phase_rev_mult / max(0.01, _base_rev_mult)  # 이벤트가 올린 배율
-        phase_rev_mult = (_base_rev_mult * _mc_decay) * _event_bonus
+        _event_bonus   = phase_rev_mult / max(0.01, _base_rev_mult)
 
-        revenue *= phase_rev_mult
+        # revenue에 mc_decay(성장률 감쇠)를 반영
+        # 대기업은 성장률이 낮지만 매출 수준 자체가 줄지 않음
+        # 기존 qoq 성장분(revenue - _prev_revenue)에만 decay 적용
+        _growth_amount = revenue - _prev_revenue
+        revenue = _prev_revenue + _growth_amount * _mc_decay
+        # 이벤트 배율 추가 (boom/수출 등)
+        revenue = revenue * _event_bonus
+
+        # ★ [수정] phase_rev_mult 적용 후 분기 변동 재캡 (버그1: 극단 노이즈×승수 폭발 방지)
+        # 전분기 대비 분기 최대 변동 ±50%로 재제한
+        _rev_abs_max = _prev_revenue * 1.50
+        _rev_abs_min = _prev_revenue * 0.55
+        revenue = max(_rev_abs_min, min(_rev_abs_max, revenue))
 
         # ★ 테크 레벨 성장 가중치 — 페이즈 기반으로 수정
         try:
@@ -242,6 +477,14 @@ class EarningsManager:
         # 이자비용 완화: 0.05 → 0.01 (전 종목 적자 방지)
         interest_cost  = meta['assets'] * (interest_rate / 100) * 0.01
         net_income = op_income - interest_cost
+
+        # ★ [수정] net_income 상한 — ROE 200% 방지
+        # 현실 최고 ROE: 삼성전자 20~25%, 엔비디아·애플 같은 최우량 성장주 50~80%
+        # 분기 ROE 10% = 연 ROE 40% → 최상위 성장주(예: 카카오 전성기) 수준
+        # 기존 분기 50% = 연 200%는 현실에 존재하지 않음
+        _roe_cap = meta['assets'] * 0.10
+        if net_income > _roe_cap:
+            net_income = _roe_cap
 
         quarter_name = {2: "1분기", 5: "2분기", 8: "3분기", 11: "4분기"}.get(
             self.s.current_date.month, "분기"
@@ -385,12 +628,17 @@ class EarningsManager:
             _total_q = sum(len(qd) for qd in _hist.values())
             if _total_q < 4:
                 # 실적 기록 부족 — HP 차감 없이 assets/debt만 반영
+                _init_a = meta.get('initial_assets', assets)
                 meta['assets'] = max(
-                    meta.get('initial_assets', assets) * 0.01,
+                    _init_a * 0.10,   # ★ 0.01 → 0.10 (earnings.py 본문과 통일)
                     meta['assets'] + net_income
                 )
                 debt = meta.get('debt', 0.0)
-                meta['debt'] = debt + abs(net_income) * 0.5
+                new_debt_early = debt + abs(net_income) * 0.20
+                # 부채비율 500% 캡 (본문과 동일)
+                if meta['assets'] > 0 and new_debt_early / meta['assets'] > 5.0:
+                    new_debt_early = meta['assets'] * 5.0
+                meta['debt'] = new_debt_early
                 if meta['assets'] > 0:
                     meta['debt_ratio'] = meta['debt'] / meta['assets']
                 return True
@@ -407,25 +655,27 @@ class EarningsManager:
             hp_dmg_raw = loss_ratio * 100 * sensitivity * sw
 
             # ★ 연속 적자 가속 (재무 기반 상폐 핵심)
-            # 연속 적자 횟수에 따라 HP 차감 가속
-            if   loss_cnt >= 8: hp_dmg_raw *= 4.0   # 2년 연속 → 4배
-            elif loss_cnt >= 4: hp_dmg_raw *= 2.0   # 1년 연속 → 2배
-            elif loss_cnt >= 2: hp_dmg_raw *= 1.5   # 반년 연속 → 1.5배
+            # ★ [수정] 연속 적자 HP 차감 가속 완화
+            # 기존: 2년 연속 시 4배 가속 → 소형주 2년 연속 적자면 분기 최대 6.0
+            # 코스피 현실: 연속 적자여도 회생 기회 있음 (수년간 적자 상태로 유지 가능)
+            if   loss_cnt >= 8: hp_dmg_raw *= 2.5   # 기존 4.0 → 2.5
+            elif loss_cnt >= 4: hp_dmg_raw *= 1.5   # 기존 2.0 → 1.5
+            elif loss_cnt >= 2: hp_dmg_raw *= 1.2   # 기존 1.5 → 1.2
 
-            # ★ 부채비율 높으면 추가 차감
+            # 부채비율 추가 차감 (극단값만, market.py와 중복 최소화)
             debt_ratio = meta.get('debt_ratio', 0.5)
-            if   debt_ratio >= 10.0: hp_dmg_raw += 5.0  # 1000%+: 즉각 타격
-            elif debt_ratio >= 5.0:  hp_dmg_raw += 3.0  # 500%+
-            elif debt_ratio >= 3.0:  hp_dmg_raw += 2.0
-            elif debt_ratio >= 2.0:  hp_dmg_raw += 1.0
-            elif debt_ratio >= 1.5:  hp_dmg_raw += 0.5
+            if   debt_ratio >= 10.0: hp_dmg_raw += 3.0  # 기존 5.0 → 3.0
+            elif debt_ratio >= 5.0:  hp_dmg_raw += 1.5  # 기존 3.0 → 1.5
+            elif debt_ratio >= 3.0:  hp_dmg_raw += 0.8  # 기존 2.0 → 0.8
+            elif debt_ratio >= 2.0:  hp_dmg_raw += 0.3  # 기존 1.0 → 0.3
+            # 1.5 이하는 제거 (정상 범위 부채비율은 적자여도 HP 추가 차감 없음)
 
-            # ★ HP 캡 연속적자에 따라 상향 (가속 효과 실현)
-            _BASE_CAP = {'대형주': 0.5, '중형주': 1.0, '소형주': 1.5}
-            base_cap  = _BASE_CAP.get(tier, 1.5)
-            if   loss_cnt >= 8: cap_mult = 4.0   # 2년+ 연속 → 4배
-            elif loss_cnt >= 4: cap_mult = 2.5   # 1년+ 연속 → 2.5배
-            elif loss_cnt >= 2: cap_mult = 1.5   # 반년+ 연속 → 1.5배
+            # HP 캡 (분기당 최대 차감량 제한)
+            _BASE_CAP = {'대형주': 0.5, '중형주': 0.8, '소형주': 1.2}  # 기존 1.5 → 1.2
+            base_cap  = _BASE_CAP.get(tier, 1.2)
+            if   loss_cnt >= 8: cap_mult = 2.5   # 기존 4.0 → 2.5
+            elif loss_cnt >= 4: cap_mult = 1.8   # 기존 2.5 → 1.8
+            elif loss_cnt >= 2: cap_mult = 1.3   # 기존 1.5 → 1.3
             else:               cap_mult = 1.0
             hp_dmg = min(hp_dmg_raw, base_cap * cap_mult)
 
@@ -450,26 +700,36 @@ class EarningsManager:
             else:
                 meta['hp'] = round(max(0.0, hp - hp_dmg), 2)
 
-            # ★ 적자 시 assets 감소 (하한선 완화: 10% → 1%)
-            # 자본잠식 가능하도록 하한선 낮춤
+            # ★ [수정] 적자 시 assets 감소 — 하한선 초기값의 10%로 복구
+            # 1%는 너무 낮아서 부채비율 1000%+ 폭발 유발
+            # 코스피 현실: 자본잠식 진입해도 즉시 0이 되지 않음
             init_assets = meta.get('initial_assets', assets)
             meta['assets'] = max(
-                init_assets * 0.01,   # 하한선: 초기값의 1% (자본잠식 가능)
+                init_assets * 0.10,   # 하한선: 초기값의 10% (기존 1% → 10%)
                 meta['assets'] + net_income
             )
 
-            # ★ 적자 시 부채 증가 (차입으로 버티는 구조)
+            # ★ 적자 시 부채 증가
             debt = meta.get('debt', 0.0)
-            debt_increase = abs(net_income) * 0.5   # 손실의 50%만큼 부채 증가
-            meta['debt'] = debt + debt_increase
+            debt_increase = abs(net_income) * 0.20
+            new_debt = debt + debt_increase
+
+            # ★ [신규] 부채비율 상한 캡: 500% 초과 시 부채 탕감 처리
+            # 현실: 부채비율 500%+ 되면 채권단 출자전환/워크아웃으로 부채 조정
+            new_assets = meta['assets']
+            if new_assets > 0 and new_debt / new_assets > 5.0:
+                # 부채비율 500%로 상한 (현실적 채권단 개입 수준)
+                new_debt = new_assets * 5.0
+            meta['debt'] = new_debt
             # 부채비율 갱신
             if meta['assets'] > 0:
                 meta['debt_ratio'] = meta['debt'] / meta['assets']
 
             # ★ 자본잠식 체크 (assets < debt)
+            # [수정] 즉시 -5 → -1.0으로 완화 (코스피: 자본잠식 발생 시 관리종목 지정 후 1년 유예)
+            # 즉시 퇴출이 아니라 서서히 악화되는 구조가 현실적
             if meta['assets'] < meta.get('debt', 0):
-                # 자본잠식 발생 → HP 추가 즉시 차감
-                meta['hp'] = max(0.0, meta.get('hp', 0) - 5.0)
+                meta['hp'] = max(0.0, meta.get('hp', 0) - 1.0)
 
             # ★ 적자 시 assets 감소 (하한선 보장)
             init_assets = meta.get('initial_assets', assets)
