@@ -112,6 +112,7 @@ class EventDispatcher:
             # 경고 진입/해제 7일 선반영 시스템
             self.mkt.check_warning_system()
             # ★ 산업 패권 시스템 (월 1일 체크)
+            self._check_dividend(silent)
             self._check_industry_dominance(silent)
             # ★ 광기 지수 업데이트 (분기 1일 체크)
             self._update_mania_index(silent)
@@ -159,9 +160,13 @@ class EventDispatcher:
             for name, ratio in self.s.daily_splits.items():
                 self.db.update_adjusted_price(name, ratio)
 
-            # 주가·거래량 일괄 INSERT (commit 없음)
-            self.db.insert_stock_records(db_records)
-            self.db.insert_investor_volume_batch(vol_records)
+            # ★ [최적화] silent 모드(치트키)에서 주가·거래량 저장 주기 조절
+            # 치트키 고속 진행 시 매일 400행 INSERT → DB 과부하 주범
+            # silent=True 이면 월 1일에만 저장 (약 20배 감소), False면 매일 저장
+            _save_today = (not silent) or (self.s.current_date.day == 1)
+            if _save_today:
+                self.db.insert_stock_records(db_records)
+                self.db.insert_investor_volume_batch(vol_records)
             # ★ 하루치 전체를 commit 1회로 마무리
             self.db.flush_daily_db()
             self.mkt.check_delisting()
@@ -188,35 +193,72 @@ class EventDispatcher:
         if hasattr(self.db, 'update_scenario_log_daily'):
             self.db.update_scenario_log_daily(self.s.gri)
 
-        # ★ 시나리오 변경 시 DB 로그 기록
-        cur_scenario = self.s.current_scenario
-        if cur_scenario != _prev_scenario and hasattr(self.db, 'log_scenario_change'):
-            date_str = self.s.current_date.strftime('%Y-%m-%d')
-            war      = getattr(self.s, 'war_event', {})
-            # ★ 발동 조건 note 자동 생성
-            _trigger_note = getattr(self.s, '_last_scenario_trigger_note', '')
-            if _trigger_note:
-                note = _trigger_note
-                self.s._last_scenario_trigger_note = ''
-            else:
-                note = f"{_prev_scenario} → {cur_scenario}" if _prev_scenario else ""
+        # ★ 시나리오/테크/페이즈 변경 감지 — market_stats는 필요할 때 1회만 수집
+        cur_scenario   = self.s.current_scenario
+        _tech_jump_log = getattr(self.s, '_tech_jump_log', None)
+        _phase_jump_log= getattr(self.s, '_phase_jump_log', None)
+        _need_log      = (
+            cur_scenario != _prev_scenario
+            or _tech_jump_log is not None
+            or _phase_jump_log is not None
+        )
 
-            # market_stats 수집 (PER/섹터/산업)
+        if _need_log and hasattr(self.db, 'log_scenario_change'):
+            # ★ [최적화] market_stats 하루 1회만 수집 (시나리오·테크·페이즈 공유)
             market_stats = self._collect_market_stats()
-            # ★ 대공황 트리거 판단용 캐시 업데이트
+            # 대공황 트리거 판단용 캐시 업데이트
             self.s._last_market_stats = market_stats
+            war      = getattr(self.s, 'war_event', {})
+            bubble   = getattr(self.s, 'bubble_index', 0.0)
 
-            self.db.log_scenario_change(
-                date_str     = date_str,
-                scenario     = cur_scenario,
-                gri          = self.s.gri,
-                bubble       = getattr(self.s, 'bubble_index', 0.0),
-                macro        = self.s.macro,
-                war_event    = war,
-                note         = note,
-                market_stats = market_stats,
-            )
-            self._logged_scenario = cur_scenario
+            # ── ① 시나리오 변경 로그 ──────────────────────
+            if cur_scenario != _prev_scenario:
+                _date_str = self.s.current_date.strftime('%Y-%m-%d')
+                _trigger_note = getattr(self.s, '_last_scenario_trigger_note', '')
+                if _trigger_note:
+                    note = _trigger_note
+                    self.s._last_scenario_trigger_note = ''
+                else:
+                    note = f"{_prev_scenario} → {cur_scenario}" if _prev_scenario else ""
+                self.db.log_scenario_change(
+                    date_str     = _date_str,
+                    scenario     = cur_scenario,
+                    gri          = self.s.gri,
+                    bubble       = bubble,
+                    macro        = self.s.macro,
+                    war_event    = war,
+                    note         = note,
+                    market_stats = market_stats,
+                )
+                self._logged_scenario = cur_scenario
+
+            # ── ② 테크 레벨 전환 로그 ────────────────────
+            if _tech_jump_log:
+                self.db.log_scenario_change(
+                    date_str     = _tech_jump_log['date'],
+                    scenario     = f"🚀 [테크 도약] LV{_tech_jump_log['lv']-1} → LV{_tech_jump_log['lv']} ({_tech_jump_log['lv_name']})",
+                    gri          = self.s.gri,
+                    bubble       = bubble,
+                    macro        = self.s.macro,
+                    war_event    = war,
+                    note         = "LV 전환",
+                    market_stats = market_stats,
+                )
+                self.s._tech_jump_log = None
+
+            # ── ③ 페이즈 전환 로그 (1A→1B, 2A→2B 등) ────
+            if _phase_jump_log:
+                self.db.log_scenario_change(
+                    date_str     = _phase_jump_log['date'],
+                    scenario     = f"📡 [페이즈 전환] LV{_phase_jump_log['lv']}: {_phase_jump_log['from_phase']} → {_phase_jump_log['to_phase']} ({_phase_jump_log['phase_name']})",
+                    gri          = self.s.gri,
+                    bubble       = bubble,
+                    macro        = self.s.macro,
+                    war_event    = war,
+                    note         = f"페이즈 전환 ({_phase_jump_log['from_phase']}→{_phase_jump_log['to_phase']})",
+                    market_stats = market_stats,
+                )
+                self.s._phase_jump_log = None
 
         return True
 
@@ -593,13 +635,18 @@ class EventDispatcher:
         if len(stocks) < 3:
             return
 
-        # 티어별 최하위 시총 계산
-        large_stocks = [s['market_cap'] for s in stocks if s['meta']['tier'] == '대형주']
-        mid_stocks   = [s['market_cap'] for s in stocks if s['meta']['tier'] == '중형주']
-
-        # 최하위 시총 (없으면 0으로 강등 없음)
-        large_min = min(large_stocks) if large_stocks else 0
-        mid_min   = min(mid_stocks)   if mid_stocks   else 0
+        # ★ [최적화] 티어별 최하위 시총 — 단일 패스 O(N)
+        large_min = float('inf')
+        mid_min   = float('inf')
+        for _s in stocks:
+            _mc   = _s['market_cap']
+            _tier = _s['meta']['tier']
+            if _tier == '대형주' and _mc < large_min:
+                large_min = _mc
+            elif _tier == '중형주' and _mc < mid_min:
+                mid_min = _mc
+        large_min = 0 if large_min == float('inf') else large_min
+        mid_min   = 0 if mid_min   == float('inf') else mid_min
 
         # 즉시강등 임계: 최하위의 50%
         THRESHOLD = 0.50
@@ -1842,8 +1889,9 @@ class EventDispatcher:
         cpi       = self.s.macro.get('cpi', 2.0)
         ff        = getattr(self.s, 'foreign_flow_index', 0.0)
 
-        # 시장 통계에서 PER 참조 (실시간 수집)
-        stats   = self._collect_market_stats()
+        # ★ [최적화] PER 참조 — 당일 캐시(_last_market_stats) 우선, 없으면 수집
+        # _check_depression은 장 마감 후 호출되므로 당일 캐시가 대부분 유효
+        stats   = getattr(self.s, '_last_market_stats', None) or self._collect_market_stats()
         per_l   = stats.get('per_large', 0)
 
         trigger_score = 0
@@ -2094,16 +2142,33 @@ class EventDispatcher:
         if cur_phase == last_phase:
             return  # 페이즈 변화 없음 → 스킵
 
+        # ★ [버그수정] 페이즈 역행 차단 — 단방향만 허용
+        # get_current_phase()의 bonus가 매일 달라져서 A↔B 진동하던 문제 해결
+        # 페이즈는 한번 넘어가면 절대 되돌아갈 수 없음
+        _PHASE_ORDER = {'1A':1,'1B':2,'2A':3,'2B':4,'3A':5,'3B':6,'4A':7,'4B':8}
+        if _PHASE_ORDER.get(cur_phase, 0) <= _PHASE_ORDER.get(last_phase, 0):
+            return  # 역행 또는 동일 → 차단
+
         # ── 페이즈 전환 확정 ──────────────────────
         self.s._last_processed_phase = cur_phase
         cy = self.s.current_date.year
 
+        lv = self.s.max_tech_reached
+        phase_name = next(
+            (p["name"] for p in TECH_PHASE.get(lv, []) if p["id"] == cur_phase),
+            cur_phase
+        )
+
+        # ★ 시나리오 로그용 페이즈 전환 플래그 세팅 (LV 전환과 동일한 방식)
+        self.s._phase_jump_log = {
+            'from_phase': last_phase,
+            'to_phase':   cur_phase,
+            'phase_name': phase_name,
+            'lv':         lv,
+            'date':       self.s.current_date.strftime('%Y-%m-%d'),
+        }
+
         if not silent:
-            lv = self.s.max_tech_reached
-            phase_name = next(
-                (p["name"] for p in TECH_PHASE.get(lv, []) if p["id"] == cur_phase),
-                cur_phase
-            )
             self.s.daily_news.append(
                 f"🔄 [시대 전환] {cy}년, 경제 패러다임이 [{last_phase}] → [{cur_phase} {phase_name}]로 전환됩니다!"
             )
@@ -2687,9 +2752,9 @@ class EventDispatcher:
         lv       = self.s.max_tech_reached
         last_crisis = getattr(self.s, '_last_crisis_year', 0)
         last_boom   = getattr(self.s, '_last_boom_year', 0)
-        # ★ PER 버그 수정: _last_market_stats(시나리오 변경 시점 캐시) 대신
-        #   매번 실시간 수집 → 초기화 잔류값 참조 문제 방지
-        stats    = self._collect_market_stats()
+        # ★ [최적화] PER 참조 — 당일 캐시 우선, 없으면 실시간 수집
+        # (월 1일 호출이므로 빈도 낮지만, 같은 날 수집된 캐시가 있으면 재사용)
+        stats    = getattr(self.s, '_last_market_stats', None) or self._collect_market_stats()
         per_l    = stats.get('per_large', 15.0)
         per_m    = stats.get('per_mid', 15.0)
         gdp_gr   = getattr(self.s, 'gdp_growth_rate', 0.03)
@@ -3501,3 +3566,116 @@ class EventDispatcher:
                     f"({self.s._lv4_condition_days}일 → 0일)"
                 )
             self.s._lv4_condition_days = 0
+
+    # ─────────────────────────────────────────────
+    # ★ 배당 시스템
+    # ─────────────────────────────────────────────
+    def _check_dividend(self, silent: bool):
+        """
+        매년 3월 첫 거래일: 전년도 순이익 기반 배당 결정 + 뉴스 공시
+        매년 4월 첫 거래일: 배당락 처리 (주가 하락) + 배당금 플레이어 지급
+        """
+        from engine.constants import DIVIDEND_PAYOUT_RATIO, SECTOR_MAP, DIVIDEND_MIN_HP
+
+        cur   = self.s.current_date
+        month = cur.month
+        day   = cur.day
+
+        # ── 중복 실행 방지 플래그 ─────────────────────────────
+        # 3월/4월 배당 처리는 연도×월 기준 1회만 실행
+        _div_done_key = f"_div_done_{cur.year}_{month}"
+        if getattr(self.s, _div_done_key, False):
+            return
+
+        # 3월 또는 4월 첫 거래일 판정 (1~7일 중 첫 평일 — 가상 요일 기준)
+        if day > 7 or self.s.virtual_weekday >= 5:
+            return
+
+        # ── 3월: 배당 결정 ───────────────────────────────────────
+        if month == 3:
+            prev_year = str(cur.year - 1)
+            decided = []
+            for stock in self.s.stocks:
+                meta = stock['meta']
+                name = meta['c_name']
+
+                # 전년도 연간 순이익 합산
+                hist = self.s.earnings_history.get(name, {})
+                yr_data = hist.get(prev_year, {})
+                if not yr_data:
+                    meta['div_per_share'] = 0
+                    meta['div_yield'] = 0.0
+                    continue
+
+                annual_ni = sum(q.get('net_income', 0) for q in yr_data.values())
+
+                # 배당 조건: 흑자 + HP 충분
+                hp = meta.get('hp', 50.0)
+                if annual_ni <= 0 or hp < DIVIDEND_MIN_HP:
+                    meta['div_per_share'] = 0
+                    meta['div_yield'] = 0.0
+                    continue
+
+                # 섹터별 배당성향
+                sector = SECTOR_MAP.get(meta.get('ind', ''), 'Value')
+                tier   = meta.get('tier', '소형주')
+                payout = DIVIDEND_PAYOUT_RATIO.get(sector, {}).get(tier, 0.10)
+
+                # HP 낮으면 배당성향 감소
+                hp_ratio = hp / max(1.0, meta.get('hp_soft_cap', 60.0))
+                if hp_ratio < 0.6:
+                    payout *= 0.5
+
+                total_div = annual_ni * payout
+                shares    = stock['shares']
+                dps       = int(total_div / max(1, shares))  # 주당배당금
+
+                # 호가단위 기준 반올림
+                if dps < 10:
+                    dps = 0
+                else:
+                    dps = max(10, round(dps / 10) * 10)
+
+                meta['div_per_share'] = dps
+                meta['div_yield']     = round(dps / max(1, stock['price']) * 100, 2)
+
+                if dps > 0:
+                    decided.append((name, dps, meta['div_yield'], sector))
+
+            if not silent and decided:
+                top = sorted(decided, key=lambda x: x[1], reverse=True)[:3]
+                names_str = ', '.join(f"{n}({d:,}원/{y:.1f}%)" for n, d, y, _ in top)
+                self.s.daily_news.append(
+                    f"💰 [{cur.year}년 배당 공시] {len(decided)}개 기업 배당 결정. "
+                    f"주요: {names_str} (4월 지급 예정)"
+                )
+            # 3월 처리 완료 플래그
+            setattr(self.s, _div_done_key, True)
+
+        # ── 4월: 배당락 + 지급 ──────────────────────────────────
+        elif month == 4:
+            paid_total = 0
+            paid_count = 0
+            for stock in self.s.stocks:
+                meta = stock['meta']
+                dps  = meta.get('div_per_share', 0)
+                if dps <= 0:
+                    continue
+
+                # 배당락: 주가에서 배당금만큼 하락
+                old_price     = stock['price']
+                new_price     = max(10, old_price - dps)
+                stock['price'] = new_price
+                stock['market_cap'] = new_price * stock['shares']
+
+                # 배당금 누적 (UI에서 my_portfolio 참조해서 지급)
+                meta['div_ready'] = dps  # UI가 읽어서 지급 처리
+                paid_count += 1
+
+            if not silent and paid_count > 0:
+                self.s.daily_news.append(
+                    f"💸 [배당락일] {paid_count}개 종목 배당락 처리 완료. "
+                    f"보유 종목 배당금은 계좌로 자동 입금됩니다."
+                )
+            # 4월 처리 완료 플래그 (이중 지급 방지)
+            setattr(self.s, _div_done_key, True)

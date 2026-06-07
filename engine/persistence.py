@@ -18,6 +18,10 @@ class SaveManager:
         # WAL 모드: commit 속도 대폭 개선 + 읽기/쓰기 동시성
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=NORMAL")
+        # ★ [최적화] SQLite 성능 튜닝
+        self.conn.execute("PRAGMA cache_size=-32000")   # 32MB 페이지 캐시 (기본 2MB)
+        self.conn.execute("PRAGMA temp_store=MEMORY")   # 임시 테이블 메모리 사용
+        self.conn.execute("PRAGMA mmap_size=268435456") # 256MB mmap (WAL 읽기 가속)
         self._create_db()
 
     def _slim_earnings_history(self) -> dict:
@@ -526,14 +530,14 @@ class SaveManager:
             return []
 
     def insert_stock_records(self, records: list):
-        """[(date_str, name, price, cap), …] 일괄 INSERT"""
+        """[(date_str, name, price, cap), …] 일괄 INSERT (commit 없음 — flush_daily_db에서 일괄 처리)"""
         if not self._is_conn_open(): return
         try:
             # SQLite REAL은 float64 — 값 float 변환으로 오버플로우 방지
             safe = [(d, n, float(p), float(c)) for d, n, p, c in records]
             cur = self.conn.cursor()
             cur.executemany("INSERT INTO stock_history VALUES (?, ?, ?, ?)", safe)
-            self.conn.commit()
+            # ★ [최적화] commit 제거 — flush_daily_db()에서 하루 1회 일괄 commit
         except Exception as e:
             print(f"❌ DB 저장 오류: {e}")
 
@@ -693,6 +697,9 @@ class SaveManager:
                 self.conn = sqlite3.connect(db_file, check_same_thread=False)
                 self.conn.execute("PRAGMA journal_mode=WAL")
                 self.conn.execute("PRAGMA synchronous=NORMAL")
+                self.conn.execute("PRAGMA cache_size=-32000")
+                self.conn.execute("PRAGMA temp_store=MEMORY")
+                self.conn.execute("PRAGMA mmap_size=268435456")
                 self._create_db()
                 # ★ 캐시 초기화 (초기화 후 새 게임 시작 시 중복 방지)
                 self._scenario_log_cache = None
@@ -852,6 +859,13 @@ class SaveManager:
             self.s.cumulative_inflation  = eng.get("cumulative_inflation", 1.0)
             self.s.gri                   = eng["gri"]
             self.s.peak_gri              = eng.get("peak_gri", self.s.gri)
+
+            # ★ [버그수정] 세이브 로드 시 _adj_base_cap을 저장된 GRI 기반으로 역산
+            # _adj_base_cap은 저장되지 않음 → 로드 직후 현재 시총+GRI로 역산
+            # adj_base = total_market_cap / (gri / 1000)
+            # 단, 로드 직후에는 시총이 아직 계산 안 됐으므로 플래그만 세팅
+            # → apply_price_change 첫 실행 시 역산 처리
+            self.s._adj_base_needs_recalc = True  # 로드 후 첫 틱에 재계산 트리거
             self.s.prev_gri              = eng.get("prev_gri", self.s.gri)
             self.s.gri_base_at_rebase    = eng.get("gri_base_at_rebase", 1000.0)
             self.s.bubble_index          = eng.get("bubble_index", 0.0)
@@ -1015,6 +1029,8 @@ class SaveManager:
             # ★ 종목 메타 복원 (initial_price + listed_date_dt + short_interest 초기화)
             for stock in self.s.stocks:
                 meta = stock['meta']
+                # ★ 배당 이중지급 방지 — 로드 시 div_ready 초기화
+                meta['div_ready'] = 0
                 # initial_price 복원 (DB에서 첫 주가 조회)
                 if not meta.get('initial_price') or meta.get('initial_price', 0) <= 10:
                     name = meta.get('c_name', '')
@@ -1243,8 +1259,13 @@ class SaveManager:
             # 전쟁/이벤트 + 발동조건 note 통합
             war  = r.get('war_event') or ""
             note = r.get('note') or ""
-            # note가 발동조건이면 앞에, 전쟁은 뒤에 붙임
-            if note and not note.startswith(r.get('scenario', '')[:4]):
+            scenario = r.get('scenario', '')
+
+            # ★ 테크 전환 행 특별 처리
+            is_tech_jump = note == 'LV 전환'
+            if is_tech_jump:
+                event_col = "LV 전환"
+            elif note and not note.startswith(scenario[:4]):
                 event_col = f"{note}"
                 if war:
                     event_col += f"  |  {war}"
@@ -1254,6 +1275,45 @@ class SaveManager:
             gri = r.get('gri', 0)
             gri_end = r.get('gri_end', gri)
             chg = f"({(gri_end/gri-1)*100:+.1f}%)" if gri > 0 else ""
+
+            # 테크 전환 행: 수치 칸을 -로 표시
+            if is_tech_jump:
+                lines.append(
+                    f"{r['date']:<12} "
+                    f"{gri:>8,.0f} "
+                    f"{'':>8} "
+                    f"{'':>8} "
+                    f"{gri:>8,.0f}{'':>8} "
+                    f"{'  -':>5}   "
+                    f"{'  -':>6} "
+                    f"{'  -':>6} "
+                    f"{'  -':>6} "
+                    f"{'  -':>7} "
+                    f"{'  -':>5} "
+                    f"{'  -':>5} "
+                    f"{'  -':>7} "
+                    f"{'  -':>7} "
+                    f"{'  -':>6} "
+                    f"{'  -':>6} "
+                    f"{'  -':>6} "
+                    f"{'  -':>5} "
+                    f"{'  -':>5} "
+                    f"{'  -':>5} "
+                    f"{'  -':>5} "
+                    f"{'  -':>5} "
+                    f"{'  -':>5} "
+                    f"{'  -':>5} "
+                    f"{'  -':>5} "
+                    f"{'  -':>5} "
+                    f"{'  -':>5} "
+                    f"{'  -':>5} "
+                    f"{'  -':>6} "
+                    f"{'  -':>6} "
+                    f"{'  -':>5}  "
+                    f"{scenario:<32}  "
+                    f"{event_col}"
+                )
+                continue
 
             lines.append(
                 f"{r['date']:<12} "

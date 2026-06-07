@@ -209,6 +209,11 @@ class StockMarket:
             if _t['elapsed'] < _t['duration']
         ]
 
+        # ★ [최적화] active_themes를 ind별 사전으로 구성 — 루프 내 O(T)→O(1) 조회
+        _theme_by_ind: dict = {}
+        for _t in self.s.active_themes:
+            _theme_by_ind.setdefault(_t['ind'], []).append(_t)
+
         # 테마 강도 계산 함수 (루프 안에서 재사용)
         def _calc_theme_intensity(theme: dict) -> float:
             """테마 진행 단계에 따라 강도 반환 (사인 곡선 기반)"""
@@ -347,12 +352,13 @@ class StockMarket:
             earnings_adj = 0.0
             hist   = self.s.earnings_history.get(name, {})\
 
-            years  = sorted(hist.keys())
+            # ★ [최적화] sorted → max: O(N log N) → O(N)
+            last_year = max(hist.keys()) if hist else None
             annual_ni = self._calc_annual_net_income(name, hist)
-            if years:
-                last_q_data = hist[years[-1]]
+            if last_year:
+                last_q_data = hist[last_year]
                 if last_q_data:
-                    last_q   = sorted(last_q_data.keys())[-1]
+                    last_q   = max(last_q_data.keys())
                     last_ni  = last_q_data[last_q].get('net_income', 0)
                     assets   = max(1.0, meta.get('assets', 1.0))
                     loss_cnt = meta.get('continuous_loss_count', 0)
@@ -439,9 +445,7 @@ class StockMarket:
             _tier_theme_mult = {'대형주': 1.0, '중형주': 1.8, '소형주': 3.5}.get(tier, 1.0)
             _tier_vol_boost  = {'대형주': 0.3, '중형주': 0.8, '소형주': 1.8}.get(tier, 0.5)
 
-            for _t in self.s.active_themes:
-                if _t['ind'] != ind:
-                    continue
+            for _t in _theme_by_ind.get(ind, []):
                 _intensity = _calc_theme_intensity(_t)
                 if _intensity <= 0:
                     continue
@@ -781,9 +785,24 @@ class StockMarket:
         # 이렇게 하면 상폐 잡주가 GRI를 깎아먹는 왜곡이 사라짐
         import math as _math
 
+        # ★ [버그수정] 세이브 로드 후 첫 틱: _adj_base_cap을 GRI 기반으로 역산
+        # 저장된 GRI와 현재 계산된 시총으로 adj_base를 역산
+        # adj_base = total_market_cap / (saved_gri / 1000)
+        if getattr(self.s, '_adj_base_needs_recalc', False) and total_market_cap > 0:
+            _saved_gri = self.s.gri  # 로드된 GRI값
+            if _saved_gri > 0:
+                self.s._adj_base_cap = total_market_cap / (_saved_gri / 1000.0)
+            self.s._adj_base_needs_recalc = False
+
         # 수정 기준시총 초기화 (게임 시작 시 최초 1회)
         if not hasattr(self.s, '_adj_base_cap') or self.s._adj_base_cap <= 0:
-            self.s._adj_base_cap = float(self.s.initial_market_total_cap or total_market_cap or 1.0)
+            # ★ [수정] 초기 종목 수 반영 — initial_market_total_cap은 400종목 기준
+            # 실제 시작 종목 수(~200개)가 적으면 기준시총도 그에 맞게 스케일 다운
+            # 그래야 GRI가 초반부터 1000 근처에서 시작됨
+            _init_cap = float(self.s.initial_market_total_cap or total_market_cap or 1.0)
+            _cur_stocks = max(1, len(self.s.stocks))
+            _init_stock_ratio = min(1.0, _cur_stocks / self.s.MAX_STOCKS)
+            self.s._adj_base_cap = _init_cap * _init_stock_ratio
 
         # ★ 기준시총 현실 코스피 종목 수 차이 보정
         # 현실 코스피: 940개 종목, 기준시총 연간 증가율 약 14%
@@ -792,8 +811,17 @@ class StockMarket:
         # 나머지 57.4%는 기준시총에 가상으로 반영 (GRI 스케일 현실화)
         # 주가/시총/버핏지수는 완전히 그대로, GRI 숫자만 조정됨
         _real_market_growth_annual = 0.14          # 현실 기준시총 연간 증가율 (역산값)
-        _game_coverage   = min(1.0, len(self.s.stocks) / 940.0)
-        _missing_annual  = _real_market_growth_annual * (1.0 - _game_coverage)
+        # ★ [수정] game_coverage를 최대 종목 수(400)로 고정
+        _game_coverage   = min(1.0, self.s.MAX_STOCKS / 940.0)
+        _base_missing    = _real_market_growth_annual * (1.0 - _game_coverage)  # ~8%
+
+        # ★ [수정] LV별 기준시총 증가율 차등 적용
+        # 문제: 8% 고정 복리 → 54년후 기준시총 63.8배 → GRI 구조적 우하향
+        # 원인: 기술 발전(LV 상승)으로 시장이 성숙할수록 기준시총이 빠르게 증가할 이유 없음
+        # 수정: LV 높을수록 기준시총 증가율 둔화 → GRI 장기 안정화
+        # LV1: 8% (초기 고성장) / LV2: 5% / LV3: 2% / LV4: 1%
+        _lv_missing_scale = {1: 1.00, 2: 0.625, 3: 0.25, 4: 0.125}.get(lv, 1.00)
+        _missing_annual  = _base_missing * _lv_missing_scale
         _daily_base_adj  = (1.0 + _missing_annual) ** (1.0 / 252) - 1.0
         self.s._adj_base_cap *= (1.0 + _daily_base_adj)
 
@@ -841,7 +869,9 @@ class StockMarket:
             # ★ GDP 성장률 현실화 — 한국 실제 기준
             # LV1(2000년대): 확장기 연 5~7% / LV2(2010년대): 연 4~6% / LV3+: 연 3~5%
             # 정점: 연 2~4% / 수축: 연 -1~+2% / 저점: 연 -3~+1% / 대공황: 연 -6~-12%
-            _lv_gdp_bonus = {1: 0.000, 2: 0.003, 3: 0.005, 4: 0.004}.get(lv, 0.0)
+            # ★ [수정] LV3 GDP 보너스 상향: GDP 성장이 버핏지수·GRI 안정화의 열쇠
+            # GDP가 시총 증가를 따라가야 버핏지수 안정 → 버블 지수 안정 → GRI 정상화
+            _lv_gdp_bonus = {1: 0.000, 2: 0.004, 3: 0.008, 4: 0.006}.get(lv, 0.0)
             if is_depression:
                 q_growth = random.uniform(-0.030, -0.015)
             else:
@@ -1013,19 +1043,19 @@ class StockMarket:
     # ★ 연간 순이익 계산 (최근 4분기 합산)
     # ─────────────────────────────────────────────
     def _calc_annual_net_income(self, name: str, hist: dict) -> float:
+        """최근 4분기 순이익 합산. ★ [최적화] 최근 2개 연도만 읽어 O(전체)→O(8)."""
         if not hist:
             return 0.0
+        # 최근 2개 연도만 읽어 최근 4분기 커버 (Q1~Q4 최대 8개 → [-4:])
+        recent_years = sorted(hist.keys())[-2:]
         all_quarters = []
-        for year_data in hist.values():
-            for q_data in year_data.values():
-                ni = q_data.get('net_income', 0)
-                all_quarters.append(ni)
-        # 최근 4분기
+        for yr in recent_years:
+            for q in sorted(hist[yr].keys()):
+                all_quarters.append(hist[yr][q].get('net_income', 0))
         recent = all_quarters[-4:] if len(all_quarters) >= 4 else all_quarters
         if not recent:
             return 0.0
         total = sum(recent)
-        # 데이터 부족 시 연환산
         if len(recent) < 4:
             total = total * (4 / len(recent))
         return total
@@ -1792,14 +1822,21 @@ class StockMarket:
         is_recovery   = "극복" in self.s.current_scenario or "전후" in self.s.current_scenario
 
         if is_depression:
+            # ★ [최적화] 그룹 멤버 사전 구성 O(N) — 이후 O(1) 조회
+            _gid_to_members = {}
+            for _st in self.s.stocks:
+                _gid = _st['meta'].get('group_id')
+                if _gid:
+                    _gid_to_members.setdefault(_gid, []).append(_st)
+
             group_ranking = sorted(
-                [{"gid": gid, "cap": sum(s['market_cap'] for s in self.s.stocks if s['meta']['group_id'] == gid)}
+                [{"gid": gid, "cap": sum(s['market_cap'] for s in _gid_to_members.get(gid, []))}
                  for gid in self.s.groups],
                 key=lambda x: x['cap'], reverse=True
             )
             top_3 = {g['gid'] for g in group_ranking[:3]}
             for gid, ginfo in list(self.s.groups.items()):
-                members = [s for s in self.s.stocks if s['meta']['group_id'] == gid]
+                members = _gid_to_members.get(gid, [])
                 if not members: continue
                 members.sort(key=lambda x: x['market_cap'])
                 core = members[-1]
@@ -1849,23 +1886,25 @@ class StockMarket:
                 if not silent:
                     self.s.daily_news.append(f"🏢 [그룹승격] {parent_name}이 지주사 체제로 전환합니다!")
 
+        # ★ [최적화] 그룹 멤버 + 사용 산업 사전 구성 O(N) — 이후 O(1) 조회
+        _gid_members: dict = {}
+        _gid_used_inds: dict = {}
+        for _st in self.s.stocks:
+            _m = _st['meta']
+            _gid = _m.get('group_id')
+            if not _gid:
+                continue
+            _gid_members.setdefault(_gid, []).append(_st)
+            _gid_used_inds.setdefault(_gid, set()).add(_m.get('ind', ''))
+
         for gid, ginfo in self.s.groups.items():
-            members = [s for s in self.s.stocks if s['meta']['group_id'] == gid]
-            # ★ limit 초과한 경우 추가 금지 (이전 잔여 코드로 초과된 경우 방지)
+            members = _gid_members.get(gid, [])
+            # ★ limit 초과한 경우 추가 금지
             if len(members) >= limit:
                 continue
             if random.random() < 0.03:
-                existing_inds = [m['meta']['ind'] for m in members]
-                # ★ 이미 시장에 동일 그룹명+산업 조합 종목이 있으면 제외
-                group_name = ginfo['name']
-                used_inds = set(existing_inds)
-                for st in self.s.stocks:
-                    st_name = st['meta'].get('c_name', '')
-                    st_ind  = st['meta'].get('ind', '')
-                    # "서한 건강관리" 패턴으로 이미 존재하면 해당 산업 제외
-                    if st_name.startswith(f"{group_name} {st_ind}") or \
-                       st_name == f"{group_name} {st_ind}":
-                        used_inds.add(st_ind)
+                # 이미 쓴 산업 집합 (O(1) 조회)
+                used_inds = set(_gid_used_inds.get(gid, set()))
                 avail = [i for i in MAIN_INDUSTRIES if i not in used_inds]
                 if avail:
                     new_ind = random.choice(avail)

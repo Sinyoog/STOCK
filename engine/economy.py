@@ -296,6 +296,19 @@ class MacroEngine:
                 self._apply_tech_shock(new_lv)
                 self.s.pending_events["tech_jump"] = None
 
+                # ★ [버그수정] LV 전환 시 _last_processed_phase를 새 LV의 첫 페이즈(A)로 리셋
+                # 기존: LV1의 마지막 페이즈(1B)가 남아있어서 LV2 첫날 2B로 잘못 시작
+                # 수정: LV 전환 즉시 새 LV의 A단계로 초기화 → 2A/3A/4A로 올바르게 시작
+                _first_phase = {2: '2A', 3: '3A', 4: '4A'}.get(new_lv, f'{new_lv}A')
+                self.s._last_processed_phase = _first_phase
+
+                # ★ 시나리오 로그용 테크 전환 플래그
+                self.s._tech_jump_log = {
+                    'lv': new_lv,
+                    'lv_name': lv_name,
+                    'date': self.s.current_date.strftime('%Y-%m-%d'),
+                }
+
         return self.s.max_tech_reached
 
     def _apply_tech_shock(self, new_lv: int):
@@ -416,9 +429,16 @@ class MacroEngine:
                 to_apply.append((ind, info["boost"]))
                 to_remove.append(ind)
 
+        # ★ [최적화] ind별 종목 사전 1회 구성 → O(N) 1회로 전체 처리
+        _ind_stock_map: dict = {}
+        for _st in self.s.stocks:
+            _i = _st['meta'].get('ind', '')
+            if _i:
+                _ind_stock_map.setdefault(_i, []).append(_st)
+
         # 실제 efficiency 반영
         for ind, boost in to_apply:
-            affected = [s for s in self.s.stocks if s['meta'].get('ind') == ind]
+            affected = _ind_stock_map.get(ind, [])
             for stock in affected:
                 meta    = stock['meta']
                 old_eff = meta.get('efficiency', 0.05)
@@ -526,6 +546,10 @@ class MacroEngine:
         scenario = self.s.current_scenario
         lv       = self.get_tech_level()
         macro    = self.s.macro
+
+        # ★ [최적화] 페이즈 하루 1회 계산 → state에 캐시
+        # apply_macro_sector_sensitivity가 종목마다 get_current_phase() 호출하는 것을 방지
+        self.s._cached_phase = self.get_current_phase()
 
         # ── GRI 히스토리 20일 유지 ────────────────
         hist = getattr(self.s, '_gri_history_20', [])
@@ -1004,7 +1028,10 @@ class MacroEngine:
 
         # LV 밴드: 너무 빠르거나 느린 성장 완화
         # 연 최대 성장률 상한 (LV별 기술 혁신 한계)
-        _lv_cap = {1: 0.0005, 2: 0.0006, 3: 0.0005, 4: 0.0003}.get(lv, 0.0004)
+        # ★ [수정] LV2·LV3 GRI 성장 캡 상향
+        # LV별 기준시총 증가율 수정(LV3=2%)과 함께 GRI 장기 안정화
+        # LV3 기존 0.0005 = 연 12.7% → LV3 기준시총 2% 차감 후 실질 성장 ~10%
+        _lv_cap = {1: 0.0005, 2: 0.0007, 3: 0.0007, 4: 0.0005}.get(lv, 0.0004)
         daily_rate = max(-0.0008, min(_lv_cap, _cycle_rate))
 
         return self.s.gri * (1 + daily_rate)
@@ -1080,7 +1107,8 @@ class MacroEngine:
         # ★ market.py sector_adj에서 담당 → 여기서 제거 (중복 방지)
 
         # ── ★ 페이즈별 섹터 계수 적용 (감쇠 포함) ──────────────────────────
-        phase = self.get_current_phase()
+        # ★ [최적화] 캐시된 페이즈 사용 (update_macro_logic에서 하루 1회 갱신)
+        phase = getattr(self.s, '_cached_phase', None) or self.get_current_phase()
         phase_coeff = PHASE_SECTOR_COEFF.get(phase, {})
         raw_coeff   = phase_coeff.get(ind, 0.0)
 
@@ -1486,7 +1514,7 @@ class MacroEngine:
         elif _semi_boom.get('phase') == '진행중' and _semi_boom.get('type') == '수출호황':
             semi_dir = 1.012
         elif _semi_war.get('region') == '동남아' and _semi_war.get('phase') == '진행중':
-            semi_dir = 0.970
+            semi_dir = 0.993  # ★ [수정] 0.970→0.993 (매일 -3%→-0.7%, 연 -22% 수준)
         elif _semi_war.get('region') == '동남아' and _semi_war.get('phase') == '종전':
             semi_dir = 1.008
         else:
@@ -1515,10 +1543,12 @@ class MacroEngine:
         _max_daily_drop = semi * _max_daily_drop_pct
         raw_next = max(semi - _max_daily_drop, raw_next)
 
-        # ★ SOX 페이즈 하한선 (100 박스 방지)
-        # 페이즈 목표값의 1%를 절대 하한으로 설정
-        # (LV1A 목표 500 → 하한 5, LV2B 목표 15000 → 하한 150)
-        sox_floor = max(100.0, sox_long_target * 0.01)
+        # ★ SOX 페이즈 하한선
+        # 전쟁 중: 페이즈 목표의 30% (현실 최악 -60% 수준)
+        # 평시: 페이즈 목표의 5% (자연 침체 하한)
+        _war_active = getattr(self.s, 'war_event', {}).get('phase') == '진행중'
+        _sox_floor_ratio = 0.30 if _war_active else 0.05
+        sox_floor = max(100.0, sox_long_target * _sox_floor_ratio)
         macro['semi_index'] = max(sox_floor, min(sox_cap, raw_next))
 
     # ─────────────────────────────────────────────

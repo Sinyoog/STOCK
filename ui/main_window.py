@@ -586,6 +586,23 @@ class StockHTS(QMainWindow):
             del self.my_portfolio[name]
             s.daily_news.append(f"💀 [포트폴리오] {name} 상장폐지로 보유 주식이 소모되었습니다.")
 
+        # ★ 배당기 지급 (매년 4월 첫 거래일)
+        for stock in s.stocks:
+            dps = stock['meta'].get('div_ready', 0)
+            if dps <= 0:
+                continue
+            name = stock['meta']['c_name']
+            port = self.my_portfolio.get(name)
+            if port:
+                qty = self._qty(port)
+                earned = dps * qty
+                self.my_cash += earned
+                if not s.silent_mode:
+                    s.daily_news.append(
+                        f"💰 [배당 입기] {name} 참배 주당 {dps:,}원 × {qty:,}츰 = {earned:,}원 입금"
+                    )
+            stock['meta']['div_ready'] = 0  # 지급 처리 완료
+
         # 구독 자동 연장 체크
         curr_now  = s.current_date.date()
         bill_date = s.next_billing_date
@@ -2331,6 +2348,16 @@ class StockHTS(QMainWindow):
         buffett_str  = f"{buffett:.1f}%"
         buffett_icon = "🟢 저평가" if buffett < 80 else ("🟡 적정" if buffett < 100 else ("🟠 고평가" if buffett < 130 else "🔴 버블"))
 
+        # 배당 정보
+        dps       = m.get('div_per_share', 0)
+        div_yield = m.get('div_yield', 0.0)
+        if dps > 0:
+            div_str  = f"{dps:,}원 (수익률 {div_yield:.2f}%)"
+            div_icon = "🟢" if div_yield >= 3 else ("🟡" if div_yield >= 1 else "⚪")
+        else:
+            div_str  = "미지급"
+            div_icon = "⚪"
+
         # 스크롤 위치 저장 — setHtml은 Qt가 맨 위로 리셋하므로 복원 필요 O(1)
         _sb = self.report_panel.verticalScrollBar()
         _prev_scroll = _sb.value()
@@ -2377,6 +2404,10 @@ class StockHTS(QMainWindow):
             52주 신고가: {int(high_52w):,}원{high_badge}<br/>
             52주 신저가: {int(low_52w):,}원{low_badge}<br/>
             버핏 지수&nbsp;&nbsp;: {buffett_str} {buffett_icon}</p>
+            <hr style='border: 0.5px solid #333;'/>
+            <p style='font-size:13px;'><b>[배당 정보]</b><br/>
+            주당배당금: {div_icon} {div_str}<br/>
+            전년도 기준 / 매년 4월 지급</p>
         </div>""")
         _sb.setValue(_prev_scroll)  # 스크롤 위치 복원 O(1)
 
